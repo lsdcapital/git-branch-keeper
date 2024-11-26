@@ -30,18 +30,18 @@ def load_config(config_file: Optional[str] = None) -> Dict[str, Any]:
             return {}
 
     # Look for config in current directory
-    if os.path.exists("gitclean.json"):
+    if os.path.exists("git-branch-keeper.json"):
         try:
-            with open("gitclean.json") as f:
+            with open("git-branch-keeper.json") as f:
                 config = json.load(f)
-            print("Loaded config from gitclean.json")
+            print("Loaded config from git-branch-keeper.json")
             return config
         except Exception:
             pass
 
     # Look for config in home directory
     home = os.path.expanduser("~")
-    home_config = os.path.join(home, ".gitclean.json")
+    home_config = os.path.join(home, ".git-branch-keeper.json")
     if os.path.exists(home_config):
         try:
             with open(home_config) as f:

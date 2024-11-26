@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -44,8 +45,8 @@ class BranchKeeper:
             verbose: bool = False,
             stale_days: int = 30,
             prune_remote: bool = False,
-            default_branch: str = "main",
-            ignore_branches: Optional[List[str]] = None,
+            protected_branches: Optional[List[str]] = None,
+            ignore_patterns: Optional[List[str]] = None,
             config: Optional[Dict] = None,
             force_mode: bool = False,
             status_filter: str = "all"
@@ -55,8 +56,8 @@ class BranchKeeper:
         self.verbose = verbose
         self.stale_days = stale_days
         self.prune_remote = prune_remote
-        self.default_branch = default_branch
-        self.ignore_branches = ignore_branches or []
+        self.protected_branches = protected_branches or ["main", "master"]
+        self.ignore_patterns = ignore_patterns or []
         self.repo = self._get_repo()
         self.main_branch = self._get_main_branch()
         self.stats = {
@@ -121,17 +122,24 @@ class BranchKeeper:
     def _get_main_branch(self):
         """Determine the main branch name."""
         try:
-            # Check if default_branch exists
-            if self.default_branch in [ref.name for ref in self.repo.refs]:
-                return self.default_branch
-            # Try common main branch names
-            for name in ["main", "master"]:
+            # Get protected branches from config or use defaults
+            protected = self.config.get("protected_branches", ["main", "master"])
+            
+            # Try each protected branch name
+            for name in protected:
                 if name in [ref.name for ref in self.repo.refs]:
                     return name
-            return self.default_branch
+            
+            # If none found, return the first protected branch
+            return protected[0]
         except Exception as e:
             self.debug(f"Error determining main branch: {e}")
-            return self.default_branch
+            return "main"
+
+    def _is_protected_branch(self, branch_name: str) -> bool:
+        """Check if a branch is protected."""
+        protected = self.config.get("protected_branches", ["main", "master"])
+        return branch_name in protected
 
     def debug(self, message: str):
         """Print debug message if verbose mode is enabled."""
@@ -192,6 +200,11 @@ class BranchKeeper:
         except Exception as e:
             self.debug(f"Error checking PR status: {e}")
             return False
+
+    def _should_ignore_branch(self, branch_name: str) -> bool:
+        """Check if a branch should be ignored based on ignore patterns."""
+        patterns = self.config.get("ignore_patterns", [])
+        return any(fnmatch(branch_name, pattern) for pattern in patterns)
 
     def delete_branch(self, branch_name: str, reason: str) -> bool:
         """
@@ -273,9 +286,9 @@ class BranchKeeper:
             if branch == current:
                 self.stats["active"] += 1
                 continue
-            if branch == self.main_branch:
+            if self._is_protected_branch(branch):
                 continue
-            if branch in self.ignore_branches:
+            if self._should_ignore_branch(branch):
                 continue
 
             # Get branch info

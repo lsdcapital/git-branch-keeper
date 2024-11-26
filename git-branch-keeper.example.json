@@ -1,0 +1,12 @@
+{
+    "protected_branches": ["main", "master", "dev"],
+    "ignore_patterns": [
+        "develop",
+        "staging",
+        "release/*",
+        "feature/*",
+        "hotfix/*"
+    ],
+    "stale_days": 30,
+    "github_token": "your-github-token-here"
+}

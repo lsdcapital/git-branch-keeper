@@ -1,1 +1,44 @@
-__pycache__
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Local development settings
+.env
+.env.local
+
+# Config files
+config.local.py
+config.dev.py
+config.prod.py
+*.config.json
+*.config.yaml
+*.config.yml
+git-branch-keeper.json
+.git-branch-keeper.json
+!git-branch-keeper.example.json

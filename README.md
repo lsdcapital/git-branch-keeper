@@ -75,26 +75,50 @@ git-branch-keeper --status merged --dry-run
 
 ## Configuration
 
-You can configure git-branch-keeper using a JSON configuration file. Create a file named `gitclean.json` in your repository or home directory:
+The tool can be configured using a JSON configuration file. By default, it looks for:
+1. A file specified via command line argument
+2. `git-branch-keeper.json` in the current directory
+3. `.git-branch-keeper.json` in your home directory
+
+Copy the example configuration file to get started:
+
+```bash
+cp git-branch-keeper.example.json git-branch-keeper.json
+```
+
+### Configuration Options
 
 ```json
 {
-    "github_token": "your-github-token",
-    "stale_days": 30,
-    "ignore_branches": ["develop", "staging"],
-    "default_branch": "main"
+    "protected_branches": [                        // Branches that will never be modified
+        "main",
+        "master",
+        "dev"
+    ],
+    "ignore_patterns": [                          // Branch patterns to ignore (glob syntax)
+        "develop",                                // Exact match
+        "staging",                                // Exact match
+        "release/*",                              // All release branches
+        "feature/*",                              // All feature branches
+        "hotfix/*"                                // All hotfix branches
+    ],
+    "stale_days": 30,                            // Number of days before a branch is considered stale
+    "github_token": "your-github-token-here"      // GitHub personal access token (optional)
 }
 ```
 
-Or specify a custom config file:
+The `protected_branches` list specifies branches that will never be modified or deleted by the tool. By default, this includes "main" and "master". The GitHub token is optional and only required if you want to check for open pull requests before cleaning branches. The repository information is automatically detected from your git remote URL.
 
-```bash
-git-branch-keeper -c path/to/config.json
-```
+Branch patterns support glob syntax:
+- `*` matches any sequence of characters
+- `?` matches any single character
+- `[seq]` matches any character in seq
+- `[!seq]` matches any character not in seq
 
-### Environment Variables
-
-- `GITHUB_TOKEN`: GitHub API token for checking PR status
+For example:
+- `feature/*` matches all feature branches
+- `release/v?.?.*` matches release branches like "release/v1.2.3"
+- `hotfix-*` matches all hotfix branches
 
 ## Options
 
