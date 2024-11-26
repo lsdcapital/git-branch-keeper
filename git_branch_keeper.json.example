@@ -1,0 +1,10 @@
+{
+    "github_token": "your-github-token-here",
+    "stale_days": 30,
+    "ignore_branches": [
+        "develop",
+        "staging",
+        "production"
+    ],
+    "default_branch": "main"
+}
