@@ -1,5 +1,5 @@
 {
-    "protected_branches": ["main", "master", "dev"],
+    "protected_branches": ["main", "master"],
     "ignore_patterns": [
         "develop",
         "staging",

@@ -2,17 +2,22 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
 
 # Distribution / packaging
 dist/
 build/
 *.egg-info/
+.installed.cfg
+*.egg
 
 # Virtual environments
 venv/
 env/
 .env/
 .venv/
+ENV/
 
 # IDE specific files
 .idea/
