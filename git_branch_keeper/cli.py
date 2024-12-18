@@ -45,10 +45,26 @@ def create_parser() -> argparse.ArgumentParser:
         help="Filter branches by status"
     )
     parser.add_argument(
-        "--stale-days",
+        "--min-stale-days",
         type=int,
         default=30,
         help="Number of days before a branch is considered stale"
+    )
+    parser.add_argument(
+        "--bypass-github",
+        action="store_true",
+        help="Enable GitHub URL features without token (reduced functionality)"
+    )
+    parser.add_argument(
+        "--show",
+        choices=["local", "remote", "all"],
+        default="local",
+        help="Filter which branches to show: local (default), remote (remote-only), or all"
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Enable cleanup mode to actually delete branches. Without this flag, only status will be shown"
     )
     return parser
 
@@ -68,16 +84,26 @@ def main(args: Optional[List[str]] = None) -> int:
     keeper = BranchKeeper(
         interactive=not parsed_args.force,
         dry_run=parsed_args.dry_run,
+        min_stale_days=parsed_args.min_stale_days,
         verbose=parsed_args.verbose,
-        stale_days=parsed_args.stale_days,
         config=config,
         force_mode=parsed_args.force,
-        status_filter=parsed_args.status
+        status_filter=parsed_args.status,
+        bypass_github=parsed_args.bypass_github,
+        show_filter=parsed_args.show
     )
 
     try:
-        keeper.process_branches()
-        keeper.print_summary()
+        if parsed_args.force and not parsed_args.cleanup:
+            print("[yellow]Warning: --force has no effect without --cleanup[/yellow]")
+        
+        if parsed_args.force:
+            keeper.force_mode = True
+        
+        if parsed_args.cleanup:
+            keeper.cleanup()
+        else:
+            keeper.process_branches()
         return 0
     except KeyboardInterrupt:
         print("\nOperation cancelled by user")
