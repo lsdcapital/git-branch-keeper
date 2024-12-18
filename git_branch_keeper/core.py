@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import git
 import requests
 from rich.console import Console
+from rich.progress import Progress
 from rich.table import Table
 
 console = Console()
@@ -77,6 +78,10 @@ class BranchKeeper:
         }
         self.interrupted = False
         self._setup_github_api()
+        self._remote_refs_cache = None
+        self._branch_age_cache = {}
+        self._branch_merge_cache = {}
+        self._branch_sync_cache = {}
 
     def _setup_github_api(self):
         """Setup GitHub API access if possible."""
@@ -202,36 +207,53 @@ class BranchKeeper:
         return branch_name in self.protected_branches
 
     def _has_remote_branch(self, branch_name: str) -> bool:
-        """Check if a branch exists in the remote."""
+        """Check if a branch exists in the remote with caching."""
         try:
-            # Even in bypass mode, we want to check remote refs
-            # We just skip the API calls
-            remote_refs = [ref.name for ref in self.repo.remotes.origin.refs]
-            return f'origin/{branch_name}' in remote_refs
+            if self._remote_refs_cache is None:
+                refs = list(self.repo.remotes.origin.refs)
+                self._remote_refs_cache = [ref.name for ref in refs]
+                if self.verbose:
+                    print(f"Initialized remote refs cache with {len(self._remote_refs_cache)} refs")
+            
+            remote_ref = f"origin/{branch_name}"
+            exists = remote_ref in self._remote_refs_cache
+            
+            if self.verbose:
+                print(f"Looking for: {remote_ref}")
+                print(f"Found in remote refs: {exists}")
+            
+            return exists
+            
         except Exception as e:
-            self.debug(f"Error checking remote branch {branch_name}: {e}")
+            if self.verbose:
+                print(f"Error checking remote branch {branch_name}: {e}")
             return False
 
-    def _get_branch_status(self, branch, local_branches, remote_branches):
-        """Get status of a branch."""
+    def _get_branch_status(self, branch_name: str, local_branches, remote_branches) -> str:
+        """Get status of a branch with early exits."""
         try:
-            # Main branch and protected branches are always active
-            if branch == self.main_branch or self._is_protected_branch(branch):
+            # Quick checks first
+            if branch_name == self.main_branch or self._is_protected_branch(branch_name):
                 return "active"
             
-            # Check if branch is merged
-            if self._is_merged(branch):
-                return "merged"
+            if self._should_ignore_branch(branch_name):
+                return "ignored"
             
-            # Check if branch is stale
-            if self.min_stale_days > 0:
-                _, age_days = self._get_branch_age(branch)
-                if age_days >= self.min_stale_days:
-                    return "stale"
+            # Only check merge status if needed
+            if self.status_filter in ["merged", "all"]:
+                if self._is_merged(branch_name):
+                    return "merged"
+            
+            # Only check staleness if needed
+            if self.status_filter in ["stale", "all"]:
+                if self.min_stale_days > 0:
+                    age_days = self._get_branch_age(branch_name)
+                    if age_days >= self.min_stale_days:
+                        return "stale"
             
             return "active"
         except Exception as e:
-            self.debug(f"Error getting branch status for {branch}: {e}")
+            self.debug(f"Error getting branch status: {e}")
             return "unknown"
 
     def _should_process_branch(self, branch, status):
@@ -240,76 +262,67 @@ class BranchKeeper:
             return status in ["merged", "stale"]
         return status == self.status_filter
 
-    def _get_branch_age(self, branch_name: str) -> Tuple[datetime, int]:
-        """Get the age of a branch."""
+    def _get_branch_age(self, branch_name: str) -> int:
+        """Get the age of a branch in days."""
         try:
-            commit = self.repo.refs[branch_name].commit
-            commit_date = datetime.fromtimestamp(commit.committed_date)
-            age_days = (datetime.now() - commit_date).days
-            return commit_date, age_days
+            branch = self.repo.heads[branch_name]
+            commit_date = datetime.fromtimestamp(branch.commit.committed_date)
+            age = (datetime.now() - commit_date).days
+            return age
         except Exception as e:
-            self.debug(f"Error getting branch age for {branch_name}: {e}")
-            return datetime.now(), 0  # Return current time and 0 days as fallback
+            if self.verbose:
+                print(f"Error calculating age for {branch_name}: {e}")
+            return 0
 
     def _is_merged(self, branch_name: str) -> bool:
-        """Check if a branch is merged into main."""
+        """Check if a branch is merged into main with caching."""
         try:
+            if branch_name in self._branch_merge_cache:
+                return self._branch_merge_cache[branch_name]
+
             # Main branch is never considered merged
             if branch_name == self.main_branch:
+                self._branch_merge_cache[branch_name] = False
                 return False
 
             branch = self.repo.heads[branch_name]
             
-            # Always try to fetch first to get latest refs
-            try:
-                self.repo.remotes.origin.fetch()
-            except Exception as e:
-                self.debug(f"Error fetching from remote: {e}")
-
-            # Check if this branch's upstream is gone (was likely merged)
-            try:
-                tracking_branch = branch.tracking_branch()
-                if tracking_branch and tracking_branch.name not in [ref.name for ref in self.repo.remotes.origin.refs]:
-                    if self.verbose:
-                        self.debug(f"Branch {branch_name}'s upstream is gone (likely merged)")
-                    return True
-            except Exception as e:
-                self.debug(f"Error checking tracking branch: {e}")
-
             # First check if branch is merged into local main
             main = self.repo.heads[self.main_branch]
-            if self.repo.is_ancestor(branch.commit, main.commit):
-                if self.verbose:
-                    self.debug(f"Branch {branch_name} is merged into local main")
-                return True
-
+            is_merged = self.repo.is_ancestor(branch.commit, main.commit)
+            
             # Then check if branch is merged into remote main
-            try:
-                remote_main = self.repo.refs[f'origin/{self.main_branch}']
-                if self.repo.is_ancestor(branch.commit, remote_main.commit):
+            if not is_merged:
+                try:
+                    remote_main = self.repo.refs[f'origin/{self.main_branch}']
+                    is_merged = self.repo.is_ancestor(branch.commit, remote_main.commit)
+                    if is_merged and self.verbose:
+                        print(f"Branch {branch_name} is merged into remote main")
+                except Exception as e:
                     if self.verbose:
-                        self.debug(f"Branch {branch_name} is merged into remote main")
-                    return True
-            except Exception as e:
-                self.debug(f"Error checking remote main: {e}")
+                        print(f"Error checking remote main: {e}")
 
             if self.verbose:
                 # Log commit counts for debugging
-                behind_commits = list(self.repo.iter_commits(f'{branch.name}..{main.name}'))
-                ahead_commits = list(self.repo.iter_commits(f'{main.name}..{branch.name}'))
-                self.debug(f"Branch {branch_name} is {len(behind_commits)} commits behind and {len(ahead_commits)} commits ahead of local main")
+                behind_commits = list(self.repo.iter_commits(f'{branch_name}..{main.name}'))
+                ahead_commits = list(self.repo.iter_commits(f'{main.name}..{branch_name}'))
+                print(f"Branch {branch_name} is {len(behind_commits)} commits behind and {len(ahead_commits)} commits ahead of main")
                 
                 try:
-                    remote_behind = list(self.repo.iter_commits(f'{branch.name}..origin/{main.name}'))
-                    remote_ahead = list(self.repo.iter_commits(f'origin/{main.name}..{branch.name}'))
-                    self.debug(f"Branch {branch_name} is {len(remote_behind)} commits behind and {len(remote_ahead)} commits ahead of remote main")
+                    remote_behind = list(self.repo.iter_commits(f'{branch_name}..origin/{main.name}'))
+                    remote_ahead = list(self.repo.iter_commits(f'origin/{main.name}..{branch_name}'))
+                    print(f"Branch {branch_name} is {len(remote_behind)} commits behind and {len(remote_ahead)} commits ahead of remote main")
                 except Exception as e:
-                    self.debug(f"Error checking remote commit counts: {e}")
-            
-            return False
+                    if self.verbose:
+                        print(f"Error checking remote commit counts: {e}")
+
+            # Cache the result
+            self._branch_merge_cache[branch_name] = is_merged
+            return is_merged
 
         except Exception as e:
-            self.debug(f"Error checking if branch {branch_name} is merged: {e}")
+            if self.verbose:
+                print(f"Error checking if branch {branch_name} is merged: {e}")
             return False
 
     def _has_open_pr(self, branch_name: str) -> bool:
@@ -389,113 +402,125 @@ class BranchKeeper:
             console.print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
             return False
 
-    def _print_branch_table(self, local_branches):
+    def _print_branch_table(self, local_branches, progress=None):
         """Print table of branches with their status."""
-        # Set table title based on filter
-        title = {
-            "local": "Local Branches",
-            "remote": "Remote-Only Branches",
-            "all": "All Branches"
-        }[self.show_filter]
+        if self.verbose:
+            print("\n>>> Starting _print_branch_table")
         
-        table = Table(
-            "Branch",
-            "Last Commit Date",
-            "Age (days)",
-            "Status",
-            "Remote",
-            "Sync Status",
-            "PRs",
-            title=title,
-            title_style="bold",
-        )
+        table = Table(title="Local Branches", show_header=True, header_style="bold")
+        table.add_column("Branch", style="cyan")
+        table.add_column("Last Commit Date")
+        table.add_column("Age (days)")
+        table.add_column("Status")
+        table.add_column("Remote")
+        table.add_column("Sync Status")
+        table.add_column("PRs")
 
         branches_to_process = []
+        chunk_size = 20
         
-        # Get all remote branches if needed
-        remote_branches = set()
-        if self.show_filter in ["remote", "all"]:
-            remote_branches = set(self._get_remote_branches() or [])  # Ensure we have a set even if None is returned
-            self.debug(f"Remote branches to check: {remote_branches}")
+        # Get the GitHub repo URL from remote
+        remote_url = self.repo.remotes.origin.url
+        github_base_url = None
+        if 'github.com' in remote_url:
+            if remote_url.startswith('git@'):
+                # SSH format: git@github.com:org/repo.git
+                org_repo = remote_url.split(':')[1].replace('.git', '')
+                github_base_url = f"https://github.com/{org_repo}"
+            else:
+                # HTTPS format: https://github.com/org/repo.git
+                github_base_url = remote_url.replace('.git', '')
         
-        # Show local branches if requested
-        if self.show_filter in ["local", "all"]:
-            for branch in local_branches:
-                try:
-                    commit = self.repo.refs[branch].commit
-                    commit_date, age_days = self._get_branch_age(branch)
+        # Get all remote branches
+        remote_branches = self._get_remote_branches() or []
+        
+        for i in range(0, len(local_branches), chunk_size):
+            chunk = local_branches[i:i + chunk_size]
+            if self.verbose:
+                print(f"\n>>> Processing chunk {i//chunk_size + 1} ({len(chunk)} branches)")
+            
+            for branch_name in chunk:
+                if self.verbose:
+                    print(f"\n>>> Processing branch: {branch_name}")
+                
+                # Get branch status using the comprehensive check
+                status = self._get_branch_status(branch_name, local_branches, remote_branches)
+                age_days = self._get_branch_age(branch_name)
+                
+                if self.verbose:
+                    print(f"Status for {branch_name}: {status}")
                     
-                    if self.verbose:
-                        self.debug(f"Branch {branch} age: {age_days} days")
-
-                    remote_exists = self._has_remote_branch(branch)
-                    status = self._get_branch_status(branch, local_branches, remote_branches)
-                    sync_status = self._get_branch_sync_status(branch)
-                    
-                    if remote_exists and branch in remote_branches:
-                        remote_branches.discard(branch)  # Remove from remote set as we've handled it
-                    
-                    pr_count = self._get_incoming_prs(branch)
-                    
-                    # Create branch name with link if it has a remote
-                    branch_display = branch
-                    if self.github_repo and remote_exists:
-                        github_url = self._get_github_branch_url(branch, "tree")
-                        branch_display = f"[blue][link={github_url}]{branch}[/link][/blue]"
-                    
-                    # Create PR count with link if there are PRs
-                    pr_display = ""
-                    if self.bypass_github:
-                        pr_display = "[dim]disabled[/dim]"
-                    elif pr_count is not None:
-                        if pr_count > 0:
-                            github_url = self._get_github_branch_url(branch, "pulls")
-                            pr_display = f"[blue][link={github_url}]{pr_count}[/link][/blue]"
-                        else:
-                            pr_display = "0"
-
-                    # Add to process list if it matches criteria and is a local branch
-                    if (branch != self.repo.active_branch.name and 
-                        self._should_process_branch(branch, status) and 
-                        branch in local_branches):
-                        branches_to_process.append((branch, status))
-
-                    # Add row to table with yellow highlight for branches that could be cleaned up
-                    style = "yellow" if branch != self.repo.active_branch.name and self._should_process_branch(branch, status) else None
-                    table.add_row(
-                        branch_display + (" *" if branch == self.repo.active_branch.name else ""),
-                        commit_date.strftime("%Y-%m-%d %H:%M"),
-                        str(age_days),
-                        status,
-                        "✓" if remote_exists else "✗",
-                        sync_status,
-                        pr_display,
-                        style=style
+                is_merged = status == "merged"
+                sync_status = self._get_branch_sync_status(branch_name)
+                has_remote = sync_status != "local-only" and sync_status != "merged-remote-deleted"
+                
+                # Only check PRs if branch isn't merged and isn't ignored
+                pr_count = 0
+                if status not in ["merged", "ignored"] and hasattr(self, 'github_api_url'):
+                    pr_count = self._get_pr_count(branch_name)
+                
+                # Create branch name with link if it has a remote
+                branch_display = branch_name
+                if github_base_url and has_remote:
+                    branch_url = f"{github_base_url}/tree/{branch_name}"
+                    branch_display = f"[blue][link={branch_url}]{branch_name}[/link][/blue]"
+                
+                # Create PR count with link if there are PRs
+                pr_display = ""
+                if pr_count > 0 and github_base_url:
+                    pr_url = f"{github_base_url}/pulls?q=is:pr+is:open+head:{branch_name}"
+                    pr_display = f"[blue][link={pr_url}]{pr_count}[/link][/blue]"
+                elif self.bypass_github:
+                    pr_display = "[dim]disabled[/dim]"
+                
+                # Determine if branch would be cleaned up
+                would_clean = (
+                    branch_name != self.repo.active_branch.name and  # Don't clean current branch
+                    branch_name in local_branches and  # Must be a local branch
+                    not self._is_protected_branch(branch_name) and  # Not protected
+                    not self._should_ignore_branch(branch_name) and  # Not ignored
+                    (
+                        (self.status_filter == "merged" and is_merged) or  # Merged filter
+                        (self.status_filter == "stale" and status == "stale") or  # Stale filter
+                        (self.status_filter == "all" and (is_merged or status == "stale"))  # All filter
                     )
+                )
+                
+                # Add row to table with conditional styling
+                row_style = "yellow" if would_clean else None
+                table.add_row(
+                    branch_display + (" *" if branch_name == self.repo.active_branch.name else ""),
+                    self._get_last_commit_date(branch_name),
+                    str(age_days),
+                    status,
+                    "✓" if has_remote else "✗",
+                    sync_status,
+                    pr_display,
+                    style=row_style
+                )
+                
+                if progress is not None:
+                    progress.update(progress.tasks[1].id, advance=1)
+                
+                if would_clean:
+                    branches_to_process.append(branch_name)
 
-                except Exception as e:
-                    self.debug(f"Error processing branch {branch}: {e}")
-                    continue
-
-        # Always print the table even if no branches to process
-        console.print("")
+        # Print the table
         console.print(table)
+        
+        # Print legend
         console.print("\n✓ = Has remote branch  ✗ = Local only")
         console.print("↑ = Unpushed commits  ↓ = Commits to pull")
-        if len(branches_to_process) > 0:
-            if self.show_filter == "remote":
-                console.print("[yellow]Note: Remote branches cannot be cleaned up directly[/yellow]")
-            else:
-                console.print("* = Current branch  [yellow]Yellow[/yellow] = Would be cleaned up")
-        if self.min_stale_days > 0:
-            console.print("")  # Add newline before stale days message
-            console.print(f"Branches older than {self.min_stale_days} days are marked as stale")
-
-        console.print("")  # Single empty line before summary
+        console.print("* = Current branch  Yellow = Would be cleaned up")
+        console.print(f"\nBranches older than {self.min_stale_days} days are marked as stale\n")
+        
         return branches_to_process
 
     def process_branches(self, cleanup_enabled=False):
         """Process all branches and handle deletions."""
+        if self.verbose:
+            console.print("\n[yellow]Starting branch processing...[/yellow]")
+        
         if cleanup_enabled and self.force_mode and self.status_filter == "all":
             console.print("[red]Error: Force mode requires specific status (merged or stale)[/red]")
             return
@@ -510,36 +535,55 @@ class BranchKeeper:
         if current not in local_branches:
             local_branches.append(current)
 
+        # Debug output only in verbose mode
         if self.verbose:
-            self.debug(f"Found branches: {local_branches}")
-            self.debug(f"Current branch: {current}")
+            console.print(f"\n[yellow]Found {len(local_branches)} local branches[/yellow]")
+            console.print(f"[yellow]Current branch: {current}[/yellow]")
+            
+            # Debug remote refs
+            console.print("\n[yellow]Fetching remote refs...[/yellow]")
+            remote_refs = list(self.repo.remotes.origin.refs)
+            console.print(f"[yellow]Found {len(remote_refs)} remote refs[/yellow]")
+            console.print("[yellow]First 5 remote refs:[/yellow]")
+            for ref in remote_refs[:5]:
+                console.print(f"  {ref.name}")
+
             self.debug(f"Protected branches: {self.protected_branches}")
             self.debug(f"Ignore patterns: {self.ignore_patterns}")
-
-        # Get remote branches (if any)
-        remote_branches = self._get_remote_branches()
-        if remote_branches is None:
-            remote_branches = []
-
-        # Show branch table and get branches to process
-        if self.show_filter == "remote" and not remote_branches:
-            console.print("[yellow]No remote branches found[/yellow]")
-            return
-
-        branches_to_process = self._print_branch_table(local_branches) or []  # Ensure we have a list even if None is returned
         
-        # Print summary of branch cleanup operation
-        console.print("Summary:")
+            remote_branches = self._get_remote_branches()
+            branches_to_process = self._print_branch_table(local_branches)
+        else:
+            with Progress(transient=True) as progress:
+                # First progress bar for fetching
+                fetch_task = progress.add_task("[cyan]Fetching from origin...", total=1)
+                remote_branches = self._get_remote_branches()
+                progress.update(fetch_task, completed=1)
+                
+                if remote_branches is None:
+                    remote_branches = []
+
+                if self.show_filter == "remote" and not remote_branches:
+                    console.print("[yellow]No remote branches found[/yellow]")
+                    return
+
+                # Second progress bar for processing
+                process_task = progress.add_task("[cyan]Processing branches...", total=len(local_branches))
+                branches_to_process = self._print_branch_table(local_branches, progress)
+                progress.update(process_task, completed=len(local_branches))
+
+        # Print summary
+        console.print("\nSummary:")
         if self.show_filter == "local":
             console.print(f"- Found {len(local_branches)} local branch(es)")
         elif self.show_filter == "remote":
             console.print(f"- Found {len(remote_branches)} remote branch(es)")
         else:  # all
             console.print(f"- Found {len(local_branches)} local and {len(remote_branches)} remote branch(es)")
-            
+        
         if len(branches_to_process) > 0:
-            merged_count = sum(1 for _, status in branches_to_process if status == "merged")
-            stale_count = sum(1 for _, status in branches_to_process if status == "stale")
+            merged_count = sum(1 for branch in branches_to_process if self._is_merged(branch))
+            stale_count = len(branches_to_process) - merged_count
             
             if self.status_filter == "all":
                 if merged_count > 0 and stale_count > 0:
@@ -552,31 +596,13 @@ class BranchKeeper:
                 console.print(f"- Found {len(branches_to_process)} {self.status_filter} branch(es) that would be cleaned up")
         else:
             console.print("No branches need cleanup!")
-        
-        # Only process branches if cleanup is enabled
+
+        # Handle cleanup if enabled
         if cleanup_enabled and branches_to_process:
-            # In force mode, proceed without confirmation
-            # Otherwise, if interactive, ask for confirmation first
-            if self.force_mode or not self.interactive:
-                console.print("\n[bold]Cleaning up branches:[/bold]")
-                for branch, reason in branches_to_process:
-                    self.delete_branch(branch, reason)
-                console.print("\nCleanup complete!")
+            if self.force_mode:
+                self._delete_branches(branches_to_process)
             else:
-                # Interactive mode - ask for confirmation
-                console.print("\n[bold]Cleaning up branches:[/bold]")
-                branches_deleted = False
-                for branch, reason in branches_to_process:
-                    if console.input(f"Delete {branch} ({reason})? [y/N] ").lower().startswith('y'):
-                        self.delete_branch(branch, reason)
-                        branches_deleted = True
-                
-                if branches_deleted:
-                    console.print("\nCleanup complete!")
-                else:
-                    console.print("\nNo branches were deleted.")
-        
-        console.print("")  # Add empty line at the end
+                self._confirm_and_delete_branches(branches_to_process)
 
     def cleanup(self):
         """Clean up branches."""
@@ -635,13 +661,38 @@ class BranchKeeper:
     def _get_branch_sync_status(self, branch_name: str) -> str:
         """Get the sync status between local and remote branch."""
         try:
+            # Check if branch is merged first
+            if self._is_merged(branch_name):
+                if self.verbose:
+                    print(f"\n>>> _get_branch_sync_status called for: {branch_name}")
+                    print(f"Branch {branch_name} is merged, checking if remote exists...")
+                # If branch is merged but remote still exists, show sync status
+                if self._has_remote_branch(branch_name):
+                    if self.verbose:
+                        print("Remote exists, checking sync status...")
+                    return self._check_sync_status(branch_name)
+                else:
+                    if self.verbose:
+                        print("Remote is gone (normal for merged branches)")
+                    return "merged-remote-deleted"
+            
+            # Not merged, check remote as normal
             if not self._has_remote_branch(branch_name):
                 return "local-only"
+            
+            return self._check_sync_status(branch_name)
+                
+        except Exception as e:
+            if self.verbose:
+                print(f"Error getting sync status for {branch_name}: {e}")
+            return "unknown"
 
+    def _check_sync_status(self, branch_name: str) -> str:
+        """Helper method to check sync status between local and remote."""
+        try:
             local_branch = self.repo.refs[branch_name]
             remote_ref = self.repo.refs[f"origin/{branch_name}"]
             
-            # Get the counts of commits ahead and behind
             commits_behind = list(self.repo.iter_commits(f'{branch_name}..origin/{branch_name}'))
             commits_ahead = list(self.repo.iter_commits(f'origin/{branch_name}..{branch_name}'))
             
@@ -656,9 +707,9 @@ class BranchKeeper:
                 return f"behind ↓{behind_count}"
             else:
                 return "synced"
-        except Exception as e:
-            self.debug(f"Error getting sync status for {branch_name}: {e}")
-            return "unknown"
+                
+        except (IndexError, KeyError) as e:
+            return "remote-only"
 
     def _get_remote_branches(self):
         """Get list of all remote branches."""
@@ -720,38 +771,83 @@ class BranchKeeper:
             self.debug(f"Error getting branch details for {branch}: {e}")
             return None
 
-    def _get_incoming_prs(self, branch_name: str) -> int:
-        """Get count of open PRs for this branch."""
+    def _get_pr_count(self, branch_name: str) -> int:
+        """Get the number of PRs for a branch."""
+        # Skip PR check if branch is merged
+        if self._is_merged(branch_name):
+            return 0
+
         if self.bypass_github or not (self.github_api_url and self.github_token):
+            if self.verbose:
+                self.debug(f"Skipping PR check for {branch_name} - GitHub integration disabled")
             return 0
 
         try:
-            headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            url = f"{self.github_api_url}/pulls"
+            # Get the repo name from the remote URL
+            remote_url = self.repo.remotes.origin.url
+            if self.verbose:
+                self.debug(f"Remote URL: {remote_url}")
             
+            # Extract org and repo from URL (handles both HTTPS and SSH formats)
+            org_repo = remote_url.split(':')[-1].split('.git')[0]
+            if '/' in org_repo:
+                org, repo = org_repo.split('/')[-2:]
+            else:
+                org = self.github_org
+                repo = org_repo
+            
+            if self.verbose:
+                self.debug(f"Checking PRs for {org}/{repo} branch: {branch_name}")
+
             # Check for PRs where this branch is the source (head)
             params = {
-                "head": f"{self.github_repo.split('/')[0]}:{branch_name}",
+                "head": f"{org}:{branch_name}",
                 "state": "open"
             }
-            response = requests.get(url, headers=headers, params=params)
+            headers = {"Authorization": f"token {self.github_token}"}
+            response = requests.get(f"{self.github_api_url}/pulls", params=params, headers=headers)
             response.raise_for_status()
             outgoing_prs = len(response.json())
             
-            # Check for PRs where this branch is the target (base)
-            params = {
-                "base": branch_name,
-                "state": "open"
-            }
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            incoming_prs = len(response.json())
+            if self.verbose:
+                self.debug(f"Found {outgoing_prs} outgoing PRs for {branch_name}")
+                if outgoing_prs > 0:
+                    prs = response.json()
+                    for pr in prs:
+                        self.debug(f"PR #{pr['number']}: {pr['html_url']}")
+            
+            # Only check incoming PRs for protected branches
+            incoming_prs = 0
+            if self._is_protected_branch(branch_name):
+                params = {
+                    "base": branch_name,
+                    "state": "open"
+                }
+                response = requests.get(f"{self.github_api_url}/pulls", params=params, headers=headers)
+                response.raise_for_status()
+                incoming_prs = len(response.json())
+                
+                if self.verbose:
+                    self.debug(f"Found {incoming_prs} incoming PRs for protected branch {branch_name}")
+                    if incoming_prs > 0:
+                        prs = response.json()
+                        for pr in prs:
+                            self.debug(f"Incoming PR #{pr['number']}: {pr['html_url']}")
             
             return outgoing_prs + incoming_prs
             
         except Exception as e:
             self.debug(f"Error checking PRs for {branch_name}: {e}")
+            if self.verbose:
+                self.debug(f"Full error: {str(e)}")
             return 0
+
+    def _get_last_commit_date(self, branch_name: str) -> str:
+        """Get the formatted date of the last commit on a branch."""
+        try:
+            branch = self.repo.heads[branch_name]
+            commit_date = datetime.fromtimestamp(branch.commit.committed_date)
+            return commit_date.strftime("%Y-%m-%d %H:%M")
+        except Exception as e:
+            print(f"Error getting last commit date for {branch_name}: {e}")
+            return "unknown"
