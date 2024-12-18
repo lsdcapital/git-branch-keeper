@@ -18,6 +18,23 @@ class DisplayService:
         self.repo = repo
         self.branch_status_service = branch_status_service
         
+        # Filter branches based on status_filter
+        status_filter = self.branch_status_service.config.get('status_filter') if self.branch_status_service else None
+        if status_filter and status_filter != 'all':
+            filtered_data = []
+            for branch in branches_data:
+                if isinstance(branch, dict):
+                    if branch['status'] == status_filter:
+                        filtered_data.append(branch)
+                else:  # BranchDetails
+                    if branch.status.value == status_filter:
+                        filtered_data.append(branch)
+            branches_data = filtered_data
+        
+        if not branches_data:
+            console.print("No branches match the filter criteria")
+            return []
+        
         print("")
         table = Table(show_header=True, header_style="bold")
         table.add_column("Branch")
@@ -106,35 +123,38 @@ class DisplayService:
         # Print the table
         console.print(table)
         
-        # Print legend with aligned columns using fixed width
-        console.print("\nLegend:")
-        console.print("✔️ = Has remote branch     ✗ = Local only")
-        console.print("↑ = Unpushed commits      ↓ = Commits to pull")
-        console.print("* = Current branch        +M = Modified files")
-        console.print("+U = Untracked files      +S = Staged files")
-        console.print("Yellow = Would be cleaned up")
-        
-        # Print summary of branch statuses
-        if isinstance(branches_data[0], BranchDetails):
-            active_count = sum(1 for b in branches_data if b.status == BranchStatus.ACTIVE)
-            stale_count = sum(1 for b in branches_data if b.status == BranchStatus.STALE)
-            merged_count = sum(1 for b in branches_data if b.status == BranchStatus.MERGED)
-        else:
-            active_count = sum(1 for b in branches_data if b['status'] == 'active')
-            stale_count = sum(1 for b in branches_data if b['status'] == 'stale')
-            merged_count = sum(1 for b in branches_data if b['status'] == 'merged')
-        
-        console.print("\nSummary:")
-        console.print(f"Active branches: {active_count}")
-        console.print(f"Stale branches: {stale_count}")
-        console.print(f"Merged branches: {merged_count}")
-        console.print(f"Total branches: {len(branches_data)}")
-        
-        # Print merge detection stats if available
-        if self.branch_status_service and hasattr(self.branch_status_service.git_service, 'merge_detection_stats'):
-            console.print("\nMerge Detection Stats:")
-            stats = self.branch_status_service.git_service.get_merge_stats()
-            console.print(stats)
+        # Only show legend and summary in verbose mode
+        if self.verbose:
+            # Print legend with aligned columns using fixed width
+            console.print("\nLegend:")
+            console.print("✔️ = Has remote branch     ✗ = Local only")
+            console.print("↑ = Unpushed commits      ↓ = Commits to pull")
+            console.print("* = Current branch        +M = Modified files")
+            console.print("+U = Untracked files      +S = Staged files")
+            console.print("Yellow = Would be cleaned up")
+            console.print("Cyan = Protected branch")
+            
+            # Print summary of branch statuses
+            if isinstance(branches_data[0], BranchDetails):
+                active_count = sum(1 for b in branches_data if b.status == BranchStatus.ACTIVE)
+                stale_count = sum(1 for b in branches_data if b.status == BranchStatus.STALE)
+                merged_count = sum(1 for b in branches_data if b.status == BranchStatus.MERGED)
+            else:
+                active_count = sum(1 for b in branches_data if b['status'] == 'active')
+                stale_count = sum(1 for b in branches_data if b['status'] == 'stale')
+                merged_count = sum(1 for b in branches_data if b['status'] == 'merged')
+            
+            console.print("\nSummary:")
+            console.print(f"Active branches: {active_count}")
+            console.print(f"Stale branches: {stale_count}")
+            console.print(f"Merged branches: {merged_count}")
+            console.print(f"Total branches: {len(branches_data)}")
+            
+            # Print merge detection stats if available
+            if self.branch_status_service and hasattr(self.branch_status_service.git_service, 'merge_detection_stats'):
+                console.print("\nMerge Detection Stats:")
+                stats = self.branch_status_service.git_service.get_merge_stats()
+                console.print(stats)
         
         return branches_to_process
 

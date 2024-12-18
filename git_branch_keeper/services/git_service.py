@@ -122,7 +122,7 @@ class GitService:
         try:
             commit = self.repo.refs[branch_name].commit
             dt = datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%d")
         except Exception as e:
             if self.verbose:
                 self.debug(f"Error getting last commit date for {branch_name}: {e}")
@@ -211,11 +211,17 @@ class GitService:
 
     def is_merged_to_main(self, branch_name: str, main_branch: str = 'main') -> bool:
         """Check if a branch is merged into main branch by checking commit history."""
+        # Check cache first
+        cache_key = f"{branch_name}:{main_branch}"
+        if cache_key in self._merge_status_cache:
+            return self._merge_status_cache[cache_key]
+
         try:
             # Skip if it's a tag
             if self.is_tag(branch_name):
                 if self.verbose:
                     self.debug(f"Skipping tag: {branch_name}")
+                self._merge_status_cache[cache_key] = False
                 return False
 
             # Method 1: Fast merge detection using rev-list
@@ -231,6 +237,7 @@ class GitService:
                     if self.verbose:
                         self.debug(f"[Method 1] Branch {branch_name} is MERGED - no commits in main that aren't in branch")
                     self.merge_detection_stats['method1'] += 1
+                    self._merge_status_cache[cache_key] = True
                     return True
             except git.exc.GitCommandError as e:
                 if self.verbose:
@@ -245,6 +252,7 @@ class GitService:
                     if self.verbose:
                         self.debug(f"[Method 2] Branch {branch_name} is MERGED - branch is ancestor of main")
                     self.merge_detection_stats['method2'] += 1
+                    self._merge_status_cache[cache_key] = True
                     return True
                 else:
                     if self.verbose:
@@ -261,51 +269,56 @@ class GitService:
                 full_name = branch_name
                 org_name = self.repo.remotes.origin.url.split('/')[-2].split(':')[-1]
                 feature_name = branch_name.split('/')[-1]
-                ticket_number = next((part for part in branch_name.split('/') if part.startswith('DEV-')), None)
                 
-                # Build search patterns
+                # Build search patterns - only use strict patterns
                 patterns = [
-                    full_name,  # Full branch name
-                    feature_name,  # Just the feature name
-                    f"/{feature_name}",  # Path ending with feature name
-                    f"from {org_name}/{full_name}",  # Full PR merge pattern
-                    f"from {org_name}/feature/{ticket_number}" if ticket_number else None,  # PR merge with ticket
-                    ticket_number if ticket_number else None,  # Just the ticket number
                     f"Merge branch '{branch_name}'",  # Direct merge message
-                    f"Merge pull request.*from.*{feature_name}",  # PR merge with feature name
+                    f"Merge pull request .* from {org_name}/{branch_name}",  # Full PR merge pattern
+                    f"Merge pull request .* from {org_name}:{branch_name}",  # Alternative PR merge pattern
                 ]
-                
-                # Remove None values
-                patterns = [p for p in patterns if p]
                 
                 if self.verbose:
                     self.debug(f"[Method 3] Searching for patterns in commit messages: {patterns}")
                 
                 for pattern in patterns:
-                    # Look for both merge commits and squash commits
-                    for search_type in ['--merges', '--no-merges']:
-                        merge_commits = self.repo.git.log(
-                            main_branch,
-                            search_type,  # Try both merge commits and non-merge commits (squash merges)
-                            '--grep', pattern,  # Look for pattern in commit message
-                            '--format=%H',  # Only show commit hashes
-                            n=1  # Stop after finding one
-                        )
-                        
-                        if merge_commits:
-                            if self.verbose:
-                                self.debug(f"[Method 3] Branch {branch_name} is MERGED - found {search_type} commit matching '{pattern}'")
-                            self.merge_detection_stats['method3'] += 1
-                            return True
+                    # Only look for merge commits, not squash commits
+                    merge_commits = self.repo.git.log(
+                        main_branch,
+                        '--merges',  # Only look at merge commits
+                        '--grep', pattern,  # Look for pattern in commit message
+                        '--format=%H',  # Only show commit hashes
+                        n=1  # Stop after finding one
+                    )
+                    
+                    if merge_commits:
+                        if self.verbose:
+                            self.debug(f"[Method 3] Branch {branch_name} is MERGED - found merge commit matching '{pattern}'")
+                        self.merge_detection_stats['method3'] += 1
+                        self._merge_status_cache[cache_key] = True
+                        return True
 
-                # Method 4: Check if all commits from branch exist in main
+                # Method 4: Check if all commits from branch exist in main AND the branch tip is an ancestor
                 try:
+                    # First check if branch tip is an ancestor of main
+                    try:
+                        self.repo.git.merge_base('--is-ancestor', branch_name, main_branch)
+                        # If we get here, it is an ancestor
+                        if self.verbose:
+                            self.debug(f"[Method 4] Branch tip of {branch_name} is an ancestor of {main_branch}")
+                    except git.exc.GitCommandError:
+                        if self.verbose:
+                            self.debug(f"[Method 4] Branch tip of {branch_name} is not an ancestor of {main_branch}")
+                        self._merge_status_cache[cache_key] = False
+                        return False
+
+                    # Then check if all commits exist
                     branch_commits = set(self.repo.git.rev_list(branch_name).split())
                     main_commits = set(self.repo.git.rev_list(main_branch).split())
                     if branch_commits.issubset(main_commits):
                         if self.verbose:
-                            self.debug(f"[Method 4] Branch {branch_name} is MERGED - all commits exist in main")
+                            self.debug(f"[Method 4] Branch {branch_name} is MERGED - all commits exist in main and tip is ancestor")
                         self.merge_detection_stats['method4'] += 1
+                        self._merge_status_cache[cache_key] = True
                         return True
                     else:
                         if self.verbose:
@@ -316,14 +329,17 @@ class GitService:
 
                 if self.verbose:
                     self.debug(f"[Method 3] No merge commits found for {branch_name} in {main_branch}")
+                self._merge_status_cache[cache_key] = False
                 return False
 
             except Exception as e:
                 if self.verbose:
                     self.debug(f"[Method 3] Error checking merge commits for {branch_name}: {e}")
+                self._merge_status_cache[cache_key] = False
                 return False
 
         except Exception as e:
             if self.verbose:
                 self.debug(f"Error checking merge status for {branch_name}: {e}")
+            self._merge_status_cache[cache_key] = False
             return False

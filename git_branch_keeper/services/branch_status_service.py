@@ -32,12 +32,19 @@ class BranchStatusService:
         Returns: BranchStatus (ACTIVE, STALE, MERGED)
         """
         try:
+            if self.verbose:
+                self.debug(f"Checking status for branch: {branch_name}")
+                
             # Check if branch is protected
             if branch_name in self.config['protected_branches']:
+                if self.verbose:
+                    self.debug(f"Branch {branch_name} is protected, marking as active")
                 return BranchStatus.ACTIVE
 
             # First check GitHub PR status if enabled
             if self.github_service.github_enabled:
+                if self.verbose:
+                    self.debug("Checking GitHub PR status...")
                 open_prs, was_merged = self.github_service.get_pr_status(branch_name)
                 if was_merged:
                     if self.verbose:
@@ -46,17 +53,23 @@ class BranchStatusService:
 
             # Always check git merge status, regardless of GitHub status
             try:
+                if self.verbose:
+                    self.debug(f"Checking if {branch_name} is merged into {main_branch}...")
                 is_merged = self.git_service.is_merged_to_main(branch_name, main_branch)
                 if is_merged:
                     if self.verbose:
                         self.debug(f"Branch {branch_name} marked as merged (merged to main)")
                     return BranchStatus.MERGED
+                elif self.verbose:
+                    self.debug(f"Branch {branch_name} is not merged into {main_branch}")
             except Exception as e:
                 if self.verbose:
                     self.debug(f"Error checking merge status for {branch_name}: {e}")
 
             # Get branch age
             age_days = self.git_service.get_branch_age(branch_name)
+            if self.verbose:
+                self.debug(f"Branch age: {age_days} days")
 
             # If branch has open PRs, consider it active regardless of age
             if self.github_service.github_enabled and self.github_service.get_pr_count(branch_name) > 0:
@@ -71,6 +84,8 @@ class BranchStatusService:
                 return BranchStatus.STALE
 
             # Default to active
+            if self.verbose:
+                self.debug(f"Branch {branch_name} marked as active (default)")
             return BranchStatus.ACTIVE
 
         except Exception as e:
@@ -127,13 +142,18 @@ class BranchStatusService:
         if self.verbose:
             self.debug(f"  Sync status: {sync_status}")
             self.debug(f"  Force mode: {self.config.get('force', False)}")
+            self.debug(f"  Is merged: {status == BranchStatus.MERGED}")
+            if sync_status == "local-only":
+                self.debug(f"  Local-only branch with merge status: {status}")
+                if status == BranchStatus.MERGED:
+                    self.debug("  Branch is local-only but marked as merged - will process")
 
         if not self.config.get('force', False):  # Only check sync status if not force mode
-            if sync_status == "local-only":
+            if sync_status == "local-only" and status != BranchStatus.MERGED:
                 if self.verbose:
-                    self.debug("  Skipping: exists only locally")
+                    self.debug("  Skipping: exists only locally and is not merged")
                 return False, "exists only locally (use --force to clean anyway)"
-            elif sync_status != "synced" and sync_status not in ["merged-git", "merged-pr"]:
+            elif sync_status != "synced" and sync_status not in ["merged-git", "merged-pr", "local-only"]:
                 if "ahead" in sync_status:
                     if self.verbose:
                         self.debug("  Skipping: has unpushed commits")

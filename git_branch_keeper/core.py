@@ -244,7 +244,9 @@ class BranchKeeper:
                 for branch in branches:
                     status = self.branch_status_service.get_branch_status(branch, self.main_branch)
                     sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
-                    pr_status = "disabled" if (self.bypass_github or not self.github_service.is_configured()) else "enabled"
+                    pr_count = 0
+                    if not self.bypass_github and self.github_service.is_configured():
+                        pr_count = self.github_service.get_pr_count(branch)
                     
                     branch_details.append(BranchDetails(
                         name=branch,
@@ -254,7 +256,7 @@ class BranchKeeper:
                         has_local_changes=False,  # TODO: Implement this
                         has_remote=self.git_service.has_remote_branch(branch),
                         sync_status=sync_status,
-                        pr_status=pr_status
+                        pr_status=str(pr_count) if pr_count > 0 else None
                     ))
             else:
                 with Progress() as progress:
@@ -263,7 +265,9 @@ class BranchKeeper:
                     for branch in branches:
                         status = self.branch_status_service.get_branch_status(branch, self.main_branch)
                         sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
-                        pr_status = "disabled" if (self.bypass_github or not self.github_service.is_configured()) else "enabled"
+                        pr_count = 0
+                        if not self.bypass_github and self.github_service.is_configured():
+                            pr_count = self.github_service.get_pr_count(branch)
                         
                         branch_details.append(BranchDetails(
                             name=branch,
@@ -273,7 +277,7 @@ class BranchKeeper:
                             has_local_changes=False,  # TODO: Implement this
                             has_remote=self.git_service.has_remote_branch(branch),
                             sync_status=sync_status,
-                            pr_status=pr_status
+                            pr_status=str(pr_count) if pr_count > 0 else None
                         ))
                         progress.update(task, advance=1)
 

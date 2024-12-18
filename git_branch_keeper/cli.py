@@ -25,8 +25,7 @@ def main():
             'ignore_patterns': parsed_args.ignore,
             'status_filter': parsed_args.filter,
             'bypass_github': parsed_args.bypass_github,
-            'main_branch': parsed_args.main_branch,
-            'show_filter': parsed_args.show
+            'main_branch': parsed_args.main_branch
         }
         
         if parsed_args.verbose:

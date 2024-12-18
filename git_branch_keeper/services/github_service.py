@@ -67,20 +67,13 @@ class GitHubService:
             url = f"{self.github_api_url}/pulls"
             params = {
                 "head": f"{self.github_repo.split('/')[0]}:{branch_name}",
-                "state": "all"  # Check both open and closed PRs
+                "state": "open"  # Only check open PRs, not all PRs
             }
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             prs = response.json()
             
-            # Check if any PR was merged
-            for pr in prs:
-                if pr.get('merged_at'):
-                    if self.verbose:
-                        self.debug(f"Branch {branch_name} has a merged PR: #{pr['number']}")
-                    return True
-                    
-            return False
+            return len(prs) > 0
         except Exception as e:
             self.debug(f"Error checking PR status for {branch_name}: {e}")
             return False
