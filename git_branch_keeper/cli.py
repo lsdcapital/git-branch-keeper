@@ -1,115 +1,54 @@
 """Command-line interface for git-branch-keeper"""
 
-import argparse
+import os
 import sys
-from typing import Optional, List
-
-from . import __version__
+from rich.console import Console
+from .args import parse_args
 from .core import BranchKeeper
-from .config import load_config
 
+console = Console()
 
-def create_parser() -> argparse.ArgumentParser:
-    """Create the command line argument parser."""
-    parser = argparse.ArgumentParser(
-        description="A smart Git branch management tool that helps keep your repository clean and organized."
-    )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Enable verbose output"
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"git-branch-keeper {__version__}"
-    )
-    parser.add_argument(
-        "-c", "--config",
-        help="Path to config file"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be done without making changes"
-    )
-    parser.add_argument(
-        "-f", "--force",
-        action="store_true",
-        help="Force deletion without confirmation (use with caution)"
-    )
-    parser.add_argument(
-        "--status",
-        choices=["all", "merged", "stale"],
-        default="all",
-        help="Filter branches by status"
-    )
-    parser.add_argument(
-        "--min-stale-days",
-        type=int,
-        default=30,
-        help="Number of days before a branch is considered stale"
-    )
-    parser.add_argument(
-        "--bypass-github",
-        action="store_true",
-        help="Enable GitHub URL features without token (reduced functionality)"
-    )
-    parser.add_argument(
-        "--show",
-        choices=["local", "remote", "all"],
-        default="local",
-        help="Filter which branches to show: local (default), remote (remote-only), or all"
-    )
-    parser.add_argument(
-        "--cleanup",
-        action="store_true",
-        help="Enable cleanup mode to actually delete branches. Without this flag, only status will be shown"
-    )
-    return parser
-
-
-def main(args: Optional[List[str]] = None) -> int:
-    """Main entry point for the command line interface."""
-    if args is None:
-        args = sys.argv[1:]
-
-    parser = create_parser()
-    parsed_args = parser.parse_args(args)
-
-    # Load configuration
-    config = load_config(parsed_args.config)
-
-    # Create and run the branch keeper
-    keeper = BranchKeeper(
-        interactive=not parsed_args.force,
-        dry_run=parsed_args.dry_run,
-        min_stale_days=parsed_args.min_stale_days,
-        verbose=parsed_args.verbose,
-        config=config,
-        force_mode=parsed_args.force,
-        status_filter=parsed_args.status,
-        bypass_github=parsed_args.bypass_github,
-        show_filter=parsed_args.show
-    )
-
+def main():
+    """Main entry point for the application."""
     try:
-        if parsed_args.force and not parsed_args.cleanup:
-            print("[yellow]Warning: --force has no effect without --cleanup[/yellow]")
+        # Parse command line arguments
+        parsed_args = parse_args()
         
-        if parsed_args.force:
-            keeper.force_mode = True
+        # Build config from parsed arguments
+        config = {
+            'interactive': not parsed_args.force,
+            'dry_run': not parsed_args.cleanup,
+            'force': parsed_args.force,
+            'verbose': parsed_args.verbose,
+            'stale_days': parsed_args.stale_days,
+            'protected_branches': parsed_args.protected,
+            'ignore_patterns': parsed_args.ignore,
+            'status_filter': parsed_args.filter,
+            'bypass_github': parsed_args.bypass_github,
+            'main_branch': parsed_args.main_branch,
+            'show_filter': parsed_args.show
+        }
         
-        if parsed_args.cleanup:
-            keeper.cleanup()
-        else:
-            keeper.process_branches()
+        if parsed_args.verbose:
+            console.print("[yellow]Verbose mode enabled[/yellow]")
+            console.print(f"[yellow]Configuration:[/yellow]")
+            for key, value in config.items():
+                console.print(f"  {key}: {value}")
+        
+        # Initialize BranchKeeper with repo_path and config
+        keeper = BranchKeeper(os.getcwd(), config)
+        
+        # Process branches
+        keeper.process_branches(cleanup_enabled=parsed_args.cleanup)
+        
         return 0
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user")
+        console.print("\n[yellow]Operation cancelled by user[/yellow]")
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        console.print(f"[red]Error: {e}[/red]")
+        if parsed_args.verbose:
+            console.print_exception()
         return 1
 
 

@@ -6,24 +6,22 @@ from typing import Optional
 
 class BranchStatus(Enum):
     ACTIVE = "active"
-    MERGED = "merged"
     STALE = "stale"
-    IGNORED = "ignored"
-    UNKNOWN = "unknown"
+    MERGED = "merged"
 
 class SyncStatus(Enum):
     SYNCED = "synced"
-    LOCAL_ONLY = "local-only"
-    REMOTE_ONLY = "remote-only"
-    MERGED_REMOTE_DELETED = "merged-remote-deleted"
-    UNKNOWN = "unknown"
+    AHEAD = "ahead"
+    BEHIND = "behind"
+    DIVERGED = "diverged"
 
 @dataclass
 class BranchDetails:
     name: str
-    last_commit_date: datetime
+    last_commit_date: str
     age_days: int
     status: BranchStatus
+    has_local_changes: bool
     has_remote: bool
-    sync_status: SyncStatus
-    pr_count: int 
+    sync_status: str
+    pr_status: Optional[str] = None 
