@@ -202,32 +202,39 @@ class BranchKeeper:
                 with Progress() as progress:
                     task = progress.add_task("Processing branches...", total=len(branches))
                     for branch in branches:
-                        details = self._process_single_branch(branch, status_filter, pr_data, task)
+                        details = self._process_single_branch(branch, status_filter, pr_data, progress)
                         if details:
                             branch_details.append(details)
+                        progress.update(task, advance=1)
 
             # Only fetch PR data for branches that need it
             if self.github_service.github_enabled and not self.bypass_github:
                 try:
-                    # Only check PRs for unmerged remote branches
-                    unmerged_remote_branches = [
+                    # Only check PRs for unmerged remote branches and main branch
+                    branches_to_check = [
                         b.name for b in branch_details 
-                        if b.status != BranchStatus.MERGED 
-                        and self.git_service.has_remote_branch(b.name)
+                        if (b.status != BranchStatus.MERGED and self.git_service.has_remote_branch(b.name))
+                        or b.name == self.main_branch
                     ]
-                    if unmerged_remote_branches:
+                    if branches_to_check:
                         if self.debug_mode:
-                            self.debug(f"Fetching PR data for {len(unmerged_remote_branches)} unmerged remote branches")
-                        pr_data = self.github_service.get_bulk_pr_data(unmerged_remote_branches)
+                            self.debug(f"Fetching PR data for {len(branches_to_check)} branches")
+                        pr_data = self.github_service.get_bulk_pr_data(branches_to_check)
                         
                         # Update branch statuses with PR data
                         for branch in branch_details:
                             if branch.name in pr_data:
                                 if pr_data[branch.name]['count'] > 0:
                                     branch.status = BranchStatus.ACTIVE
-                                    branch.pr_status = str(pr_data[branch.name]['count'])
+                                    if branch.name == self.main_branch:
+                                        # For main branch, show total PR count with a special indicator
+                                        branch.pr_status = f"target:{pr_data[branch.name]['count']}"
+                                    else:
+                                        branch.pr_status = str(pr_data[branch.name]['count'])
                                 elif pr_data[branch.name]['merged']:
                                     branch.status = BranchStatus.MERGED
+                                elif pr_data[branch.name]['closed']:
+                                    branch.notes = "PR closed without merging"
                 except Exception as e:
                     if self.debug_mode:
                         self.debug(f"Failed to fetch PR data: {e}")
@@ -256,7 +263,7 @@ class BranchKeeper:
         except Exception as e:
             console.print(f"[red]Error processing branches: {e}[/red]")
 
-    def _process_single_branch(self, branch: str, status_filter: str, pr_data: dict, progress_task=None) -> Optional[BranchDetails]:
+    def _process_single_branch(self, branch: str, status_filter: str, pr_data: dict, progress=None) -> Optional[BranchDetails]:
         """Process a single branch and return its details if it matches the filter."""
         status = self.branch_status_service.get_branch_status(branch, self.main_branch, pr_data)
         
@@ -264,8 +271,6 @@ class BranchKeeper:
         if status_filter != 'all' and status.value != status_filter:
             if self.verbose:
                 self.debug(f"Skipping {branch} - status {status.value} doesn't match filter {status_filter}")
-            if progress_task:
-                Progress.get_default_progress().update(progress_task, advance=1)
             return None
         
         sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
@@ -282,11 +287,9 @@ class BranchKeeper:
             has_local_changes=False,  # TODO: Implement this
             has_remote=self.git_service.has_remote_branch(branch),
             sync_status=sync_status,
-            pr_status=pr_display
+            pr_status=pr_display,
+            notes=None  # Initialize notes as None, it will be updated later if needed
         )
-        
-        if progress_task:
-            Progress.get_default_progress().update(progress_task, advance=1)
             
         return details
 

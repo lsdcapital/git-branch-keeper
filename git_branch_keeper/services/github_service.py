@@ -74,15 +74,25 @@ class GitHubService:
                 state='all',
                 head=f"{self.github_repo.split('/')[0]}:{branch_name}"
             ))
-            
             if not pulls:
                 return {'has_pr': False, 'state': 'no_pr'}
-                
-            latest_pr = max(pulls, key=lambda pr: pr.created_at)
             
+            closed_or_merged_prs = [pr for pr in pulls if pr.state == 'closed' or pr.merged]
+            
+            if not closed_or_merged_prs:
+                latest_pr = max(pulls, key=lambda pr: pr.created_at)
+                return {
+                    'has_pr': True,
+                    'state': 'merged' if latest_pr.merged else 'closed' if latest_pr.state == 'closed' else 'open',
+                    'pr_number': latest_pr.number,
+                    'closed_at': latest_pr.closed_at.isoformat() if latest_pr.closed_at else None,
+                    'merged_at': latest_pr.merged_at.isoformat() if latest_pr.merged_at else None
+                }
+            
+            latest_pr = max(closed_or_merged_prs, key=lambda pr: pr.created_at)
             return {
                 'has_pr': True,
-                'state': 'merged' if latest_pr.merged else 'closed' if latest_pr.state == 'closed' else 'open',
+                'state': 'merged' if latest_pr.merged else 'closed',
                 'pr_number': latest_pr.number,
                 'closed_at': latest_pr.closed_at.isoformat() if latest_pr.closed_at else None,
                 'merged_at': latest_pr.merged_at.isoformat() if latest_pr.merged_at else None
@@ -169,8 +179,15 @@ class GitHubService:
             pulls = list(self.gh_repo.get_pulls(state='all'))
             
             for branch_name in branch_names:
-                branch_prs = [pr for pr in pulls if pr.head.ref == branch_name]
-                open_prs = sum(1 for pr in branch_prs if pr.state == 'open')
+                if branch_name in self.config.get('protected_branches', ['main', 'master']):
+                    # For protected branches, count PRs targeting this branch
+                    branch_prs = [pr for pr in pulls if pr.base.ref == branch_name]
+                    open_prs = sum(1 for pr in branch_prs if pr.state == 'open')
+                else:
+                    # For other branches, count PRs from this branch
+                    branch_prs = [pr for pr in pulls if pr.head.ref == branch_name]
+                    open_prs = sum(1 for pr in branch_prs if pr.state == 'open')
+                
                 merged_prs = any(pr.merged for pr in branch_prs)
                 closed_prs = any(pr.state == 'closed' and not pr.merged for pr in branch_prs)
                 

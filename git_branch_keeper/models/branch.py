@@ -1,13 +1,13 @@
 """Branch model and related enums"""
 from enum import Enum
 from dataclasses import dataclass
+from typing import Optional
 
 class BranchStatus(Enum):
     """Status of a branch."""
     ACTIVE = "active"
     STALE = "stale"
     MERGED = "merged"
-    DELETABLE = "deletable"  # New status for branches that can be safely deleted
 
 class SyncStatus(Enum):
     """Sync status of a branch with remote."""
@@ -31,3 +31,4 @@ class BranchDetails:
     has_remote: bool
     sync_status: str
     pr_status: str = None
+    notes: Optional[str] = None # Added notes field

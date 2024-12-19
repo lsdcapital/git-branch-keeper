@@ -36,6 +36,7 @@ class DisplayService:
         table.add_column("Sync")
         table.add_column("Remote")
         table.add_column("PRs")
+        table.add_column("Notes") # Added Notes column
 
         # Add rows
         for branch in branch_details:
@@ -56,6 +57,17 @@ class DisplayService:
             # Format status with more descriptive text
             status_text = self._format_status(branch.status)
             
+            # Format PR status with link if GitHub is enabled
+            pr_display = branch.pr_status
+            if github_base_url and pr_display:
+                if pr_display.startswith('target:'):
+                    # For main branch, show PRs targeting it and add overview link
+                    count = pr_display.split(':')[1]
+                    pr_display = f"[link={github_base_url}/pulls]{count}[/link]"
+                else:
+                    # For other branches, link to the specific PR
+                    pr_display = f"[link={github_base_url}/pull/{pr_display}]{pr_display}[/link]"
+            
             table.add_row(
                 branch_name,
                 last_commit_date,
@@ -63,7 +75,8 @@ class DisplayService:
                 status_text,
                 branch.sync_status,
                 remote_status,
-                branch.pr_status,
+                pr_display if pr_display else "",
+                branch.notes if branch.notes else "", # Added notes
                 style=row_style
             )
 
@@ -77,23 +90,19 @@ class DisplayService:
             console.print("* = Current branch        +M = Modified files")
             console.print("+U = Untracked files      +S = Staged files")
             console.print("Yellow = Would be cleaned up")
-            console.print("Red = Safe to delete (PR closed without merging)")
             console.print("Cyan = Protected branch")
             
             # Show branches that would be deleted
             branches_to_delete = [
                 branch for branch in branch_details 
-                if branch.status in [BranchStatus.STALE, BranchStatus.MERGED, BranchStatus.DELETABLE]
+                if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
                 and branch.name not in self.branch_status_service.config.get('protected_branches', [])
             ]
             
             if branches_to_delete:
                 console.print("\nBranches that would be deleted:")
                 for branch in branches_to_delete:
-                    if branch.status == BranchStatus.DELETABLE:
-                        reason = "PR closed without merging"
-                    else:
-                        reason = "stale" if branch.status == BranchStatus.STALE else "merged"
+                    reason = "stale" if branch.status == BranchStatus.STALE else "merged"
                     remote_info = "remote and local" if branch.has_remote else "local only"
                     console.print(f"  {branch.name} ({reason}, {remote_info})")
             
@@ -102,7 +111,6 @@ class DisplayService:
             active_branches = sum(1 for b in branch_details if b.status == BranchStatus.ACTIVE)
             stale_branches = sum(1 for b in branch_details if b.status == BranchStatus.STALE)
             merged_branches = sum(1 for b in branch_details if b.status == BranchStatus.MERGED)
-            deletable_branches = sum(1 for b in branch_details if b.status == BranchStatus.DELETABLE)
             
             # Display summary
             console.print("\nSummary:")
@@ -110,7 +118,6 @@ class DisplayService:
             console.print(f"Active branches: {active_branches}")
             console.print(f"Stale branches: {stale_branches}")
             console.print(f"Merged branches: {merged_branches}")
-            console.print(f"Deletable branches: {deletable_branches}")
 
             # Display merge detection stats
             merge_stats = self.branch_status_service.git_service.get_merge_stats()
@@ -137,16 +144,12 @@ class DisplayService:
             return "stale"
         elif status == BranchStatus.MERGED:
             return "merged"
-        elif status == BranchStatus.DELETABLE:
-            return "safe to delete"
         return str(status.value)
 
     def _get_row_style(self, branch: BranchDetails) -> Optional[str]:
         """Get the style for a table row based on branch status."""
         if self.branch_status_service and branch.name in self.branch_status_service.config.get('protected_branches', ['main', 'master']):
             return "cyan"
-        if branch.status == BranchStatus.DELETABLE:
-            return "red"
-        if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]:
+        if branch.status == BranchStatus.STALE or branch.status == BranchStatus.MERGED:
             return "yellow"
         return None

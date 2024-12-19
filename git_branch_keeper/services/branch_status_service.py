@@ -39,13 +39,14 @@ class BranchStatusService:
         # First check PR status if GitHub is enabled
         if hasattr(self.github_service, 'get_branch_pr_status'):
             pr_status = self.github_service.get_branch_pr_status(branch_name)
+            self.debug(f"PR Status for {branch_name}: {pr_status}")
             if pr_status['has_pr']:
                 if pr_status['state'] == 'merged':
                     self.debug(f"Branch {branch_name} was merged via PR")
                     return BranchStatus.MERGED
                 elif pr_status['state'] == 'closed':
-                    self.debug(f"Branch {branch_name} had PR closed without merging")
-                    return BranchStatus.DELETABLE
+                    self.debug(f"Branch {branch_name} had PR closed without merging, marking as active")
+                    return BranchStatus.ACTIVE
                 elif pr_status['state'] == 'open':
                     self.debug(f"Branch {branch_name} has open PR")
                     return BranchStatus.ACTIVE
@@ -63,8 +64,8 @@ class BranchStatusService:
                 self.debug(f"Branch {branch_name} is merged (PR was merged)")
                 return BranchStatus.MERGED
             if pr_info.get('closed', False):
-                self.debug(f"Branch {branch_name} had PR closed without merging")
-                return BranchStatus.DELETABLE
+                self.debug(f"Branch {branch_name} had PR closed without merging, marking as active")
+                return BranchStatus.ACTIVE
             if pr_info.get('count', 0) > 0:
                 self.debug(f"Branch {branch_name} marked as active (has open PRs)")
                 return BranchStatus.ACTIVE
@@ -178,7 +179,7 @@ class BranchStatusService:
                 self.debug("  Skipping: not stale")
             return False, "not stale"
         elif status_filter == 'all':
-            if status in [BranchStatus.STALE, BranchStatus.MERGED, BranchStatus.DELETABLE]:
+            if status in [BranchStatus.STALE, BranchStatus.MERGED]:
                 if self.verbose:
                     self.debug(f"  Will process: is {status.value}")
                 return True, f"is {status.value}"
@@ -213,9 +214,14 @@ class BranchStatusService:
 
             # Get PR status if GitHub is enabled
             pr_status = None
+            notes = None
             if self.github_service.github_enabled:
                 pr_count = self.github_service.get_pr_count(branch_name)
+                pr_info = self.github_service.get_branch_pr_status(branch_name)
+                self.debug(f"PR Info for {branch_name}: {pr_info}")
                 pr_status = str(pr_count) if pr_count > 0 else None
+                if pr_info['has_pr'] and pr_info['state'] == 'closed':
+                    notes = "had PR closed without merging, marking as active"
 
             return BranchDetails(
                 name=branch_name,
@@ -225,7 +231,8 @@ class BranchStatusService:
                 has_local_changes=has_local_changes,
                 has_remote=self.git_service.has_remote_branch(branch_name),
                 sync_status=sync_status,
-                pr_status=pr_status
+                pr_status=pr_status,
+                notes=notes
             )
         except Exception as e:
             if self.verbose:
@@ -238,5 +245,6 @@ class BranchStatusService:
                 has_local_changes=False,
                 has_remote=False,
                 sync_status="unknown",
-                pr_status=None
+                pr_status=None,
+                notes=None
             )
