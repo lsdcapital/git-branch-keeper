@@ -1,8 +1,8 @@
 """GitHub API integration service"""
 import os
-from typing import Optional
+from typing import Optional, List, Dict
 from urllib.parse import urlparse
-import requests
+from github import Github
 from rich.console import Console
 
 console = Console()
@@ -13,16 +13,20 @@ class GitHubService:
         self.repo = repo
         self.config = config
         self.verbose = config.get('verbose', False)
+        self.debug_mode = config.get('debug', False)
         self.github_token = config.get("github_token") or os.environ.get("GITHUB_TOKEN")
         self.github_api_url = None
         self.github_repo = None
         self.github_enabled = False
+        self.github = None
+        self.gh_repo = None
 
     def setup_github_api(self, remote_url: str) -> None:
-        """Setup GitHub API access if possible."""
+        """Setup GitHub API access."""
         try:
             if "github.com" not in remote_url:
-                self.debug("Not a GitHub repository")
+                if self.debug_mode:
+                    print("[GitHub] Not a GitHub repository")
                 return
 
             # Parse GitHub repository from remote URL
@@ -37,21 +41,56 @@ class GitHubService:
             if path.endswith(".git"):
                 path = path[:-4]
 
+            self.github_repo = path
+
+            # Get GitHub token from environment
+            self.github_token = os.getenv('GITHUB_TOKEN')
             if not self.github_token:
-                print("No GitHub token found. Running with reduced GitHub functionality")
-                self.github_repo = path
+                if self.debug_mode:
+                    print("[GitHub] No GitHub token found. Running with reduced GitHub functionality")
                 return
 
-            self.github_repo = path
-            self.github_api_url = f"https://api.github.com/repos/{path}"
-            self.debug(f"Detected GitHub repository: {path}")
-            self.debug(f"GitHub API URL: {self.github_api_url}")
-            print(f"GitHub integration enabled for: {path}")
-
+            # Initialize GitHub API
+            self.github = Github(self.github_token)
+            self.gh_repo = self.github.get_repo(self.github_repo)
             self.github_enabled = True
+
+            if self.debug_mode:
+                print(f"[GitHub] GitHub API URL: {self.gh_repo.url}")
+                print(f"[GitHub] GitHub integration enabled for: {path}")
+
         except Exception as e:
+            if self.debug_mode:
+                print(f"[GitHub] Failed to setup GitHub API: {e}")
             self.github_enabled = False
-            self.debug(f"GitHub API setup failed: {e}")
+
+    def get_branch_pr_status(self, branch_name: str) -> dict:
+        """Get detailed PR status for a branch."""
+        if not self.github_enabled:
+            return {'has_pr': False, 'state': 'unknown'}
+
+        try:
+            pulls = list(self.gh_repo.get_pulls(
+                state='all',
+                head=f"{self.github_repo.split('/')[0]}:{branch_name}"
+            ))
+            
+            if not pulls:
+                return {'has_pr': False, 'state': 'no_pr'}
+                
+            latest_pr = max(pulls, key=lambda pr: pr.created_at)
+            
+            return {
+                'has_pr': True,
+                'state': 'merged' if latest_pr.merged else 'closed' if latest_pr.state == 'closed' else 'open',
+                'pr_number': latest_pr.number,
+                'closed_at': latest_pr.closed_at.isoformat() if latest_pr.closed_at else None,
+                'merged_at': latest_pr.merged_at.isoformat() if latest_pr.merged_at else None
+            }
+        except Exception as e:
+            if self.debug_mode:
+                print(f"[GitHub] Error getting PR status for {branch_name}: {e}")
+            return {'has_pr': False, 'state': 'error'}
 
     def has_open_pr(self, branch_name: str) -> bool:
         """Check if a branch has any open PRs."""
@@ -59,79 +98,31 @@ class GitHubService:
             return False
 
         try:
-            headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            
-            url = f"{self.github_api_url}/pulls"
-            params = {
-                "head": f"{self.github_repo.split('/')[0]}:{branch_name}",
-                "state": "open"  # Only check open PRs, not all PRs
-            }
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            prs = response.json()
-            
-            return len(prs) > 0
+            pulls = self.gh_repo.get_pulls(state='open', head=f"{self.github_repo.split('/')[0]}:{branch_name}")
+            return pulls.totalCount > 0
         except Exception as e:
-            self.debug(f"Error checking PR status for {branch_name}: {e}")
+            if self.debug_mode:
+                print(f"[GitHub] Error checking PR status for {branch_name}: {e}")
             return False
-
-    def get_github_branch_url(self, branch_name: str, url_type: str = "pulls") -> str:
-        """Get the GitHub URL for a branch."""
-        if not self.github_repo:
-            self.debug("No GitHub repo configured")
-            return ""
-
-        base_url = f"https://github.com/{self.github_repo}"
-        
-        # For main/protected branches, show all PRs
-        if branch_name in self.config.get('protected_branches', ['main', 'master']):
-            return f"{base_url}/pulls"
-        
-        # For other branches, show PRs filtered by branch
-        if url_type == "pulls":
-            return f"{base_url}/pulls?q=is%3Apr+head%3A{branch_name}"
-        else:
-            return f"{base_url}/tree/{branch_name}"
 
     def get_pr_count(self, branch_name: str) -> int:
         """Get the number of open PRs for or targeting a branch."""
         if not self.github_enabled:
             return 0
 
-        if not (self.github_api_url and self.github_token):
-            return 0
-
         try:
-            headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            
-            # Check PRs where this branch is the source (head)
-            url = f"{self.github_api_url}/pulls"
-            params = {
-                "head": f"{self.github_repo.split('/')[0]}:{branch_name}",
-                "state": "open"
-            }
-            head_response = requests.get(url, headers=headers, params=params)
-            head_response.raise_for_status()
-            
+            pulls = self.gh_repo.get_pulls(state='open', head=f"{self.github_repo.split('/')[0]}:{branch_name}")
+            count = pulls.totalCount
+
             # For main/protected branches, also check PRs targeting this branch
             if branch_name in self.config.get('protected_branches', ['main', 'master']):
-                params = {
-                    "base": branch_name,
-                    "state": "open"
-                }
-                base_response = requests.get(url, headers=headers, params=params)
-                base_response.raise_for_status()
-                return len(head_response.json()) + len(base_response.json())
-            
-            return len(head_response.json())
+                base_pulls = self.gh_repo.get_pulls(state='open', base=branch_name)
+                count += base_pulls.totalCount
+
+            return count
         except Exception as e:
-            self.debug(f"Error checking PR count for {branch_name}: {e}")
+            if self.debug_mode:
+                print(f"[GitHub] Error checking PR count for {branch_name}: {e}")
             return 0
 
     def get_pr_status(self, branch_name: str) -> tuple[int, bool]:
@@ -140,26 +131,18 @@ class GitHubService:
             return 0, False
 
         try:
-            headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            
-            url = f"{self.github_api_url}/pulls"
-            params = {
-                "head": f"{self.github_repo.split('/')[0]}:{branch_name}",
-                "state": "all"
-            }
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            prs = response.json()
-            
-            open_count = sum(1 for pr in prs if pr['state'] == 'open')
-            was_merged = any(pr.get('merged_at') for pr in prs)
-            
+            pulls = list(self.gh_repo.get_pulls(state='all', head=f"{self.github_repo.split('/')[0]}:{branch_name}"))
+            open_count = sum(1 for pr in pulls if pr.state == 'open')
+            was_merged = any(pr.merged for pr in pulls)
+
+            if was_merged and self.debug_mode:
+                merged_pr = next(pr for pr in pulls if pr.merged)
+                print(f"[GitHub] Found merged PR #{merged_pr.number} for {branch_name}")
+
             return open_count, was_merged
         except Exception as e:
-            self.debug(f"Error getting PR status for {branch_name}: {e}")
+            if self.debug_mode:
+                print(f"[GitHub] Error getting PR status for {branch_name}: {e}")
             return 0, False
 
     def was_merged_via_pr(self, branch_name: str) -> bool:
@@ -168,34 +151,49 @@ class GitHubService:
             return False
 
         try:
-            headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            
-            url = f"{self.github_api_url}/pulls"
-            params = {
-                "head": f"{self.github_repo.split('/')[0]}:{branch_name}",
-                "state": "closed"  # Only check closed PRs
-            }
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            prs = response.json()
-            
-            # Check if any PR was merged
-            was_merged = any(pr.get('merged_at') for pr in prs)
-            if was_merged and self.verbose:
-                self.debug(f"Branch {branch_name} was merged via PR")
-            return was_merged
+            pr_status = self.get_branch_pr_status(branch_name)
+            return pr_status['has_pr'] and pr_status['state'] == 'merged'
         except Exception as e:
-            self.debug(f"Error checking PR merge status for {branch_name}: {e}")
+            if self.debug_mode:
+                print(f"[GitHub] Error checking PR status for {branch_name}: {e}")
             return False
 
-    def is_configured(self) -> bool:
-        """Check if GitHub is properly configured with a token."""
-        return bool(self.github_token and self.github_api_url and self.github_repo)
+    def get_bulk_pr_data(self, branch_names: List[str]) -> Dict[str, Dict]:
+        """Get PR data for multiple branches in a single request."""
+        if not self.github_enabled:
+            return {}
 
-    def debug(self, message: str) -> None:
-        """Print debug message if verbose mode is enabled."""
-        if self.verbose:
-            console.print(f"[GitHub] {message}") 
+        try:
+            result = {}
+            # Get both open and closed PRs
+            pulls = list(self.gh_repo.get_pulls(state='all'))
+            
+            for branch_name in branch_names:
+                branch_prs = [pr for pr in pulls if pr.head.ref == branch_name]
+                open_prs = sum(1 for pr in branch_prs if pr.state == 'open')
+                merged_prs = any(pr.merged for pr in branch_prs)
+                closed_prs = any(pr.state == 'closed' and not pr.merged for pr in branch_prs)
+                
+                result[branch_name] = {
+                    'count': open_prs,
+                    'merged': merged_prs,
+                    'closed': closed_prs
+                }
+                
+                if self.debug_mode:
+                    if merged_prs:
+                        print(f"[GitHub] Branch {branch_name} has merged PR")
+                    elif closed_prs:
+                        print(f"[GitHub] Branch {branch_name} has closed (unmerged) PR")
+                    elif open_prs:
+                        print(f"[GitHub] Branch {branch_name} has {open_prs} open PR(s)")
+            
+            if self.debug_mode:
+                print(f"[GitHub] Pre-fetched PR data for {len(result)} branches")
+            
+            return result
+            
+        except Exception as e:
+            if self.debug_mode:
+                print(f"[GitHub] Error getting bulk PR data: {e}")
+            return {}

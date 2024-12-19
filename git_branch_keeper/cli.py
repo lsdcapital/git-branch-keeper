@@ -25,11 +25,12 @@ def main():
             'ignore_patterns': parsed_args.ignore,
             'status_filter': parsed_args.filter,
             'bypass_github': parsed_args.bypass_github,
-            'main_branch': parsed_args.main_branch
+            'main_branch': parsed_args.main_branch,
+            'debug': parsed_args.debug
         }
         
-        if parsed_args.verbose:
-            console.print("[yellow]Verbose mode enabled[/yellow]")
+        if parsed_args.debug:
+            console.print("[yellow]Debug mode enabled[/yellow]")
             console.print(f"[yellow]Configuration:[/yellow]")
             for key, value in config.items():
                 console.print(f"  {key}: {value}")
@@ -46,7 +47,7 @@ def main():
         return 1
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
-        if parsed_args.verbose:
+        if parsed_args.debug:
             console.print_exception()
         return 1
 

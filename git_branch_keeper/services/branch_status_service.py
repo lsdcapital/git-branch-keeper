@@ -1,5 +1,5 @@
 """Service for determining branch status and related operations"""
-from typing import List, Optional
+from typing import List, Optional, Dict
 from fnmatch import fnmatch
 from rich.console import Console
 from git_branch_keeper.models.branch import BranchStatus, SyncStatus, BranchDetails
@@ -16,82 +16,69 @@ class BranchStatusService:
         self.git_service = git_service
         self.github_service = github_service
         self.verbose = verbose
+        self.debug_mode = config.get('debug', False)
         self.protected_branches = config.get('protected_branches', ["main", "master"])
         self.ignore_patterns = config.get('ignore_patterns', [])
         self.min_stale_days = config.get('stale_days', 30)
         self.status_filter = config.get('status_filter', "all")
 
-    def debug(self, message: str):
-        """Print debug message if verbose mode is enabled."""
-        if self.verbose:
-            console.print(f"[Branch Status] {message}")
+    def debug(self, message: str, source: str = "Branch Status") -> None:
+        """Print debug message if debug mode is enabled."""
+        if self.debug_mode:
+            print(f"[{source}] {message}")
 
-    def get_branch_status(self, branch_name: str, main_branch: str) -> BranchStatus:
-        """
-        Determine the status of a branch.
-        Returns: BranchStatus (ACTIVE, STALE, MERGED)
-        """
-        try:
-            if self.verbose:
-                self.debug(f"Checking status for branch: {branch_name}")
-                
-            # Check if branch is protected
-            if branch_name in self.config['protected_branches']:
-                if self.verbose:
-                    self.debug(f"Branch {branch_name} is protected, marking as active")
-                return BranchStatus.ACTIVE
-
-            # First check GitHub PR status if enabled
-            if self.github_service.github_enabled:
-                if self.verbose:
-                    self.debug("Checking GitHub PR status...")
-                open_prs, was_merged = self.github_service.get_pr_status(branch_name)
-                if was_merged:
-                    if self.verbose:
-                        self.debug(f"Branch {branch_name} marked as merged (has merged PR)")
-                    return BranchStatus.MERGED
-
-            # Always check git merge status, regardless of GitHub status
-            try:
-                if self.verbose:
-                    self.debug(f"Checking if {branch_name} is merged into {main_branch}...")
-                is_merged = self.git_service.is_merged_to_main(branch_name, main_branch)
-                if is_merged:
-                    if self.verbose:
-                        self.debug(f"Branch {branch_name} marked as merged (merged to main)")
-                    return BranchStatus.MERGED
-                elif self.verbose:
-                    self.debug(f"Branch {branch_name} is not merged into {main_branch}")
-            except Exception as e:
-                if self.verbose:
-                    self.debug(f"Error checking merge status for {branch_name}: {e}")
-
-            # Get branch age
-            age_days = self.git_service.get_branch_age(branch_name)
-            if self.verbose:
-                self.debug(f"Branch age: {age_days} days")
-
-            # If branch has open PRs, consider it active regardless of age
-            if self.github_service.github_enabled and self.github_service.get_pr_count(branch_name) > 0:
-                if self.verbose:
-                    self.debug(f"Branch {branch_name} marked as active (has open PRs)")
-                return BranchStatus.ACTIVE
-
-            # Check if branch is stale based on age
-            if age_days >= self.config['stale_days']:
-                if self.verbose:
-                    self.debug(f"Branch {branch_name} marked as stale ({age_days} days old)")
-                return BranchStatus.STALE
-
-            # Default to active
-            if self.verbose:
-                self.debug(f"Branch {branch_name} marked as active (default)")
+    def get_branch_status(self, branch_name: str, main_branch: str, pr_data: dict = None) -> BranchStatus:
+        """Get the status of a branch."""
+        self.debug(f"Checking status for branch: {branch_name}")
+        
+        # Skip protected branches
+        if branch_name in self.protected_branches:
+            self.debug(f"Branch {branch_name} is protected, marking as active")
             return BranchStatus.ACTIVE
 
-        except Exception as e:
-            if self.verbose:
-                self.debug(f"Error getting status for {branch_name}: {e}")
-            return BranchStatus.ACTIVE
+        # First check PR status if GitHub is enabled
+        if hasattr(self.github_service, 'get_branch_pr_status'):
+            pr_status = self.github_service.get_branch_pr_status(branch_name)
+            if pr_status['has_pr']:
+                if pr_status['state'] == 'merged':
+                    self.debug(f"Branch {branch_name} was merged via PR")
+                    return BranchStatus.MERGED
+                elif pr_status['state'] == 'closed':
+                    self.debug(f"Branch {branch_name} had PR closed without merging")
+                    return BranchStatus.DELETABLE
+                elif pr_status['state'] == 'open':
+                    self.debug(f"Branch {branch_name} has open PR")
+                    return BranchStatus.ACTIVE
+
+        # Then try to detect merge using Git methods (faster)
+        self.debug(f"Checking if {branch_name} is merged into {main_branch}...")
+        if self.git_service.is_branch_merged(branch_name, main_branch):
+            self.debug(f"Branch {branch_name} is merged into {main_branch} (Git)")
+            return BranchStatus.MERGED
+
+        # Check PR data if available
+        if pr_data and branch_name in pr_data:
+            pr_info = pr_data[branch_name]
+            if pr_info.get('merged', False):
+                self.debug(f"Branch {branch_name} is merged (PR was merged)")
+                return BranchStatus.MERGED
+            if pr_info.get('closed', False):
+                self.debug(f"Branch {branch_name} had PR closed without merging")
+                return BranchStatus.DELETABLE
+            if pr_info.get('count', 0) > 0:
+                self.debug(f"Branch {branch_name} marked as active (has open PRs)")
+                return BranchStatus.ACTIVE
+
+        # Check branch age last (simplest check)
+        age_days = self.git_service.get_branch_age(branch_name)
+        self.debug(f"Branch age: {age_days} days")
+        
+        if age_days >= self.config.get('stale_days', 30):
+            self.debug(f"Branch {branch_name} marked as stale (age: {age_days} days)")
+            return BranchStatus.STALE
+
+        self.debug(f"Branch {branch_name} marked as active (default)")
+        return BranchStatus.ACTIVE
 
     def is_protected_branch(self, branch_name: str) -> bool:
         """Check if a branch is protected."""
@@ -101,7 +88,7 @@ class BranchStatusService:
         """Check if a branch should be ignored based on ignore patterns."""
         return any(fnmatch(branch_name, pattern) for pattern in self.ignore_patterns)
 
-    def should_process_branch(self, branch_name: str, status: BranchStatus, main_branch: str) -> tuple[bool, str]:
+    def should_process_branch(self, branch_name: str, status: BranchStatus, main_branch: str, pr_data: Optional[Dict] = None) -> tuple[bool, str]:
         """
         Determine if a branch should be processed based on its status and conditions.
         Returns: (should_process: bool, reason: str)
@@ -119,7 +106,12 @@ class BranchStatusService:
             return False, f"main branch is {main_sync_status} - please update main first"
 
         # Skip if branch has open PRs
-        if self.github_service.has_open_pr(branch_name):
+        if pr_data and branch_name in pr_data:
+            if pr_data[branch_name]['count'] > 0:
+                if self.verbose:
+                    self.debug("  Skipping: has open PR")
+                return False, "has open PR"
+        elif self.github_service.has_open_pr(branch_name):
             if self.verbose:
                 self.debug("  Skipping: has open PR")
             return False, "has open PR"
@@ -153,7 +145,7 @@ class BranchStatusService:
                 if self.verbose:
                     self.debug("  Skipping: exists only locally and is not merged")
                 return False, "exists only locally (use --force to clean anyway)"
-            elif sync_status != "synced" and sync_status not in ["merged-git", "merged-pr", "local-only"]:
+            elif sync_status not in ["synced", "merged-git", "merged-pr", "local-only", "closed-unmerged"]:
                 if "ahead" in sync_status:
                     if self.verbose:
                         self.debug("  Skipping: has unpushed commits")
@@ -186,7 +178,7 @@ class BranchStatusService:
                 self.debug("  Skipping: not stale")
             return False, "not stale"
         elif status_filter == 'all':
-            if status in [BranchStatus.STALE, BranchStatus.MERGED]:
+            if status in [BranchStatus.STALE, BranchStatus.MERGED, BranchStatus.DELETABLE]:
                 if self.verbose:
                     self.debug(f"  Will process: is {status.value}")
                 return True, f"is {status.value}"

@@ -1,22 +1,28 @@
-"""Models for branch-related data structures"""
+"""Branch model and related enums"""
 from enum import Enum
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional
 
 class BranchStatus(Enum):
+    """Status of a branch."""
     ACTIVE = "active"
     STALE = "stale"
     MERGED = "merged"
+    DELETABLE = "deletable"  # New status for branches that can be safely deleted
 
 class SyncStatus(Enum):
+    """Sync status of a branch with remote."""
     SYNCED = "synced"
     AHEAD = "ahead"
     BEHIND = "behind"
     DIVERGED = "diverged"
+    LOCAL_ONLY = "local-only"
+    MERGED_GIT = "merged-git"
+    MERGED_PR = "merged-pr"
+    CLOSED_UNMERGED = "closed-unmerged"  # New status for branches with closed but unmerged PRs
 
 @dataclass
 class BranchDetails:
+    """Detailed information about a branch."""
     name: str
     last_commit_date: str
     age_days: int
@@ -24,4 +30,4 @@ class BranchDetails:
     has_local_changes: bool
     has_remote: bool
     sync_status: str
-    pr_status: Optional[str] = None 
+    pr_status: str = None

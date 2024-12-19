@@ -11,5 +11,6 @@ def parse_args():
     parser.add_argument("--filter", choices=["all", "stale", "merged"], default="all", help="Filter which branches to show and process (all/stale/merged)")
     parser.add_argument("--bypass-github", action="store_true", help="Skip GitHub API checks")
     parser.add_argument("--main-branch", default="main", help="Main branch name")
+    parser.add_argument("--debug", action="store_true", help="Show debug information for troubleshooting")
     
     return parser.parse_args() 

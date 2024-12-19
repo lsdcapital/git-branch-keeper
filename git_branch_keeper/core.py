@@ -46,6 +46,7 @@ class BranchKeeper:
         self.repo_path = repo_path
         self.config = config
         self.verbose = config.get('verbose', False)
+        self.debug_mode = config.get('debug', False)
         
         # Initialize repo first
         try:
@@ -72,11 +73,11 @@ class BranchKeeper:
         if not self.bypass_github:
             try:
                 remote_url = self.repo.remotes.origin.url
-                if self.verbose:
+                if self.debug_mode:
                     self.debug(f"Setting up GitHub API with remote: {remote_url}")
                 self.github_service.setup_github_api(remote_url)
             except Exception as e:
-                if self.verbose:
+                if self.debug_mode:
                     self.debug(f"Failed to setup GitHub API: {e}")
         
         self.branch_status_service = BranchStatusService(
@@ -86,7 +87,10 @@ class BranchKeeper:
             self.github_service,
             self.verbose
         )
-        self.display_service = DisplayService()
+        self.display_service = DisplayService(
+            verbose=self.verbose,
+            debug=self.debug_mode
+        )
 
         # Initialize statistics
         self.stats = {
@@ -154,61 +158,6 @@ class BranchKeeper:
             console.print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
             return False
 
-    def _print_branch_table(self, local_branches, status_task, progress):
-        """Prepare branch data and use display service to show table."""
-        branches_data = []
-        
-        for branch_name in local_branches:
-            status = self.branch_status_service.get_branch_status(branch_name, self.main_branch).value
-            age_days = self.git_service.get_branch_age(branch_name)
-            has_remote = self.git_service.has_remote_branch(branch_name)
-            
-            should_process, reason = self.branch_status_service.should_process_branch(
-                branch_name, 
-                BranchStatus(status),
-                self.main_branch
-            )
-            
-            if self.verbose:
-                if should_process:
-                    self.debug(f"Branch {branch_name} will be processed: {reason}")
-                else:
-                    self.debug(f"Branch {branch_name} will be skipped: {reason}")
-            
-            branch_data = {
-                'name': branch_name,
-                'status': status,
-                'age_days': age_days,
-                'has_remote': has_remote,
-                'sync_status': self.git_service.get_branch_sync_status(branch_name, self.main_branch),
-                'pr_count': 0,
-                'would_clean': should_process,
-                'is_current': branch_name == self.repo.active_branch.name,
-                'last_commit_date': self.git_service.get_last_commit_date(branch_name),
-                'stale_days': self.min_stale_days,
-                'github_disabled': not self.github_service.github_enabled,
-            }
-            
-            if self.github_service.github_enabled and not self.bypass_github:
-                branch_data['pr_count'] = self.github_service.get_pr_count(branch_name)
-            
-            branches_data.append(branch_data)
-            
-            # Update only the status task
-            progress.update(status_task, advance=1)
-
-        # Get GitHub base URL for links
-        remote_url = self.repo.remotes.origin.url
-        github_base_url = None
-        if 'github.com' in remote_url:
-            if remote_url.startswith('git@'):
-                org_repo = remote_url.split(':')[1].replace('.git', '')
-                github_base_url = f"https://github.com/{org_repo}"
-            else:
-                github_base_url = remote_url.replace('.git', '')
-
-        return self.display_service.display_branch_table(branches_data, self.repo, github_base_url, self.branch_status_service)
-
     def process_branches(self, cleanup_enabled: bool = False) -> None:
         """Process all branches according to configuration."""
         try:
@@ -236,50 +185,52 @@ class BranchKeeper:
                 console.print("No branches to process")
                 return
 
-            # Process branches
+            # Process branches first without PR data
             branch_details = []
+            pr_data = {}
+            
+            # Process branches
+            status_filter = self.config.get('status_filter', 'all')
             
             if self.verbose:
                 console.print("Processing branches...")
                 for branch in branches:
-                    status = self.branch_status_service.get_branch_status(branch, self.main_branch)
-                    sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
-                    pr_count = 0
-                    if not self.bypass_github and self.github_service.is_configured():
-                        pr_count = self.github_service.get_pr_count(branch)
-                    
-                    branch_details.append(BranchDetails(
-                        name=branch,
-                        last_commit_date=self.git_service.get_last_commit_date(branch),
-                        age_days=self.git_service.get_branch_age(branch),
-                        status=status,
-                        has_local_changes=False,  # TODO: Implement this
-                        has_remote=self.git_service.has_remote_branch(branch),
-                        sync_status=sync_status,
-                        pr_status=str(pr_count) if pr_count > 0 else None
-                    ))
+                    details = self._process_single_branch(branch, status_filter, pr_data, None)
+                    if details:
+                        branch_details.append(details)
             else:
                 with Progress() as progress:
                     task = progress.add_task("Processing branches...", total=len(branches))
-                    
                     for branch in branches:
-                        status = self.branch_status_service.get_branch_status(branch, self.main_branch)
-                        sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
-                        pr_count = 0
-                        if not self.bypass_github and self.github_service.is_configured():
-                            pr_count = self.github_service.get_pr_count(branch)
+                        details = self._process_single_branch(branch, status_filter, pr_data, task)
+                        if details:
+                            branch_details.append(details)
+
+            # Only fetch PR data for branches that need it
+            if self.github_service.github_enabled and not self.bypass_github:
+                try:
+                    # Only check PRs for unmerged remote branches
+                    unmerged_remote_branches = [
+                        b.name for b in branch_details 
+                        if b.status != BranchStatus.MERGED 
+                        and self.git_service.has_remote_branch(b.name)
+                    ]
+                    if unmerged_remote_branches:
+                        if self.debug_mode:
+                            self.debug(f"Fetching PR data for {len(unmerged_remote_branches)} unmerged remote branches")
+                        pr_data = self.github_service.get_bulk_pr_data(unmerged_remote_branches)
                         
-                        branch_details.append(BranchDetails(
-                            name=branch,
-                            last_commit_date=self.git_service.get_last_commit_date(branch),
-                            age_days=self.git_service.get_branch_age(branch),
-                            status=status,
-                            has_local_changes=False,  # TODO: Implement this
-                            has_remote=self.git_service.has_remote_branch(branch),
-                            sync_status=sync_status,
-                            pr_status=str(pr_count) if pr_count > 0 else None
-                        ))
-                        progress.update(task, advance=1)
+                        # Update branch statuses with PR data
+                        for branch in branch_details:
+                            if branch.name in pr_data:
+                                if pr_data[branch.name]['count'] > 0:
+                                    branch.status = BranchStatus.ACTIVE
+                                    branch.pr_status = str(pr_data[branch.name]['count'])
+                                elif pr_data[branch.name]['merged']:
+                                    branch.status = BranchStatus.MERGED
+                except Exception as e:
+                    if self.debug_mode:
+                        self.debug(f"Failed to fetch PR data: {e}")
 
             # Get GitHub base URL for links
             remote_url = self.repo.remotes.origin.url
@@ -297,10 +248,47 @@ class BranchKeeper:
                     branch_details,
                     self.repo,
                     github_base_url,
-                    self.branch_status_service
+                    self.branch_status_service,
+                    show_summary=self.verbose
                 )
+            else:
+                console.print("No branches match the filter criteria")
         except Exception as e:
             console.print(f"[red]Error processing branches: {e}[/red]")
+
+    def _process_single_branch(self, branch: str, status_filter: str, pr_data: dict, progress_task=None) -> Optional[BranchDetails]:
+        """Process a single branch and return its details if it matches the filter."""
+        status = self.branch_status_service.get_branch_status(branch, self.main_branch, pr_data)
+        
+        # Skip if doesn't match filter
+        if status_filter != 'all' and status.value != status_filter:
+            if self.verbose:
+                self.debug(f"Skipping {branch} - status {status.value} doesn't match filter {status_filter}")
+            if progress_task:
+                Progress.get_default_progress().update(progress_task, advance=1)
+            return None
+        
+        sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
+        
+        # Get PR count, show empty string if 0
+        pr_count = pr_data.get(branch, {}).get('count', 0) if pr_data else 0
+        pr_display = str(pr_count) if pr_count > 0 else ""
+        
+        details = BranchDetails(
+            name=branch,
+            last_commit_date=self.git_service.get_last_commit_date(branch),
+            age_days=self.git_service.get_branch_age(branch),
+            status=status,
+            has_local_changes=False,  # TODO: Implement this
+            has_remote=self.git_service.has_remote_branch(branch),
+            sync_status=sync_status,
+            pr_status=pr_display
+        )
+        
+        if progress_task:
+            Progress.get_default_progress().update(progress_task, advance=1)
+            
+        return details
 
     def cleanup(self):
         """Clean up branches."""
@@ -311,6 +299,6 @@ class BranchKeeper:
         return self.git_service.update_main_branch(self.main_branch)
 
     def debug(self, message: str) -> None:
-        """Print debug message if verbose mode is enabled."""
-        if self.verbose:
+        """Print debug message if debug mode is enabled."""
+        if self.config.get('debug', False):
             print(f"[BranchKeeper] {message}")
