@@ -210,12 +210,8 @@ class BranchKeeper:
             # Only fetch PR data for branches that need it
             if self.github_service.github_enabled and not self.bypass_github:
                 try:
-                    # Only check PRs for unmerged remote branches and main branch
-                    branches_to_check = [
-                        b.name for b in branch_details 
-                        if (b.status != BranchStatus.MERGED and self.git_service.has_remote_branch(b.name))
-                        or b.name == self.main_branch
-                    ]
+                    # Check PRs for all branches
+                    branches_to_check = [b.name for b in branch_details]
                     if branches_to_check:
                         if self.debug_mode:
                             self.debug(f"Fetching PR data for {len(branches_to_check)} branches")
@@ -265,7 +261,16 @@ class BranchKeeper:
 
     def _process_single_branch(self, branch: str, status_filter: str, pr_data: dict, progress=None) -> Optional[BranchDetails]:
         """Process a single branch and return its details if it matches the filter."""
-        status = self.branch_status_service.get_branch_status(branch, self.main_branch, pr_data)
+        # Check PR status first if available
+        if pr_data and branch in pr_data:
+            if pr_data[branch]['merged']:
+                status = BranchStatus.MERGED
+            elif pr_data[branch]['closed']:
+                status = BranchStatus.ACTIVE
+            else:
+                status = self.branch_status_service.get_branch_status(branch, self.main_branch, pr_data)
+        else:
+            status = self.branch_status_service.get_branch_status(branch, self.main_branch, pr_data)
         
         # Skip if doesn't match filter
         if status_filter != 'all' and status.value != status_filter:

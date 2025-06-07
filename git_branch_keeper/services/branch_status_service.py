@@ -21,6 +21,7 @@ class BranchStatusService:
         self.ignore_patterns = config.get('ignore_patterns', [])
         self.min_stale_days = config.get('stale_days', 30)
         self.status_filter = config.get('status_filter', "all")
+        self.main_branch = config.get('main_branch', 'main')
 
     def debug(self, message: str, source: str = "Branch Status") -> None:
         """Print debug message if debug mode is enabled."""
@@ -36,28 +37,7 @@ class BranchStatusService:
             self.debug(f"Branch {branch_name} is protected, marking as active")
             return BranchStatus.ACTIVE
 
-        # First check PR status if GitHub is enabled
-        if hasattr(self.github_service, 'get_branch_pr_status'):
-            pr_status = self.github_service.get_branch_pr_status(branch_name)
-            self.debug(f"PR Status for {branch_name}: {pr_status}")
-            if pr_status['has_pr']:
-                if pr_status['state'] == 'merged':
-                    self.debug(f"Branch {branch_name} was merged via PR")
-                    return BranchStatus.MERGED
-                elif pr_status['state'] == 'closed':
-                    self.debug(f"Branch {branch_name} had PR closed without merging, marking as active")
-                    return BranchStatus.ACTIVE
-                elif pr_status['state'] == 'open':
-                    self.debug(f"Branch {branch_name} has open PR")
-                    return BranchStatus.ACTIVE
-
-        # Then try to detect merge using Git methods (faster)
-        self.debug(f"Checking if {branch_name} is merged into {main_branch}...")
-        if self.git_service.is_branch_merged(branch_name, main_branch):
-            self.debug(f"Branch {branch_name} is merged into {main_branch} (Git)")
-            return BranchStatus.MERGED
-
-        # Check PR data if available
+        # Check PR data if available (only use this during bulk processing)
         if pr_data and branch_name in pr_data:
             pr_info = pr_data[branch_name]
             if pr_info.get('merged', False):
@@ -69,6 +49,12 @@ class BranchStatusService:
             if pr_info.get('count', 0) > 0:
                 self.debug(f"Branch {branch_name} marked as active (has open PRs)")
                 return BranchStatus.ACTIVE
+
+        # Then try to detect merge using Git methods (faster)
+        self.debug(f"Checking if {branch_name} is merged into {main_branch}...")
+        if self.git_service.is_branch_merged(branch_name, main_branch):
+            self.debug(f"Branch {branch_name} is merged into {main_branch} (Git)")
+            return BranchStatus.MERGED
 
         # Check branch age last (simplest check)
         age_days = self.git_service.get_branch_age(branch_name)
@@ -199,7 +185,7 @@ class BranchStatusService:
             age_days = self.git_service.get_branch_age(branch_name)
 
             # Get branch status
-            status = self.get_branch_status(branch_name, self.git_service.repo.active_branch.name)
+            status = self.get_branch_status(branch_name, self.main_branch)
 
             # Get local changes status
             status_details = self.git_service.get_branch_status_details(branch_name)
@@ -210,18 +196,11 @@ class BranchStatusService:
             ])
 
             # Get sync status
-            sync_status = self.git_service.get_branch_sync_status(branch_name, self.git_service.repo.active_branch.name)
+            sync_status = self.git_service.get_branch_sync_status(branch_name, self.main_branch)
 
-            # Get PR status if GitHub is enabled
+            # Initialize PR fields as None - they will be populated later during bulk fetch
             pr_status = None
             notes = None
-            if self.github_service.github_enabled:
-                pr_count = self.github_service.get_pr_count(branch_name)
-                pr_info = self.github_service.get_branch_pr_status(branch_name)
-                self.debug(f"PR Info for {branch_name}: {pr_info}")
-                pr_status = str(pr_count) if pr_count > 0 else None
-                if pr_info['has_pr'] and pr_info['state'] == 'closed':
-                    notes = "had PR closed without merging, marking as active"
 
             return BranchDetails(
                 name=branch_name,
