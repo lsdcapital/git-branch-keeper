@@ -139,7 +139,10 @@ class GitService:
 
     def update_main_branch(self, main_branch: str) -> bool:
         """Update the main branch from remote."""
+        import git_branch_keeper.core as core
+        
         try:
+            core.in_git_operation = True
             if self.verbose:
                 self.debug(f"Updating {main_branch} from remote...")
             self.remote.pull(main_branch)
@@ -148,10 +151,15 @@ class GitService:
             if self.verbose:
                 self.debug(f"Error updating {main_branch}: {e}")
             return False
+        finally:
+            core.in_git_operation = False
 
     def get_remote_branches(self) -> list:
         """Get list of remote branches."""
+        import git_branch_keeper.core as core
+        
         try:
+            core.in_git_operation = True
             if self.verbose:
                 self.debug("Fetching remote branches...")
             self.remote.fetch()
@@ -163,10 +171,15 @@ class GitService:
             if self.verbose:
                 self.debug(f"Error fetching remote branches: {e}")
             return []
+        finally:
+            core.in_git_operation = False
 
     def get_branch_status_details(self, branch_name: str) -> dict:
         """Get detailed status of a branch."""
+        import git_branch_keeper.core as core
+        
         try:
+            core.in_git_operation = True
             current = self.repo.active_branch.name
             if current != branch_name:
                 self.repo.git.checkout(branch_name)
@@ -185,6 +198,8 @@ class GitService:
             if self.verbose:
                 self.debug(f"Error getting status details for {branch_name}: {e}")
             return {'modified': False, 'untracked': False, 'staged': False}
+        finally:
+            core.in_git_operation = False
 
     def debug(self, message: str, source: str = "Git") -> None:
         """Print debug message if debug mode is enabled."""
@@ -316,3 +331,39 @@ class GitService:
             self.debug(f"Error checking if branch is merged: {e}")
             self._merge_status_cache[cache_key] = False
             return False
+
+    def delete_branch(self, branch_name: str, dry_run: bool = False) -> bool:
+        """Delete a branch locally and remotely if it exists."""
+        import git_branch_keeper.core as core
+        
+        try:
+            # Set flag to indicate we're in a git operation
+            core.in_git_operation = True
+            
+            # Delete local branch
+            if not dry_run:
+                console.print(f"Deleting local branch {branch_name}...")
+                self.repo.delete_head(branch_name, force=True)
+            
+            # Delete remote branch if it exists
+            if self.has_remote_branch(branch_name):
+                if not dry_run:
+                    console.print(f"Deleting remote branch {branch_name}...")
+                    self.remote.push(refspec=f":{branch_name}")
+                    console.print(f"[green]Deleted branch {branch_name} (local and remote)[/green]")
+                else:
+                    console.print(f"[yellow]Would delete branch {branch_name} (local and remote)[/yellow]")
+            else:
+                if not dry_run:
+                    console.print(f"[green]Deleted branch {branch_name} (local only)[/green]")
+                else:
+                    console.print(f"[yellow]Would delete branch {branch_name} (local only)[/yellow]")
+            
+            return True
+            
+        except Exception as e:
+            console.print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
+            return False
+        finally:
+            # Clear the flag
+            core.in_git_operation = False

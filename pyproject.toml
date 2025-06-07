@@ -7,7 +7,7 @@ name = "git-branch-keeper"
 version = "0.1.0"
 description = "A smart Git branch management tool that helps keep your repository clean and organized"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 license = "MIT"
 keywords = ["git", "branch", "management", "cleanup"]
 authors = [

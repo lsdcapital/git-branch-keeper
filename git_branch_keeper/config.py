@@ -11,7 +11,7 @@ def load_config(config_file: Optional[str] = None) -> Dict[str, Any]:
     
     Args:
         config_file: Optional path to config file. If not provided,
-                    looks in current directory first, then user's h`ome directory.
+                    looks in current directory first, then user's home directory.
     
     Returns:
         Dict containing configuration values
