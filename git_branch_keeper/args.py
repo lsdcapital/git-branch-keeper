@@ -1,8 +1,10 @@
 import argparse
+from .__version__ import __version__
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Git branch management tool")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show verbose output")
+    parser.add_argument("--version", action="version", version=f"git-branch-keeper {__version__}")
     parser.add_argument("--cleanup", action="store_true", help="Actually delete branches")
     parser.add_argument("--force", action="store_true", help="Skip confirmations")
     parser.add_argument("--stale-days", type=int, default=30, help="Days until branch is stale")
