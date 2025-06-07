@@ -233,6 +233,8 @@ class BranchKeeper:
                                         branch.pr_status = str(pr_data[branch.name]['count'])
                                 elif pr_data[branch.name]['merged']:
                                     branch.status = BranchStatus.MERGED
+                                    # Update sync status to reflect PR merge
+                                    branch.sync_status = 'merged-pr'
                                 elif pr_data[branch.name]['closed']:
                                     branch.notes = "PR closed without merging"
                 except Exception as e:
@@ -283,6 +285,16 @@ class BranchKeeper:
             return None
         
         sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
+        
+        # If the branch is merged, ensure sync_status reflects how it was detected
+        if status == BranchStatus.MERGED:
+            if sync_status not in ['merged-git', 'merged-pr']:
+                # Branch was detected as merged by status service but sync_status doesn't reflect it
+                # This happens when PR data overrides the detection
+                if pr_data and branch in pr_data and pr_data[branch].get('merged'):
+                    sync_status = 'merged-pr'
+                else:
+                    sync_status = 'merged-git'
         
         # Get PR count, show empty string if 0
         pr_count = pr_data.get(branch, {}).get('count', 0) if pr_data else 0

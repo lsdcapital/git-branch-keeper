@@ -14,6 +14,29 @@ A smart Git branch management tool that helps keep your repository clean and org
 - ⚡ Force mode for automated cleanup
 - 🔍 Dry-run mode to preview changes
 
+## Understanding Branch Status
+
+When you run `git-branch-keeper`, you'll see a table with these columns:
+
+- **Branch**: The branch name (* indicates current branch)
+- **Last Commit**: Date of the most recent commit
+- **Age (days)**: Days since the last commit
+- **Status**: 
+  - `active` - Branch has unmerged changes
+  - `merged` - Branch changes are in the main branch (safe to delete)
+  - `stale` - Branch is older than the configured stale days
+- **Sync**:
+  - `synced` - Local and remote are at the same commit
+  - `ahead X` - Local is X commits ahead of remote
+  - `behind X` - Local is X commits behind remote
+  - `diverged` - Local and remote have different commits
+  - `local-only` - No remote branch exists
+  - `merged-git` - Detected as merged by git
+  - `merged-pr` - Merged via GitHub PR
+- **Remote**: ✓ if branch exists on remote, ✗ if local only
+- **PRs**: Number of open pull requests (if GitHub token configured)
+- **Notes**: Additional information about the branch
+
 ## Installation
 
 ### Development Installation
