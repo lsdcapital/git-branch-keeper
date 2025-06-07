@@ -43,11 +43,10 @@ class GitHubService:
 
             self.github_repo = path
 
-            # Get GitHub token from environment
-            self.github_token = os.getenv('GITHUB_TOKEN')
+            # Check if we have a token (already set in __init__ from config or env)
             if not self.github_token:
                 if self.debug_mode:
-                    print("[GitHub] No GitHub token found. Running with reduced GitHub functionality")
+                    print("[GitHub] No GitHub token found. Running with reduced functionality")
                 return
 
             # Initialize GitHub API

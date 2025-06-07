@@ -24,7 +24,6 @@ def main():
             'protected_branches': parsed_args.protected,
             'ignore_patterns': parsed_args.ignore,
             'status_filter': parsed_args.filter,
-            'bypass_github': parsed_args.bypass_github,
             'main_branch': parsed_args.main_branch,
             'debug': parsed_args.debug
         }

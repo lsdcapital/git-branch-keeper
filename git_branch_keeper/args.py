@@ -11,7 +11,6 @@ def parse_args():
     parser.add_argument("--protected", nargs="*", default=["main", "master"], help="Protected branches")
     parser.add_argument("--ignore", nargs="*", default=[], help="Branch patterns to ignore")
     parser.add_argument("--filter", choices=["all", "stale", "merged"], default="all", help="Filter which branches to show and process (all/stale/merged)")
-    parser.add_argument("--bypass-github", action="store_true", help="Skip GitHub API checks")
     parser.add_argument("--main-branch", default="main", help="Main branch name")
     parser.add_argument("--debug", action="store_true", help="Show debug information for troubleshooting")
     

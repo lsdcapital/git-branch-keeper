@@ -99,7 +99,41 @@ cp git-branch-keeper.example.json git-branch-keeper.json
 }
 ```
 
-The `protected_branches` list specifies branches that will never be modified or deleted by the tool. By default, this includes "main" and "master". The GitHub token is optional and only required if you want to check for open pull requests before cleaning branches. The repository information is automatically detected from your git remote URL.
+The `protected_branches` list specifies branches that will never be modified or deleted by the tool. By default, this includes "main" and "master". The repository information is automatically detected from your git remote URL.
+
+### GitHub Token Setup
+
+The GitHub token enables the tool to check for open pull requests and detect merged PRs. To set up a token:
+
+1. **Create a GitHub Personal Access Token**:
+   - Go to https://github.com/settings/tokens/new
+   - Or navigate: GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
+   - Select these scopes:
+     - `repo` - Full control of private repositories
+     - `read:org` - Read org and team membership (if working with org repos)
+   - Generate the token and copy it
+
+2. **Configure the token** (choose one method):
+   
+   **Option A: Environment Variable (Recommended)**
+   ```bash
+   # Set for current session
+   export GITHUB_TOKEN="your-token-here"
+   
+   # Add to shell config for persistence
+   echo 'export GITHUB_TOKEN="your-token-here"' >> ~/.zshrc  # or ~/.bashrc
+   source ~/.zshrc
+   ```
+   
+   **Option B: Configuration File**
+   ```json
+   {
+       "github_token": "your-token-here",
+       // ... other config options
+   }
+   ```
+   
+   ⚠️ **Security Note**: If using the config file method, ensure you don't commit the token to version control. Add `git-branch-keeper.json` to your `.gitignore`.
 
 Branch patterns support glob syntax:
 - `*` matches any sequence of characters

@@ -62,7 +62,6 @@ class BranchKeeper:
         self.interactive = config.get('interactive', True)
         self.dry_run = config.get('dry_run', True)
         self.force_mode = config.get('force', False)
-        self.bypass_github = config.get('bypass_github', False)
         self.main_branch = config.get('main_branch', 'main')
 
         # Initialize services
@@ -70,15 +69,20 @@ class BranchKeeper:
         self.git_service = GitService(self.repo, self.config)
         
         # Setup GitHub integration
-        if not self.bypass_github:
-            try:
-                remote_url = self.repo.remotes.origin.url
-                if self.debug_mode:
-                    self.debug(f"Setting up GitHub API with remote: {remote_url}")
-                self.github_service.setup_github_api(remote_url)
-            except Exception as e:
-                if self.debug_mode:
-                    self.debug(f"Failed to setup GitHub API: {e}")
+        try:
+            remote_url = self.repo.remotes.origin.url
+            if self.debug_mode:
+                self.debug(f"Setting up GitHub API with remote: {remote_url}")
+            self.github_service.setup_github_api(remote_url)
+            
+            # If GitHub is available but no token, show a helpful message
+            if not self.github_service.github_enabled and 'github.com' in remote_url:
+                console.print("[yellow]💡 Tip: Set up a GitHub token for better merge detection and PR status[/yellow]")
+                console.print("[yellow]   See: git-branch-keeper --help or check the README for setup instructions[/yellow]")
+                console.print("")
+        except Exception as e:
+            if self.debug_mode:
+                self.debug(f"Failed to setup GitHub API: {e}")
         
         self.branch_status_service = BranchStatusService(
             self.repo,
@@ -208,7 +212,7 @@ class BranchKeeper:
                         progress.update(task, advance=1)
 
             # Only fetch PR data for branches that need it
-            if self.github_service.github_enabled and not self.bypass_github:
+            if self.github_service.github_enabled:
                 try:
                     # Check PRs for all branches
                     branches_to_check = [b.name for b in branch_details]
