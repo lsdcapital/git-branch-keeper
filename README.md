@@ -25,13 +25,8 @@ Since this package is currently in development, install it directly from the sou
 git clone https://github.com/WeR1Hub/git-branch-keeper.git
 cd git-branch-keeper
 
-# Install in development mode using pipx
-pipx install -e .
-
-# Or using pip in a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .
+# Install using uv
+uv sync --dev
 ```
 
 ### Future Installation (Once Published)
@@ -39,11 +34,8 @@ pip install -e .
 Once the package is published to PyPI, you'll be able to install it using:
 
 ```bash
-# Using pipx (Recommended)
-pipx install git-branch-keeper
-
-# Or using pip
-pip install git-branch-keeper
+# Using uv
+uv tool install git-branch-keeper
 ```
 
 ## Usage
