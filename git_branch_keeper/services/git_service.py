@@ -251,26 +251,54 @@ class GitService:
                 self._merge_status_cache[cache_key] = False
                 return False
 
-            # Method 0: Check for squash merge by comparing patch content
+            # Method 0: Check for squash merge by comparing changes
             self.debug("[Method 0] Checking for squash merge...")
             try:
-                # Get the patch-id of the branch's last commit
-                branch_patch = self.repo.git.show(
-                    '--pretty=format:', '--patch', branch_name
-                )
-                if branch_patch:
-                    # Search recent commits in main for matching changes
+                # Get all commits on the branch that aren't on main
+                branch_commits = list(self.repo.iter_commits(f'{main_branch}..{branch_name}'))
+                if not branch_commits:
+                    # No unique commits, might already be merged
+                    return False
+                
+                # Get the combined diff of all branch commits
+                branch_diff = self.repo.git.diff(f'{main_branch}...{branch_name}', '--no-color')
+                
+                if branch_diff:
+                    # Search recent commits in main for similar changes
                     for commit in self.repo.iter_commits(main_branch, max_count=100):
-                        commit_patch = self.repo.git.show(
-                            '--pretty=format:', '--patch', commit.hexsha
-                        )
-                        if branch_patch in commit_patch:
-                            self.debug(f"[Method 0] Found squash merge in commit {commit.hexsha}")
-                            self.merge_detection_stats['method0'] += 1
-                            self._merge_status_cache[cache_key] = True
-                            return True
+                        try:
+                            # Get the diff introduced by this commit
+                            commit_diff = self.repo.git.show(commit.hexsha, '--no-color', '--format=')
+                            
+                            # Check if the diffs are substantially similar
+                            # This is a heuristic - if the branch diff is contained in the commit diff,
+                            # it's likely a squash merge
+                            if len(branch_diff) > 50 and branch_diff in commit_diff:
+                                self.debug(f"[Method 0] Found squash merge in commit {commit.hexsha}")
+                                self.merge_detection_stats['method0'] += 1
+                                self._merge_status_cache[cache_key] = True
+                                return True
+                        except:
+                            continue
             except git.exc.GitCommandError as e:
                 self.debug(f"[Method 0] Error checking squash merge: {e}")
+
+            # Method 0.5: Check if branch was deleted on remote (common after PR merge)
+            self.debug("[Method 0.5] Checking if branch was deleted on remote...")
+            try:
+                # If branch exists locally but not on remote, it might have been merged and deleted
+                if not self.has_remote_branch(branch_name):
+                    # Check if it ever existed on remote by looking at tracking info
+                    try:
+                        tracking = self.repo.git.config('--get', f'branch.{branch_name}.merge')
+                        if tracking:
+                            self.debug(f"[Method 0.5] Branch {branch_name} was tracking remote but remote is gone (likely merged)")
+                            # Don't count this as definitive merge, but it's a strong hint
+                            # Continue to other methods for confirmation
+                    except:
+                        pass
+            except:
+                pass
 
             # Method 1: Fast check using rev-list (fastest)
             self.debug("[Method 1] Using fast rev-list check...")
