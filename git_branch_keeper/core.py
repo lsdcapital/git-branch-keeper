@@ -133,14 +133,24 @@ class BranchKeeper:
                 if status_details['staged']:
                     warning.append("staged files")
                 
-                message = f"[yellow]Warning: {branch_name} has {', '.join(warning)}[/yellow]"
+                # Show a cleaner warning
+                change_indicators = []
+                if status_details['modified']:
+                    change_indicators.append("M")
+                if status_details['untracked']:
+                    change_indicators.append("U")
+                if status_details['staged']:
+                    change_indicators.append("S")
+                
+                console.print(f"[yellow]⚠️  {branch_name} has uncommitted changes when checked out: {'/'.join(change_indicators)}[/yellow]")
+                console.print("[dim]   This might indicate files that are ignored differently between branches[/dim]")
+                
                 if self.interactive:
-                    console.print(message)
-                    response = input(f"Still want to delete branch {branch_name}? [y/N] ")
+                    response = input(f"   Still want to delete branch {branch_name}? [y/N] ")
                     if response.lower() != 'y':
                         return False
                 else:
-                    console.print(f"{message} - Skipping")
+                    console.print(f"   Skipping due to uncommitted changes")
                     return False
 
             remote_exists = self.git_service.has_remote_branch(branch_name)
@@ -260,6 +270,42 @@ class BranchKeeper:
                     self.branch_status_service,
                     show_summary=self.verbose
                 )
+                
+                # If cleanup is enabled, delete the branches
+                if cleanup_enabled:
+                    branches_to_delete = [
+                        branch for branch in branch_details 
+                        if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
+                        and branch.name not in self.protected_branches
+                    ]
+                    
+                    if branches_to_delete:
+                        console.print(f"\n[yellow]Found {len(branches_to_delete)} branches to clean up[/yellow]")
+                        
+                        # If not force mode, show what will be deleted and ask for confirmation
+                        if not self.force_mode:
+                            console.print("\nThe following branches will be deleted:")
+                            for branch in branches_to_delete:
+                                reason = "stale" if branch.status == BranchStatus.STALE else "merged"
+                                remote_info = "local and remote" if branch.has_remote else "local only"
+                                console.print(f"  • {branch.name} ({reason}, {remote_info})")
+                            
+                            response = console.input("\nProceed with deletion? [y/N] ")
+                            if response.lower() != 'y':
+                                console.print("[yellow]Cleanup cancelled[/yellow]")
+                                return
+                        
+                        # Delete the branches
+                        console.print("")
+                        deleted_count = 0
+                        for branch in branches_to_delete:
+                            reason = "stale" if branch.status == BranchStatus.STALE else "merged"
+                            if self.delete_branch(branch.name, reason):
+                                deleted_count += 1
+                        
+                        console.print(f"\n[green]Successfully deleted {deleted_count} branches[/green]")
+                    else:
+                        console.print("\n[green]No branches to clean up![/green]")
             else:
                 console.print("No branches match the filter criteria")
         except Exception as e:
