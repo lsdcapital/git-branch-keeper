@@ -1,50 +1,54 @@
 """Core functionality for git-branch-keeper"""
 
-import os
 import signal
 import sys
-from datetime import datetime, timezone
-from fnmatch import fnmatch
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from typing import Dict, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import git
 from rich.console import Console
 from rich.progress import Progress
-from rich.table import Table
 
 from git_branch_keeper.models.branch import BranchStatus, SyncStatus, BranchDetails
 from git_branch_keeper.services.github_service import GitHubService
 from git_branch_keeper.services.git_service import GitService
 from git_branch_keeper.services.display_service import DisplayService
 from git_branch_keeper.services.branch_status_service import BranchStatusService
+from git_branch_keeper.services.cache_service import CacheService
+from git_branch_keeper.threading_utils import get_optimal_worker_count
+from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.config import Config
 
 console = Console()
+logger = get_logger(__name__)
 
-# Global flag to track if we're in the middle of a Git operation
-in_git_operation = False
+# Module-level reference to the active BranchKeeper instance for signal handling
+_active_keeper: Optional['BranchKeeper'] = None
 
-def signal_handler(signum, frame):
+def _signal_handler(signum, frame):
     """Handle interrupt signals gracefully."""
     if signum == signal.SIGINT:
         print()  # New line after ^C
-        if in_git_operation:
+        if _active_keeper and _active_keeper.git_service.in_git_operation:
             console.print("\n[yellow]Interrupted! Waiting for current Git operation to complete...[/yellow]")
         else:
             console.print("\n[yellow]Interrupted! Cleaning up...[/yellow]")
         sys.exit(1)
 
 # Set up signal handlers
-signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 class BranchKeeper:
     """Main class for managing Git branches."""
 
-    def __init__(self, repo_path: str, config: dict):
+    def __init__(self, repo_path: str, config: Union[Config, dict]):
         """Initialize BranchKeeper."""
         self.repo_path = repo_path
-        self.config = config
+        # Convert dict to Config if needed (backward compatibility)
+        if isinstance(config, dict):
+            self.config = Config.from_dict(config)
+        else:
+            self.config = config
         self.verbose = config.get('verbose', False)
         self.debug_mode = config.get('debug', False)
         
@@ -65,27 +69,25 @@ class BranchKeeper:
         self.main_branch = config.get('main_branch', 'main')
 
         # Initialize services
-        self.github_service = GitHubService(self.repo, self.config)
-        self.git_service = GitService(self.repo, self.config)
+        self.github_service = GitHubService(self.repo_path, self.config)
+        self.git_service = GitService(self.repo_path, self.config)
         
         # Setup GitHub integration
         try:
             remote_url = self.repo.remotes.origin.url
-            if self.debug_mode:
-                self.debug(f"Setting up GitHub API with remote: {remote_url}")
+            logger.debug(f"Setting up GitHub API with remote: {remote_url}")
             self.github_service.setup_github_api(remote_url)
-            
+
             # If GitHub is available but no token, show a helpful message
             if not self.github_service.github_enabled and 'github.com' in remote_url:
                 console.print("[yellow]💡 Tip: Set up a GitHub token for better merge detection and PR status[/yellow]")
                 console.print("[yellow]   See: git-branch-keeper --help or check the README for setup instructions[/yellow]")
                 console.print("")
         except Exception as e:
-            if self.debug_mode:
-                self.debug(f"Failed to setup GitHub API: {e}")
+            logger.debug(f"Failed to setup GitHub API: {e}")
         
         self.branch_status_service = BranchStatusService(
-            self.repo,
+            self.repo_path,
             self.config,
             self.git_service,
             self.github_service,
@@ -95,6 +97,7 @@ class BranchKeeper:
             verbose=self.verbose,
             debug=self.debug_mode
         )
+        self.cache_service = CacheService(self.repo_path)
 
         # Initialize statistics
         self.stats = {
@@ -104,14 +107,9 @@ class BranchKeeper:
             "skipped_pattern": 0
         }
 
-    def _setup_github_api(self):
-        """Setup GitHub API access if possible."""
-        try:
-            remote_url = self.repo.remotes.origin.url
-            self.debug(f"Remote URL: {remote_url}")
-            self.github_service.setup_github_api(remote_url)
-        except Exception as e:
-            self.debug(f"Error setting up GitHub API: {e}")
+        # Set as active keeper for signal handling
+        global _active_keeper
+        _active_keeper = self
 
     def delete_branch(self, branch_name: str, reason: str) -> bool:
         """Delete a branch or show what would be deleted in dry-run mode."""
@@ -121,6 +119,16 @@ class BranchKeeper:
                 console.print(f"[yellow]Skipping {branch_name} - Has open PR[/yellow]")
                 self.stats["skipped_pr"] += 1
                 return False
+
+            # Cannot delete current branch - check BEFORE dry_run
+            try:
+                current_branch = self.repo.active_branch.name
+                if branch_name == current_branch:
+                    console.print(f"[yellow]Cannot delete current branch {branch_name}[/yellow]")
+                    return False
+            except TypeError:
+                # Detached HEAD state - no active branch, so we can delete any branch
+                pass
 
             # Check for local changes
             status_details = self.git_service.get_branch_status_details(branch_name)
@@ -132,7 +140,7 @@ class BranchKeeper:
                     warning.append("untracked files")
                 if status_details['staged']:
                     warning.append("staged files")
-                
+
                 # Show a cleaner warning
                 change_indicators = []
                 if status_details['modified']:
@@ -141,16 +149,16 @@ class BranchKeeper:
                     change_indicators.append("U")
                 if status_details['staged']:
                     change_indicators.append("S")
-                
+
                 console.print(f"[yellow]⚠️  {branch_name} has uncommitted changes when checked out: {'/'.join(change_indicators)}[/yellow]")
                 console.print("[dim]   This might indicate files that are ignored differently between branches[/dim]")
-                
+
                 if self.interactive:
                     response = input(f"   Still want to delete branch {branch_name}? [y/N] ")
                     if response.lower() != 'y':
                         return False
                 else:
-                    console.print(f"   Skipping due to uncommitted changes")
+                    console.print("   Skipping due to uncommitted changes")
                     return False
 
             remote_exists = self.git_service.has_remote_branch(branch_name)
@@ -160,11 +168,6 @@ class BranchKeeper:
                 else:
                     console.print(f"Would delete local branch {branch_name} ({reason})")
                 return True
-
-            # Cannot delete current branch
-            if branch_name == self.repo.active_branch.name:
-                console.print(f"[yellow]Cannot delete current branch {branch_name}[/yellow]")
-                return False
 
             return self.git_service.delete_branch(branch_name, self.dry_run)
 
@@ -176,140 +179,368 @@ class BranchKeeper:
         """Process all branches according to configuration."""
         try:
             # Check main branch status first
-            main_sync_status = self.git_service.get_branch_sync_status(self.main_branch, self.main_branch)
-            if "behind" in main_sync_status:
-                console.print(f"[yellow]Warning: Your {self.main_branch} branch is {main_sync_status}[/yellow]")
-                console.print(f"[yellow]Please update your {self.main_branch} branch first:[/yellow]")
-                console.print(f"  git checkout {self.main_branch}")
-                console.print(f"  git pull origin {self.main_branch}")
-                console.print("")
+            if not self._check_main_branch_status():
+                return
 
-            # Get all branches (excluding tags, stash, and remote refs)
-            branches = [
-                ref.name for ref in self.repo.refs 
-                if not ref.name.startswith('origin/') 
-                and not ref.name.startswith('refs/stash')
-                and not self.git_service.is_tag(ref.name)
-            ]
-            
-            # Only filter out ignored branches, keep protected ones
-            branches = [b for b in branches if not self.branch_status_service.should_ignore_branch(b)]
-
+            # Get and filter branches
+            branches = self._get_filtered_branches()
             if not branches:
                 console.print("No branches to process")
                 return
 
-            # Process branches first without PR data
-            branch_details = []
-            pr_data = {}
-            
-            # Process branches
-            status_filter = self.config.get('status_filter', 'all')
-            
-            if self.verbose:
-                console.print("Processing branches...")
-                for branch in branches:
-                    details = self._process_single_branch(branch, status_filter, pr_data, None)
-                    if details:
-                        branch_details.append(details)
-            else:
-                with Progress() as progress:
-                    task = progress.add_task("Processing branches...", total=len(branches))
-                    for branch in branches:
-                        details = self._process_single_branch(branch, status_filter, pr_data, progress)
-                        if details:
-                            branch_details.append(details)
-                        progress.update(task, advance=1)
+            # Check if we should use cache
+            use_cache = not self.config.get('refresh', False)
 
-            # Only fetch PR data for branches that need it
-            if self.github_service.github_enabled:
-                try:
-                    # Check PRs for all branches
-                    branches_to_check = [b.name for b in branch_details]
-                    if branches_to_check:
-                        if self.debug_mode:
-                            self.debug(f"Fetching PR data for {len(branches_to_check)} branches")
-                        pr_data = self.github_service.get_bulk_pr_data(branches_to_check)
-                        
-                        # Update branch statuses with PR data
-                        for branch in branch_details:
-                            if branch.name in pr_data:
-                                if pr_data[branch.name]['count'] > 0:
-                                    branch.status = BranchStatus.ACTIVE
-                                    if branch.name == self.main_branch:
-                                        # For main branch, show total PR count with a special indicator
-                                        branch.pr_status = f"target:{pr_data[branch.name]['count']}"
-                                    else:
-                                        branch.pr_status = str(pr_data[branch.name]['count'])
-                                elif pr_data[branch.name]['merged']:
-                                    branch.status = BranchStatus.MERGED
-                                    # Update sync status to reflect PR merge
-                                    branch.sync_status = 'merged-pr'
-                                elif pr_data[branch.name]['closed']:
-                                    branch.notes = "PR closed without merging"
-                except Exception as e:
-                    if self.debug_mode:
-                        self.debug(f"Failed to fetch PR data: {e}")
+            # Get cached branches (only immutable ones)
+            cached_branches = {}
+            if use_cache:
+                cached_branches = self.cache_service.get_cached_branches(branches)
+                logger.debug(f"Using {len(cached_branches)} cached branches")
 
-            # Get GitHub base URL for links
-            remote_url = self.repo.remotes.origin.url
-            github_base_url = None
-            if 'github.com' in remote_url:
-                if remote_url.startswith('git@'):
-                    org_repo = remote_url.split(':')[1].replace('.git', '')
-                    github_base_url = f"https://github.com/{org_repo}"
-                else:
-                    github_base_url = remote_url.replace('.git', '')
+            # Separate branches into cached vs needs processing
+            branches_to_process = [b for b in branches if b not in cached_branches]
 
-            # Display results
-            if branch_details:
-                self.display_service.display_branch_table(
-                    branch_details,
-                    self.repo,
-                    github_base_url,
-                    self.branch_status_service,
-                    show_summary=self.verbose
-                )
-                
-                # If cleanup is enabled, delete the branches
-                if cleanup_enabled:
-                    branches_to_delete = [
-                        branch for branch in branch_details 
-                        if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
-                        and branch.name not in self.protected_branches
-                    ]
-                    
-                    if branches_to_delete:
-                        console.print(f"\n[yellow]Found {len(branches_to_delete)} branches to clean up[/yellow]")
-                        
-                        # If not force mode, show what will be deleted and ask for confirmation
-                        if not self.force_mode:
-                            console.print("\nThe following branches will be deleted:")
-                            for branch in branches_to_delete:
-                                reason = "stale" if branch.status == BranchStatus.STALE else "merged"
-                                remote_info = "local and remote" if branch.has_remote else "local only"
-                                console.print(f"  • {branch.name} ({reason}, {remote_info})")
-                            
-                            response = console.input("\nProceed with deletion? [y/N] ")
-                            if response.lower() != 'y':
-                                console.print("[yellow]Cleanup cancelled[/yellow]")
-                                return
-                        
-                        # Delete the branches
-                        console.print("")
-                        deleted_count = 0
-                        for branch in branches_to_delete:
-                            reason = "stale" if branch.status == BranchStatus.STALE else "merged"
-                            if self.delete_branch(branch.name, reason):
-                                deleted_count += 1
-                        
-                        console.print(f"\n[green]Successfully deleted {deleted_count} branches[/green]")
-                    else:
-                        console.print("\n[green]No branches to clean up![/green]")
-            else:
-                console.print("No branches match the filter criteria")
+            if self.verbose or self.debug_mode:
+                if cached_branches:
+                    console.print(f"[dim]Using {len(cached_branches)} cached branches, checking {len(branches_to_process)} branches[/dim]")
+
+            # Process non-cached branches
+            branch_details = self._collect_branch_details(branches_to_process)
+
+            # Add cached branches to results
+            branch_details.extend(cached_branches.values())
+
+            # Sort all branches (both cached and newly processed)
+            branch_details = self._sort_branches(branch_details)
+
+            # Save cache with new data
+            if use_cache:
+                self.cache_service.save_cache(branch_details, self.main_branch)
+
+            # Display and optionally cleanup
+            self._display_and_cleanup(branch_details, cleanup_enabled)
+
         except Exception as e:
             console.print(f"[red]Error processing branches: {e}[/red]")
+
+    def _check_main_branch_status(self) -> bool:
+        """Check if main branch is up to date. Returns False if behind."""
+        main_sync_status = self.git_service.get_branch_sync_status(self.main_branch, self.main_branch)
+        if "behind" in main_sync_status:
+            console.print(f"[yellow]Warning: Your {self.main_branch} branch is {main_sync_status}[/yellow]")
+            console.print(f"[yellow]Please update your {self.main_branch} branch first:[/yellow]")
+            console.print(f"  git checkout {self.main_branch}")
+            console.print(f"  git pull origin {self.main_branch}")
+            console.print("")
+        return True
+
+    def _get_filtered_branches(self) -> list:
+        """Get all branches excluding tags, stash, remote refs, and ignored patterns."""
+        branches = [
+            ref.name for ref in self.repo.refs
+            if not ref.name.startswith('origin/')
+            and not ref.name.startswith('refs/stash')
+            and not self.git_service.is_tag(ref.name)
+        ]
+
+        # Only filter out ignored branches, keep protected ones
+        return [b for b in branches if not self.branch_status_service.should_ignore_branch(b)]
+
+    def _sort_branches(self, branch_details: list) -> list:
+        """Sort branches according to configuration with protected branches always first."""
+        sort_by = self.config.get('sort_by', 'age')
+        sort_order = self.config.get('sort_order', 'asc')
+        reverse = (sort_order == 'desc')
+
+        def date_to_int(date_str: str) -> int:
+            """Convert date string to integer for sorting. Returns 0 for invalid dates."""
+            try:
+                return int(date_str.replace('-', ''))
+            except (ValueError, AttributeError):
+                return 0  # Invalid dates sort to beginning
+
+        if sort_by == 'name':
+            # Sort: protected first, then alphabetically by branch name
+            branch_details.sort(key=lambda b: (
+                0 if b.name in self.protected_branches else 1,
+                b.name.lower() if not reverse else chr(255) + b.name.lower()
+            ), reverse=reverse if reverse else False)
+        elif sort_by == 'age':
+            # Sort: protected first, then by age, then newest first within same age
+            branch_details.sort(key=lambda b: (
+                0 if b.name in self.protected_branches else 1,
+                b.age_days if not reverse else -b.age_days,
+                -date_to_int(b.last_commit_date)  # Negative for newest-first
+            ))
+        elif sort_by == 'date':
+            # Sort: protected first, then by date, then alphabetically within same date
+            branch_details.sort(key=lambda b: (
+                0 if b.name in self.protected_branches else 1,
+                b.last_commit_date if not reverse else chr(255) + b.last_commit_date,
+                b.name.lower()
+            ), reverse=reverse if reverse else False)
+        elif sort_by == 'status':
+            # Sort: protected first, then by status, then by age, then newest first
+            status_order = {BranchStatus.ACTIVE: 0, BranchStatus.STALE: 1, BranchStatus.MERGED: 2}
+            branch_details.sort(key=lambda b: (
+                0 if b.name in self.protected_branches else 1,
+                status_order.get(b.status, 99) if not reverse else -status_order.get(b.status, 99),
+                b.age_days if not reverse else -b.age_days,
+                -date_to_int(b.last_commit_date)
+            ))
+
+        return branch_details
+
+    def _collect_branch_details(self, branches: list) -> list:
+        """Process branches and collect their details with unified progress tracking."""
+        if not branches:
+            return []
+
+        branch_details = []
+        status_filter = self.config.get('status_filter', 'all')
+        sequential = self.config.get('sequential', False)
+        pr_data: Dict[str, Dict] = {}
+
+        # Verbose mode: show simple output
+        if self.verbose or self.debug_mode:
+            console.print("Processing branches...")
+
+            # Fetch PR data
+            pr_data = self._fetch_pr_data_with_feedback(branches)
+
+            # Process branches sequentially in verbose mode for readable logs
+            for branch_name in branches:
+                details = self._process_single_branch(branch_name, status_filter, pr_data, None)
+                if details:
+                    branch_details.append(details)
+        else:
+            # Non-verbose mode: show spinner for PR fetch, then progress bar for processing
+
+            # Phase 1: Fetch PR data with spinner (only if there are branches to check)
+            if self.github_service.github_enabled and branches:
+                with console.status("[bold blue]Fetching PR data from GitHub...", spinner="dots"):
+                    try:
+                        logger.debug(f"Fetching PR data for {len(branches)} branches")
+                        pr_data = self.github_service.get_bulk_pr_data(branches)
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch PR data: {e}")
+
+            # Phase 2: Process branches with progress bar
+            with Progress() as progress:
+                # Determine worker count for progress message
+                if sequential:
+                    task_desc = "Processing branches..."
+                else:
+                    max_workers = get_optimal_worker_count(self.config.get('workers'))
+                    task_desc = f"Processing branches ({max_workers} workers)..."
+
+                task = progress.add_task(task_desc, total=len(branches))
+
+                if sequential:
+                    # Sequential processing
+                    branch_details = self._process_branches_sequential(
+                        branches, status_filter, pr_data, progress, task
+                    )
+                else:
+                    # Parallel processing
+                    branch_details = self._process_branches_parallel(
+                        branches, status_filter, pr_data, progress, task
+                    )
+
+        # Enrich branches with PR data (updates status and notes)
+        if pr_data:
+            self._apply_pr_data_enrichment(branch_details, pr_data)
+
+        # Sort branches according to configuration
+        branch_details = self._sort_branches(branch_details)
+
+        return branch_details
+
+    def _fetch_pr_data_with_feedback(self, branches: list) -> Dict[str, Dict]:
+        """Fetch PR data with user feedback."""
+        pr_data: Dict[str, Dict] = {}
+        if self.github_service.github_enabled:
+            try:
+                console.print("[dim]Fetching PR data from GitHub...[/dim]")
+                logger.debug(f"Fetching PR data for {len(branches)} branches")
+                pr_data = self.github_service.get_bulk_pr_data(branches)
+            except Exception as e:
+                logger.debug(f"Failed to fetch PR data: {e}")
+        return pr_data
+
+    def _process_branches_sequential(
+        self, branches: list, status_filter: str, pr_data: Dict, progress, task
+    ) -> list:
+        """Process branches sequentially."""
+        branch_details = []
+        for branch_name in branches:
+            details = self._process_single_branch(branch_name, status_filter, pr_data, None)
+            if details:
+                branch_details.append(details)
+            progress.update(task, advance=1)
+        return branch_details
+
+    def _process_branches_parallel(
+        self, branches: list, status_filter: str, pr_data: Dict, progress, task
+    ) -> list:
+        """Process branches in parallel using ThreadPoolExecutor."""
+        branch_details = []
+
+        # Get optimal worker count (already shown in progress bar)
+        max_workers = get_optimal_worker_count(
+            self.config.get('workers')
+        )
+        logger.debug(f"Using {max_workers} workers for parallel processing")
+
+        # Submit all branch processing tasks
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_branch = {
+                executor.submit(
+                    self._process_single_branch,
+                    branch, status_filter, pr_data, None
+                ): branch
+                for branch in branches
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_branch):
+                branch_name = future_to_branch[future]
+                try:
+                    details = future.result()
+                    if details:
+                        branch_details.append(details)
+                except Exception as e:
+                    logger.error(f"Error processing branch {branch_name}: {e}")
+                    if self.debug_mode:
+                        console.print_exception()
+                finally:
+                    progress.update(task, advance=1)
+
+        return branch_details
+
+    def _apply_pr_data_enrichment(self, branch_details: list, pr_data: Dict[str, Dict]) -> None:
+        """Apply PR data to branch details (updates status, pr_status, and notes).
+
+        Args:
+            branch_details: List of branch details to enrich
+            pr_data: Already-fetched PR data dictionary
+        """
+        # Update branch statuses with PR data
+        for branch in branch_details:
+            if branch.name not in pr_data:
+                continue
+
+            pr_info = pr_data[branch.name]
+            if pr_info['count'] > 0:
+                branch.status = BranchStatus.ACTIVE
+                if branch.name == self.main_branch:
+                    branch.pr_status = f"target:{pr_info['count']}"
+                else:
+                    branch.pr_status = str(pr_info['count'])
+            elif pr_info['merged']:
+                branch.status = BranchStatus.MERGED
+                branch.sync_status = SyncStatus.MERGED_PR.value
+            elif pr_info['closed']:
+                branch.notes = "PR closed without merging"
+
+    def _enrich_with_pr_data(self, branch_details: list) -> None:
+        """Fetch PR data and update branch details with it."""
+        if not self.github_service.github_enabled:
+            return
+
+        try:
+            branches_to_check = [b.name for b in branch_details]
+            if not branches_to_check:
+                return
+
+            logger.debug(f"Fetching PR data for {len(branches_to_check)} branches")
+            pr_data = self.github_service.get_bulk_pr_data(branches_to_check)
+
+            # Apply the enrichment
+            self._apply_pr_data_enrichment(branch_details, pr_data)
+
+        except Exception as e:
+            logger.debug(f"Failed to fetch PR data: {e}")
+
+    def _get_github_base_url(self) -> Optional[str]:
+        """Extract GitHub base URL from remote URL."""
+        try:
+            remote_url = self.repo.remotes.origin.url
+            if 'github.com' not in remote_url:
+                return None
+
+            if remote_url.startswith('git@'):
+                org_repo = remote_url.split(':')[1].replace('.git', '')
+                return f"https://github.com/{org_repo}"
+            else:
+                return remote_url.replace('.git', '')
+        except Exception:
+            return None
+
+    def _display_and_cleanup(self, branch_details: list, cleanup_enabled: bool) -> None:
+        """Display branch details and optionally perform cleanup."""
+        if not branch_details:
+            console.print("No branches match the filter criteria")
+            return
+
+        # Display results
+        github_base_url = self._get_github_base_url()
+        self.display_service.display_branch_table(
+            branch_details,
+            self.repo,
+            github_base_url,
+            self.branch_status_service,
+            show_summary=self.verbose
+        )
+
+        # Handle cleanup if enabled
+        if cleanup_enabled:
+            self._perform_cleanup(branch_details)
+
+    def _perform_cleanup(self, branch_details: list) -> None:
+        """Delete stale and merged branches after confirmation."""
+        branches_to_delete = [
+            branch for branch in branch_details
+            if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
+            and branch.name not in self.protected_branches
+        ]
+
+        if not branches_to_delete:
+            console.print("\n[green]No branches to clean up![/green]")
+            return
+
+        console.print(f"\n[yellow]Found {len(branches_to_delete)} branches to clean up[/yellow]")
+
+        # Get confirmation if not in force mode
+        if not self.force_mode:
+            if not self._confirm_deletion(branches_to_delete):
+                console.print("[yellow]Cleanup cancelled[/yellow]")
+                return
+
+        # Delete the branches
+        console.print("")
+        deleted_count = self._delete_branches(branches_to_delete)
+        console.print(f"\n[green]Successfully deleted {deleted_count} branches[/green]")
+
+    def _confirm_deletion(self, branches_to_delete: list) -> bool:
+        """Show branches to delete and ask for confirmation."""
+        console.print("\nThe following branches will be deleted:")
+        for branch in branches_to_delete:
+            reason = "stale" if branch.status == BranchStatus.STALE else "merged"
+            remote_info = "local and remote" if branch.has_remote else "local only"
+            console.print(f"  • {branch.name} ({reason}, {remote_info})")
+
+        response = console.input("\nProceed with deletion? [y/N] ")
+        return response.lower() == 'y'
+
+    def _delete_branches(self, branches_to_delete: list) -> int:
+        """Delete a list of branches and return count of deleted branches."""
+        deleted_count = 0
+        for branch in branches_to_delete:
+            reason = "stale" if branch.status == BranchStatus.STALE else "merged"
+            if self.delete_branch(branch.name, reason):
+                deleted_count += 1
+        return deleted_count
 
     def _process_single_branch(self, branch: str, status_filter: str, pr_data: dict, progress=None) -> Optional[BranchDetails]:
         """Process a single branch and return its details if it matches the filter."""
@@ -326,21 +557,20 @@ class BranchKeeper:
         
         # Skip if doesn't match filter
         if status_filter != 'all' and status.value != status_filter:
-            if self.verbose:
-                self.debug(f"Skipping {branch} - status {status.value} doesn't match filter {status_filter}")
+            logger.debug(f"Skipping {branch} - status {status.value} doesn't match filter {status_filter}")
             return None
         
         sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)
         
         # If the branch is merged, ensure sync_status reflects how it was detected
         if status == BranchStatus.MERGED:
-            if sync_status not in ['merged-git', 'merged-pr']:
+            if sync_status not in [SyncStatus.MERGED_GIT.value, SyncStatus.MERGED_PR.value]:
                 # Branch was detected as merged by status service but sync_status doesn't reflect it
                 # This happens when PR data overrides the detection
                 if pr_data and branch in pr_data and pr_data[branch].get('merged'):
-                    sync_status = 'merged-pr'
+                    sync_status = SyncStatus.MERGED_PR.value
                 else:
-                    sync_status = 'merged-git'
+                    sync_status = SyncStatus.MERGED_GIT.value
         
         # Get PR count, show empty string if 0
         pr_count = pr_data.get(branch, {}).get('count', 0) if pr_data else 0
@@ -351,7 +581,7 @@ class BranchKeeper:
             last_commit_date=self.git_service.get_last_commit_date(branch),
             age_days=self.git_service.get_branch_age(branch),
             status=status,
-            has_local_changes=False,  # TODO: Implement this
+            has_local_changes=False,  # Checked during deletion if needed
             has_remote=self.git_service.has_remote_branch(branch),
             sync_status=sync_status,
             pr_status=pr_display,
@@ -367,8 +597,3 @@ class BranchKeeper:
     def update_main(self):
         """Update the main branch from remote."""
         return self.git_service.update_main_branch(self.main_branch)
-
-    def debug(self, message: str) -> None:
-        """Print debug message if debug mode is enabled."""
-        if self.config.get('debug', False):
-            print(f"[BranchKeeper] {message}")

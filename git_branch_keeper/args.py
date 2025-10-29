@@ -13,5 +13,10 @@ def parse_args():
     parser.add_argument("--filter", choices=["all", "stale", "merged"], default="all", help="Filter which branches to show and process (all/stale/merged)")
     parser.add_argument("--main-branch", default="main", help="Main branch name")
     parser.add_argument("--debug", action="store_true", help="Show debug information for troubleshooting")
-    
+    parser.add_argument("--sort-by", choices=["name", "age", "date", "status"], default="age", help="Sort branches by name, age, date, or status (default: age)")
+    parser.add_argument("--sort-order", choices=["asc", "desc"], default="asc", help="Sort order: ascending or descending (default: asc)")
+    parser.add_argument("--refresh", action="store_true", help="Force refresh and bypass cache")
+    parser.add_argument("--workers", type=int, metavar="N", help="Number of parallel workers for branch processing (default: auto-detect based on CPU and threading mode)")
+    parser.add_argument("--sequential", action="store_true", help="Force sequential processing (disable parallelism)")
+
     return parser.parse_args() 

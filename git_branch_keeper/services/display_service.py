@@ -2,18 +2,23 @@
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress
-from typing import List, Dict, Optional
+from typing import List, Optional, TYPE_CHECKING
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.logging_config import get_logger
 import git
 
+if TYPE_CHECKING:
+    from git_branch_keeper.services.branch_status_service import BranchStatusService
+
 console = Console()
+logger = get_logger(__name__)
 
 class DisplayService:
     def __init__(self, verbose: bool = False, debug: bool = False):
         self.verbose = verbose
         self.debug_mode = debug
-        self.repo = None  # Will be set when display_branch_table is called
-        self.branch_status_service = None  # Will be set when display_branch_table is called
+        self.repo: Optional[git.Repo] = None  # Will be set when display_branch_table is called
+        self.branch_status_service: Optional['BranchStatusService'] = None  # Will be set when display_branch_table is called
 
     def display_branch_table(
             self,
@@ -130,11 +135,6 @@ class DisplayService:
         progress = Progress()
         task = progress.add_task(description, total=total)
         return progress, task
-
-    def debug(self, message: str, source: str = "Display") -> None:
-        """Print debug message if debug mode is enabled."""
-        if self.debug_mode:
-            print(f"[{source}] {message}")
 
     def _format_status(self, status: BranchStatus) -> str:
         """Format branch status with descriptive text."""

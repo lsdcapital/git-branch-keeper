@@ -30,5 +30,5 @@ class BranchDetails:
     has_local_changes: bool
     has_remote: bool
     sync_status: str
-    pr_status: str = None
+    pr_status: Optional[str] = None
     notes: Optional[str] = None # Added notes field
