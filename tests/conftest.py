@@ -29,7 +29,7 @@ def mock_config():
         'dry_run': True,
         'force': False,
         'main_branch': 'main',
-        'github_token': None,
+        'github_token': 'test_token_for_testing',  # Required for GitHub repos
         'max_prs_to_fetch': 500
     }
 
@@ -56,6 +56,12 @@ def git_repo(temp_dir):
     # Rename master to main if needed
     try:
         repo.git.branch('-M', 'main')
+    except Exception:
+        pass
+
+    # Add a fake GitHub remote for testing
+    try:
+        repo.create_remote('origin', 'git@github.com:test/test-repo.git')
     except Exception:
         pass
 
@@ -165,7 +171,9 @@ def mock_github_service(mock_config, mock_git_repo):
     from git_branch_keeper.services.github_service import GitHubService
 
     service = GitHubService(mock_git_repo, mock_config)
-    service.github_enabled = False
+    # Set up minimal mocks for testing
+    service.github_repo = "test/repo"
+    service.gh_repo = Mock()
     return service
 
 

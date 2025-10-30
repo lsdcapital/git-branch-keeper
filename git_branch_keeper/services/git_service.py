@@ -3,7 +3,7 @@ import git
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from rich.console import Console
-from typing import Union, TYPE_CHECKING, Dict
+from typing import Union, TYPE_CHECKING, Dict, Optional
 import re
 from threading import Lock
 
@@ -43,6 +43,7 @@ class GitService:
             'method4': 0,  # All commits exist
         }
         self._stats_lock = Lock()  # Thread safety for stats access
+        self._worktree_branches: Optional[set[str]] = None  # Cache for worktree branches
         logger.info("Git service initialized")
 
     def _get_repo(self):
@@ -86,6 +87,46 @@ class GitService:
         """Thread-safe stats increment."""
         with self._stats_lock:
             self.merge_detection_stats[method] += 1
+
+    def get_worktree_branches(self) -> set[str]:
+        """Get set of branch names that are checked out in worktrees.
+
+        Returns:
+            Set of branch names currently in worktrees
+        """
+        # Return cached result if available
+        if self._worktree_branches is not None:
+            return self._worktree_branches
+
+        worktree_branches = set()
+        try:
+            repo = self._get_repo()
+            # Use --porcelain for machine-readable output
+            output = repo.git.worktree('list', '--porcelain')
+
+            # Parse porcelain output
+            # Format:
+            # worktree /path/to/worktree
+            # HEAD commit_sha
+            # branch refs/heads/branch-name
+            # (blank line between worktrees)
+            for line in output.split('\n'):
+                line = line.strip()
+                if line.startswith('branch '):
+                    # Extract branch name from "branch refs/heads/branch-name"
+                    branch_ref = line.split(' ', 1)[1]
+                    if branch_ref.startswith('refs/heads/'):
+                        branch_name = branch_ref[len('refs/heads/'):]
+                        worktree_branches.add(branch_name)
+
+            logger.debug(f"Found {len(worktree_branches)} branches in worktrees: {worktree_branches}")
+        except Exception as e:
+            logger.debug(f"Could not list worktrees: {e}")
+            # Return empty set if worktree command fails
+
+        # Cache the result
+        self._worktree_branches = worktree_branches
+        return worktree_branches
 
     def has_remote_branch(self, branch_name: str) -> bool:
         """Check if the branch has a remote tracking branch."""
@@ -208,17 +249,35 @@ class GitService:
             try:
                 repo = self._get_repo()
 
-                # Handle detached HEAD state
+                # Check if this is the current branch
                 try:
-                    current = repo.active_branch.name
-                    is_detached = False
+                    current_branch = repo.active_branch.name
+                    is_current = (branch_name == current_branch)
                 except TypeError:
-                    # Detached HEAD - remember the current commit
-                    current = repo.head.commit.hexsha
-                    is_detached = True
+                    # Detached HEAD
+                    is_current = False
 
-                # Only checkout if different
-                if (not is_detached and current != branch_name) or is_detached:
+                # Check if branch is in a worktree (but not the current branch)
+                worktree_branches = self.get_worktree_branches()
+                if branch_name in worktree_branches and not is_current:
+                    logger.debug(f"Branch {branch_name} is in another worktree, skipping checkout")
+                    return {'in_worktree': True}
+
+                # For current branch or branches not in worktrees, check status
+                # Reuse the current_branch detection from above
+                if is_current:
+                    # Current branch - check status without checkout
+                    is_detached = False
+                    current = current_branch
+                else:
+                    # Not current - need to checkout
+                    # Re-check for detached HEAD (edge case)
+                    try:
+                        current = repo.active_branch.name
+                        is_detached = False
+                    except TypeError:
+                        current = repo.head.commit.hexsha
+                        is_detached = True
                     repo.git.checkout(branch_name)
 
                 status = repo.git.status('--porcelain')
@@ -233,8 +292,8 @@ class GitService:
                     'staged': bool([line for line in status.split('\n') if line.startswith('M ')])
                 }
             except Exception as e:
-                logger.debug(f"Error getting status details for {branch_name}: {e}")
-                return {'modified': False, 'untracked': False, 'staged': False}
+                logger.warning(f"Could not check branch status for {branch_name}: {e}")
+                raise
 
     def is_tag(self, ref_name: str) -> bool:
         """Check if a reference is a tag."""
@@ -432,6 +491,47 @@ class GitService:
             logger.debug(f"[Method 4] Error checking commit history: {e}")
 
         return False
+
+    def stash_changes(self) -> bool:
+        """Stash uncommitted changes temporarily.
+
+        Returns:
+            bool: True if changes were stashed, False if nothing to stash
+        """
+        try:
+            repo = self._get_repo()
+            # Check if there's anything to stash
+            status = repo.git.status('--porcelain')
+            if not status.strip():
+                logger.debug("No uncommitted changes to stash")
+                return False
+
+            # Stash with untracked files
+            repo.git.stash('push', '-u', '-m', 'git-branch-keeper-temp')
+            logger.debug("Stashed uncommitted changes")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not stash changes: {e}")
+            raise
+
+    def restore_stashed_changes(self, was_stashed: bool) -> None:
+        """Restore previously stashed changes.
+
+        Args:
+            was_stashed: Whether changes were actually stashed (from stash_changes return value)
+        """
+        if not was_stashed:
+            logger.debug("Nothing was stashed, skipping restore")
+            return
+
+        try:
+            repo = self._get_repo()
+            repo.git.stash('pop')
+            logger.debug("Restored stashed changes")
+        except Exception as e:
+            logger.warning(f"Could not restore stashed changes: {e}")
+            logger.warning("Your changes are still in the stash. Run 'git stash pop' manually.")
+            raise
 
     def delete_branch(self, branch_name: str, dry_run: bool = False) -> bool:
         """Delete a branch locally and remotely if it exists."""

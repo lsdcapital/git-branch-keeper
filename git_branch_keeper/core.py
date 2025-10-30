@@ -16,9 +16,11 @@ from git_branch_keeper.services.git_service import GitService
 from git_branch_keeper.services.display_service import DisplayService
 from git_branch_keeper.services.branch_status_service import BranchStatusService
 from git_branch_keeper.services.cache_service import CacheService
+from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.threading_utils import get_optimal_worker_count
 from git_branch_keeper.logging_config import get_logger
 from git_branch_keeper.config import Config
+from git_branch_keeper.formatters import format_deletion_confirmation_items, format_deletion_reason
 
 console = Console()
 logger = get_logger(__name__)
@@ -76,21 +78,43 @@ class BranchKeeper:
         self.force_mode = config.get('force', False)
         self.main_branch = config.get('main_branch', 'main')
 
-        # Initialize services
-        self.github_service = GitHubService(self.repo_path, self.config)
-        self.git_service = GitService(self.repo_path, self.config)
-        
-        # Setup GitHub integration
+        # Validate GitHub token requirement BEFORE initializing services
         try:
             remote_url = self.repo.remotes.origin.url
+            if 'github.com' in remote_url:
+                # Check if token exists
+                import os
+                github_token = config.get("github_token") or os.environ.get("GITHUB_TOKEN")
+                if not github_token:
+                    self._console_print("[red]ERROR: GitHub token required for GitHub repositories[/red]\n")
+                    self._console_print("This tool requires a GitHub token to safely manage branches:")
+                    self._console_print("  • Prevents deletion of branches with open PRs")
+                    self._console_print("  • Shows PR status and metadata\n")
+                    self._console_print("[bold]Setup options:[/bold]")
+                    self._console_print("  1. Environment variable: [cyan]export GITHUB_TOKEN=\"ghp_...\"[/cyan]")
+                    self._console_print("  2. Config file: Add [cyan]\"github_token\"[/cyan] to git-branch-keeper.json\n")
+                    self._console_print("Get a token at: [link]https://github.com/settings/tokens[/link]")
+                    self._console_print("Required scopes: [cyan]repo[/cyan] (for private repos) or [cyan]public_repo[/cyan] (for public repos only)\n")
+                    sys.exit(1)
+            else:
+                # Non-GitHub repo
+                self._console_print("[yellow]This tool is designed for GitHub repositories.[/yellow]")
+                self._console_print("[yellow]Non-GitHub repos are not currently supported.[/yellow]\n")
+                sys.exit(1)
+        except AttributeError:
+            # No remote named 'origin'
+            self._console_print("[red]ERROR: No 'origin' remote found in repository[/red]")
+            self._console_print("This tool requires a repository with a GitHub remote.\n")
+            sys.exit(1)
+
+        # Initialize services (token is guaranteed to exist at this point for GitHub repos)
+        self.github_service = GitHubService(self.repo_path, self.config)
+        self.git_service = GitService(self.repo_path, self.config)
+
+        # Setup GitHub integration
+        try:
             logger.debug(f"Setting up GitHub API with remote: {remote_url}")
             self.github_service.setup_github_api(remote_url)
-
-            # If GitHub is available but no token, show a helpful message
-            if not self.github_service.github_enabled and 'github.com' in remote_url:
-                self._console_print("[yellow]💡 Tip: Set up a GitHub token for better merge detection and PR status[/yellow]")
-                self._console_print("[yellow]   See: git-branch-keeper --help or check the README for setup instructions[/yellow]")
-                self._console_print("")
         except Exception as e:
             logger.debug(f"Failed to setup GitHub API: {e}")
         
@@ -129,21 +153,27 @@ class BranchKeeper:
         if not self.tui_mode:
             console.print(*args, **kwargs)
 
-    def delete_branch(self, branch_name: str, reason: str) -> bool:
-        """Delete a branch or show what would be deleted in dry-run mode."""
+    def delete_branch(self, branch_name: str, reason: str) -> tuple[bool, Optional[str]]:
+        """Delete a branch or show what would be deleted in dry-run mode.
+
+        Returns:
+            Tuple of (success, error_message). error_message is None on success.
+        """
         try:
             # Check for open PRs first
             if self.github_service.has_open_pr(branch_name):
-                self._console_print(f"[yellow]Skipping {branch_name} - Has open PR[/yellow]")
+                error_msg = "Has open pull request"
+                self._console_print(f"[yellow]Skipping {branch_name} - {error_msg}[/yellow]")
                 self.stats["skipped_pr"] += 1
-                return False
+                return False, error_msg
 
             # Cannot delete current branch - check BEFORE dry_run
             try:
                 current_branch = self.repo.active_branch.name
                 if branch_name == current_branch:
-                    self._console_print(f"[yellow]Cannot delete current branch {branch_name}[/yellow]")
-                    return False
+                    error_msg = "Cannot delete current branch"
+                    self._console_print(f"[yellow]{error_msg}: {branch_name}[/yellow]")
+                    return False, error_msg
             except TypeError:
                 # Detached HEAD state - no active branch, so we can delete any branch
                 pass
@@ -168,16 +198,17 @@ class BranchKeeper:
                 if status_details['staged']:
                     change_indicators.append("S")
 
+                error_msg = f"Has uncommitted changes ({'/'.join(change_indicators)})"
                 self._console_print(f"[yellow]⚠️  {branch_name} has uncommitted changes when checked out: {'/'.join(change_indicators)}[/yellow]")
                 self._console_print("[dim]   This might indicate files that are ignored differently between branches[/dim]")
 
-                if self.interactive:
+                if self.interactive and not self.tui_mode:
                     response = input(f"   Still want to delete branch {branch_name}? [y/N] ")
                     if response.lower() != 'y':
-                        return False
+                        return False, error_msg
                 else:
                     self._console_print("   Skipping due to uncommitted changes")
-                    return False
+                    return False, error_msg
 
             remote_exists = self.git_service.has_remote_branch(branch_name)
             if self.dry_run:
@@ -185,13 +216,23 @@ class BranchKeeper:
                     self._console_print(f"Would delete local and remote branch {branch_name} ({reason})")
                 else:
                     self._console_print(f"Would delete local branch {branch_name} ({reason})")
-                return True
+                return True, None
 
-            return self.git_service.delete_branch(branch_name, self.dry_run)
+            # Delete the branch
+            success = self.git_service.delete_branch(branch_name, self.dry_run)
+
+            # If deletion was successful, remove from cache
+            if success:
+                self.cache_service.remove_branch_from_cache(branch_name)
+                logger.debug(f"Removed {branch_name} from cache after deletion")
+                return True, None
+            else:
+                return False, "Git deletion failed (may be protected remotely)"
 
         except Exception as e:
+            error_msg = str(e)
             self._console_print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
-            return False
+            return False, error_msg
 
     def process_branches(self, cleanup_enabled: bool = False) -> None:
         """Process all branches according to configuration."""
@@ -209,27 +250,44 @@ class BranchKeeper:
             # Check if we should use cache
             use_cache = not self.config.get('refresh', False)
 
-            # Get cached branches (only immutable ones)
+            # Get cached branches and determine which need refresh
             cached_branches = {}
+            branches_to_process = branches
+
             if use_cache:
-                cached_branches = self.cache_service.get_cached_branches(branches, self.main_branch)
-                logger.debug(f"Using {len(cached_branches)} cached branches")
+                # Load all cached branches
+                cached_branches = self.cache_service.get_cached_branches(branches)
+                logger.debug(f"Loaded {len(cached_branches)} cached branches")
 
-            # Separate branches into cached vs needs processing
-            branches_to_process = [b for b in branches if b not in cached_branches]
+                # Determine which branches need refresh (unstable or not cached)
+                branches_to_process = self.cache_service.get_stale_branches(branches, self.main_branch)
 
-            if self.verbose or self.debug_mode:
-                if cached_branches:
-                    self._console_print(f"[dim]Using {len(cached_branches)} cached branches, checking {len(branches_to_process)} branches[/dim]")
+                stable_count = len(branches) - len(branches_to_process)
+                if self.verbose or self.debug_mode:
+                    if stable_count > 0:
+                        self._console_print(f"[dim]Using {stable_count} stable cached branches, refreshing {len(branches_to_process)} branches[/dim]")
+            else:
+                # With --refresh, process all branches
+                if self.verbose or self.debug_mode:
+                    self._console_print(f"[dim]Refreshing all {len(branches)} branches (--refresh mode)[/dim]")
 
-            # Process non-cached branches
-            branch_details = self._collect_branch_details(branches_to_process, show_progress=True)
+            # Process branches that need refresh
+            refreshed_details = self._collect_branch_details(branches_to_process, show_progress=True)
 
-            # Add cached branches to results
-            branch_details.extend(cached_branches.values())
+            # Merge cached stable branches with refreshed data
+            branch_details = []
+            refreshed_names = {b.name for b in refreshed_details}
+
+            # Add refreshed branches
+            branch_details.extend(refreshed_details)
+
+            # Add stable cached branches that weren't refreshed
+            for branch_name, cached_branch in cached_branches.items():
+                if branch_name not in refreshed_names:
+                    branch_details.append(cached_branch)
 
             # Sort all branches (both cached and newly processed)
-            branch_details = self._sort_branches(branch_details)
+            branch_details = self.sort_branches(branch_details)
 
             # Save cache with new data
             if use_cache:
@@ -245,12 +303,12 @@ class BranchKeeper:
         """Quickly load cached branch data without processing.
 
         This method is optimized for fast initial loading in TUI mode.
-        It returns cached branches immediately without any processing.
+        It returns all cached branches immediately and identifies which need refresh.
 
         Returns:
             Tuple of (cached_branch_details, branches_to_process):
-            - cached_branch_details: List of BranchDetails objects from cache
-            - branches_to_process: List of branch names that need processing
+            - cached_branch_details: List of all BranchDetails objects from cache
+            - branches_to_process: List of branch names that need refresh (unstable/not cached)
         """
         try:
             # Check if we should use cache
@@ -265,16 +323,16 @@ class BranchKeeper:
             if not branches:
                 return [], []
 
-            # Get cached branches (only immutable ones)
-            cached_branches = self.cache_service.get_cached_branches(branches, self.main_branch)
+            # Get all cached branches
+            cached_branches = self.cache_service.get_cached_branches(branches)
             logger.debug(f"Fast-loaded {len(cached_branches)} cached branches")
 
-            # Separate branches into cached vs needs processing
-            branches_to_process = [b for b in branches if b not in cached_branches]
+            # Determine which branches need refresh
+            branches_to_process = self.cache_service.get_stale_branches(branches, self.main_branch)
 
             # Convert cached branches dict to list and sort
             cached_branch_details = list(cached_branches.values())
-            cached_branch_details = self._sort_branches(cached_branch_details)
+            cached_branch_details = self.sort_branches(cached_branch_details)
 
             return cached_branch_details, branches_to_process
 
@@ -312,7 +370,7 @@ class BranchKeeper:
             # Get cached branches (only immutable ones)
             cached_branches = {}
             if use_cache:
-                cached_branches = self.cache_service.get_cached_branches(branches, self.main_branch)
+                cached_branches = self.cache_service.get_cached_branches(branches)
                 logger.debug(f"Using {len(cached_branches)} cached branches")
 
             # Separate branches into cached vs needs processing
@@ -328,8 +386,29 @@ class BranchKeeper:
             # Add cached branches to results
             branch_details.extend(cached_branches.values())
 
+            # Update in_worktree status for ALL branches (including cached)
+            # Worktree status is dynamic and not cached
+            worktree_branches = self.git_service.get_worktree_branches()
+            logger.debug(f"Worktree branches detected: {worktree_branches}")
+
+            try:
+                current_branch = self.repo.active_branch.name
+            except TypeError:
+                current_branch = None
+
+            for branch in branch_details:
+                # Check if this is the current branch
+                is_current = (branch.name == current_branch) if current_branch else False
+
+                # Set in_worktree flag (but not for current branch)
+                if branch.name in worktree_branches and not is_current:
+                    branch.in_worktree = True
+                    logger.debug(f"Setting in_worktree=True for {branch.name}")
+                else:
+                    branch.in_worktree = False
+
             # Sort all branches (both cached and newly processed)
-            branch_details = self._sort_branches(branch_details)
+            branch_details = self.sort_branches(branch_details)
 
             # Save cache with new data
             if use_cache:
@@ -364,7 +443,7 @@ class BranchKeeper:
         # Only filter out ignored branches, keep protected ones
         return [b for b in branches if not self.branch_status_service.should_ignore_branch(b)]
 
-    def _sort_branches(self, branch_details: list) -> list:
+    def sort_branches(self, branch_details: list) -> list:
         """Sort branches according to configuration with protected branches always first."""
         sort_by = self.config.get('sort_by', 'age')
         sort_order = self.config.get('sort_order', 'asc')
@@ -424,72 +503,91 @@ class BranchKeeper:
         sequential = self.config.get('sequential', False)
         pr_data: Dict[str, Dict] = {}
 
-        # Verbose mode: show simple output
-        if self.verbose or self.debug_mode:
-            self._console_print("Processing branches...")
+        # Stash uncommitted changes before checking branch status
+        was_stashed = False
+        try:
+            was_stashed = self.git_service.stash_changes()
+            if was_stashed:
+                logger.debug("Stashed uncommitted changes to check branch status")
+        except Exception as e:
+            logger.warning(f"Could not stash changes: {e}")
+            # Continue anyway - we'll handle errors during branch status checks
 
-            # Fetch PR data
-            pr_data = self._fetch_pr_data_with_feedback(branches)
+        try:
+            # Verbose mode: show simple output
+            if self.verbose or self.debug_mode:
+                self._console_print("Processing branches...")
 
-            # Process branches sequentially in verbose mode for readable logs
-            for branch_name in branches:
-                details = self._process_single_branch(branch_name, status_filter, pr_data, None)
-                if details:
-                    branch_details.append(details)
-        else:
-            # Non-verbose mode: show spinner for PR fetch, then progress bar for processing
+                # Fetch PR data
+                pr_data = self._fetch_pr_data_with_feedback(branches)
 
-            # Phase 1: Fetch PR data with optional spinner (only if there are branches to check)
-            if self.github_service.github_enabled and branches:
-                status_context = console.status("[bold blue]Fetching PR data from GitHub...", spinner="dots") if show_progress else nullcontext()
-                with status_context:
-                    try:
-                        logger.debug(f"Fetching PR data for {len(branches)} branches")
-                        pr_data = self.github_service.get_bulk_pr_data(branches)
-                    except Exception as e:
-                        logger.debug(f"Failed to fetch PR data: {e}")
+                # Process branches sequentially in verbose mode for readable logs
+                for branch_name in branches:
+                    details = self._process_single_branch(branch_name, status_filter, pr_data, None)
+                    if details:
+                        branch_details.append(details)
+            else:
+                # Non-verbose mode: show spinner for PR fetch, then progress bar for processing
 
-            # Phase 2: Process branches with optional progress bar
-            # Use Progress context if show_progress=True, otherwise use nullcontext
-            progress_context = Progress() if show_progress else nullcontext()
+                # Phase 1: Fetch PR data with optional spinner (only if there are branches to check)
+                if branches:
+                    status_context = console.status("[bold blue]Fetching PR data from GitHub...", spinner="dots") if show_progress else nullcontext()
+                    with status_context:
+                        try:
+                            logger.debug(f"Fetching PR data for {len(branches)} branches")
+                            pr_data = self.github_service.get_bulk_pr_data(branches)
+                        except Exception as e:
+                            logger.debug(f"Failed to fetch PR data: {e}")
 
-            with progress_context as progress:
-                # Determine worker count for progress message
-                if sequential:
-                    task_desc = "Processing branches..."
-                else:
-                    max_workers = get_optimal_worker_count(self.config.get('workers'))
-                    task_desc = f"Processing branches ({max_workers} workers)..."
+                # Phase 2: Process branches with optional progress bar
+                # Use Progress context if show_progress=True, otherwise use nullcontext
+                progress_context = Progress() if show_progress else nullcontext()
 
-                # Only create task if we have a real Progress object
-                task = progress.add_task(task_desc, total=len(branches)) if progress is not None else None
+                with progress_context as progress:
+                    # Determine worker count for progress message
+                    if sequential:
+                        task_desc = "Processing branches..."
+                    else:
+                        max_workers = get_optimal_worker_count(self.config.get('workers'))
+                        task_desc = f"Processing branches ({max_workers} workers)..."
 
-                if sequential:
-                    # Sequential processing
-                    branch_details = self._process_branches_sequential(
-                        branches, status_filter, pr_data, progress if show_progress else None, task
-                    )
-                else:
-                    # Parallel processing
-                    branch_details = self._process_branches_parallel(
-                        branches, status_filter, pr_data, progress if show_progress else None, task
-                    )
+                    # Only create task if we have a real Progress object
+                    task = progress.add_task(task_desc, total=len(branches)) if progress is not None else None
 
-        # Sort branches according to configuration
-        branch_details = self._sort_branches(branch_details)
+                    if sequential:
+                        # Sequential processing
+                        branch_details = self._process_branches_sequential(
+                            branches, status_filter, pr_data, progress if show_progress else None, task
+                        )
+                    else:
+                        # Parallel processing
+                        branch_details = self._process_branches_parallel(
+                            branches, status_filter, pr_data, progress if show_progress else None, task
+                        )
 
-        return branch_details
+            # Sort branches according to configuration
+            branch_details = self.sort_branches(branch_details)
+
+            return branch_details
+        finally:
+            # Always restore stashed changes
+            try:
+                self.git_service.restore_stashed_changes(was_stashed)
+                if was_stashed:
+                    logger.debug("Restored stashed changes")
+            except Exception as e:
+                logger.error(f"Failed to restore stashed changes: {e}")
+                self._console_print("[red]Warning: Could not restore stashed changes. Run 'git stash pop' manually.[/red]")
 
     def _fetch_pr_data_with_feedback(self, branches: list) -> Dict[str, Dict]:
         """Fetch PR data with user feedback."""
         pr_data: Dict[str, Dict] = {}
-        if self.github_service.github_enabled:
-            try:
-                self._console_print("[dim]Fetching PR data from GitHub...[/dim]")
-                logger.debug(f"Fetching PR data for {len(branches)} branches")
-                pr_data = self.github_service.get_bulk_pr_data(branches)
-            except Exception as e:
-                logger.debug(f"Failed to fetch PR data: {e}")
+        try:
+            self._console_print("[dim]Fetching PR data from GitHub...[/dim]")
+            logger.debug(f"Fetching PR data for {len(branches)} branches")
+            pr_data = self.github_service.get_bulk_pr_data(branches)
+        except Exception as e:
+            logger.debug(f"Failed to fetch PR data: {e}")
         return pr_data
 
     def _process_branches_sequential(
@@ -572,6 +670,7 @@ class BranchKeeper:
             self.repo,
             github_base_url,
             self.branch_status_service,
+            self.protected_branches,
             show_summary=self.verbose
         )
 
@@ -583,8 +682,7 @@ class BranchKeeper:
         """Delete stale and merged branches after confirmation."""
         branches_to_delete = [
             branch for branch in branch_details
-            if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
-            and branch.name not in self.protected_branches
+            if BranchValidationService.is_deletable(branch, self.protected_branches)
         ]
 
         if not branches_to_delete:
@@ -607,10 +705,7 @@ class BranchKeeper:
     def _confirm_deletion(self, branches_to_delete: list) -> bool:
         """Show branches to delete and ask for confirmation."""
         self._console_print("\nThe following branches will be deleted:")
-        for branch in branches_to_delete:
-            reason = "stale" if branch.status == BranchStatus.STALE else "merged"
-            remote_info = "local and remote" if branch.has_remote else "local only"
-            self._console_print(f"  • {branch.name} ({reason}, {remote_info})")
+        self._console_print(format_deletion_confirmation_items(branches_to_delete))
 
         response = console.input("\nProceed with deletion? [y/N] ")
         return response.lower() == 'y'
@@ -619,8 +714,9 @@ class BranchKeeper:
         """Delete a list of branches and return count of deleted branches."""
         deleted_count = 0
         for branch in branches_to_delete:
-            reason = "stale" if branch.status == BranchStatus.STALE else "merged"
-            if self.delete_branch(branch.name, reason):
+            reason = format_deletion_reason(branch.status)
+            success, error_message = self.delete_branch(branch.name, reason)
+            if success:
                 deleted_count += 1
         return deleted_count
 
@@ -692,31 +788,44 @@ class BranchKeeper:
             logger.debug(f"Skipping {branch} - status {status.value} doesn't match filter {status_filter}")
             return None
 
-        # Check for local changes (uncommitted work)
-        has_local_changes = False
+        # Check for local changes (uncommitted work) - store detailed breakdown
+        modified_files = None
+        untracked_files = None
+        staged_files = None
+        in_worktree = False
         try:
             status_details = self.git_service.get_branch_status_details(branch)
-            has_local_changes = any([
-                status_details['modified'],
-                status_details['untracked'],
-                status_details['staged']
-            ])
+            if status_details.get('in_worktree'):
+                in_worktree = True
+                logger.debug(f"[CORE] Branch {branch} in_worktree set to TRUE")
+            else:
+                modified_files = status_details['modified']
+                untracked_files = status_details['untracked']
+                staged_files = status_details['staged']
         except Exception as e:
-            logger.debug(f"Could not check local changes for {branch}: {e}")
-            # If we can't check, assume no local changes
-            has_local_changes = False
+            logger.warning(f"Could not check branch status for {branch}: {e}")
+            # Leave as None to indicate status couldn't be determined
+            # (likely due to dirty working directory preventing checkout)
+            modified_files = None
+            untracked_files = None
+            staged_files = None
 
         details = BranchDetails(
             name=branch,
             last_commit_date=self.git_service.get_last_commit_date(branch),
             age_days=self.git_service.get_branch_age(branch),
             status=status,
-            has_local_changes=has_local_changes,
+            modified_files=modified_files,
+            untracked_files=untracked_files,
+            staged_files=staged_files,
             has_remote=self.git_service.has_remote_branch(branch),
             sync_status=sync_status,
             pr_status=pr_status_str,
-            notes=notes
+            notes=notes,
+            in_worktree=in_worktree
         )
+
+        logger.debug(f"[CORE] Created BranchDetails for {branch}: status={status.value}, in_worktree={details.in_worktree}")
 
         return details
 

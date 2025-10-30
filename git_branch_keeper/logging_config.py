@@ -1,6 +1,7 @@
 """Logging configuration for git-branch-keeper"""
 import logging
 import sys
+from pathlib import Path
 
 
 class ColoredFormatter(logging.Formatter):
@@ -25,13 +26,14 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record)
 
 
-def setup_logging(verbose: bool = False, debug: bool = False) -> None:
+def setup_logging(verbose: bool = False, debug: bool = False, tui_mode: bool = False) -> None:
     """
     Configure logging for the application.
 
     Args:
         verbose: If True, show INFO level messages
         debug: If True, show DEBUG level messages and detailed formatting
+        tui_mode: If True, always log to file (since TUI hides console output)
     """
     # Determine log level
     if debug:
@@ -43,31 +45,51 @@ def setup_logging(verbose: bool = False, debug: bool = False) -> None:
 
     # Configure root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(level)
+    # In TUI mode, always use DEBUG level for root logger so file gets all messages
+    # Individual handlers control what actually gets written/displayed
+    if tui_mode:
+        root_logger.setLevel(logging.DEBUG)
+    else:
+        root_logger.setLevel(level)
 
     # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # Create console handler
-    console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setLevel(level)
-
-    # Set formatter based on mode
-    if debug:
-        # Detailed format for debug mode
-        formatter = ColoredFormatter(
+    # Always add file handler in TUI mode or debug mode
+    if tui_mode or debug:
+        log_dir = Path.home() / '.git-branch-keeper'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / 'git-branch-keeper.log'
+        file_handler = logging.FileHandler(log_file, mode='w')  # Overwrite each run
+        file_handler.setLevel(logging.DEBUG)  # Always log everything to file
+        file_formatter = logging.Formatter(
             fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
-    else:
-        # Simple format for normal/verbose mode
-        formatter = ColoredFormatter(
-            fmt='[%(name)s] %(message)s'
-        )
+        file_handler.setFormatter(file_formatter)
+        root_logger.addHandler(file_handler)
 
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
+    # Create console handler (only if not TUI mode)
+    if not tui_mode:
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.setLevel(level)
+
+        # Set formatter based on mode
+        if debug:
+            # Detailed format for debug mode
+            formatter = ColoredFormatter(
+                fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+        else:
+            # Simple format for normal/verbose mode
+            formatter = ColoredFormatter(
+                fmt='[%(name)s] %(message)s'
+            )
+
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
 
 
 def get_logger(name: str) -> logging.Logger:

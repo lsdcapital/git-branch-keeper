@@ -16,9 +16,6 @@ def main():
         # Parse command line arguments
         parsed_args = parse_args()
 
-        # Setup logging before creating BranchKeeper
-        setup_logging(verbose=parsed_args.verbose, debug=parsed_args.debug)
-
         # Build config from parsed arguments
         # Note: cleanup is now default, --dry-run enables preview mode
         config = Config(
@@ -38,7 +35,14 @@ def main():
             sequential=parsed_args.sequential,
             workers=parsed_args.workers
         )
-        
+
+        # Determine if we should use interactive mode
+        # Default to interactive if running in a TTY, unless explicitly disabled
+        use_interactive = parsed_args.interactive or (sys.stdin.isatty() and not parsed_args.no_interactive)
+
+        # Setup logging after determining mode (TUI needs file logging)
+        setup_logging(verbose=parsed_args.verbose, debug=parsed_args.debug, tui_mode=use_interactive)
+
         if parsed_args.debug:
             console.print("[yellow]Debug mode enabled[/yellow]")
 
@@ -56,10 +60,6 @@ def main():
             for key, value in config.to_dict().items():
                 console.print(f"  {key}: {value}")
             console.print("[dim]Note: Debug mode forces sequential processing for readable logs[/dim]")
-        
-        # Determine if we should use interactive mode
-        # Default to interactive if running in a TTY, unless explicitly disabled
-        use_interactive = parsed_args.interactive or (sys.stdin.isatty() and not parsed_args.no_interactive)
 
         # Initialize BranchKeeper with repo_path and config
         # Pass tui_mode=True when using interactive TUI to suppress Rich console output

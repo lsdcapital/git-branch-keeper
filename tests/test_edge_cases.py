@@ -29,7 +29,7 @@ class TestDetachedHeadHandling:
 
     def test_get_branch_status_detached_head(self, git_repo_with_branches, mock_config):
         """Test getting branch status when in detached HEAD."""
-        service = GitService(git_repo_with_branches, mock_config)
+        service = GitService(git_repo_with_branches.working_dir, mock_config)
 
         # Create detached HEAD
         commit_sha = git_repo_with_branches.head.commit.hexsha
@@ -77,7 +77,7 @@ class TestGitHubAPIPagination:
         mock_config['max_prs_to_fetch'] = 5
 
         service = GitHubService(mock_git_repo, mock_config)
-        service.github_enabled = True
+        service.github_repo = "test/repo"
         service.gh_repo = Mock()
 
         # Create 10 mock PRs
@@ -107,7 +107,7 @@ class TestNetworkErrors:
         """Test handling GitHub API network errors."""
         mock_config['github_token'] = "test_token"
         service = GitHubService(mock_git_repo, mock_config)
-        service.github_enabled = True
+        service.github_repo = "test/repo"
         service.gh_repo = Mock()
 
         # Simulate network error
@@ -179,7 +179,7 @@ class TestConfigurationEdgeCases:
 
     def test_missing_config_values_use_defaults(self, git_repo):
         """Test that missing config values use sensible defaults."""
-        minimal_config = {}
+        minimal_config = {'github_token': 'test_token'}  # Required for GitHub repos
 
         keeper = BranchKeeper(git_repo.working_dir, minimal_config)
 

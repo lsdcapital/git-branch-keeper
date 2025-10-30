@@ -117,6 +117,7 @@ class TestBranchKeeperEdgeCases:
         keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
 
         # Try to delete current branch
-        result = keeper.delete_branch('feature/test-feature', 'test')
+        success, error_msg = keeper.delete_branch('feature/test-feature', 'test')
 
-        assert result is False
+        assert success is False
+        assert error_msg == 'Cannot delete current branch'

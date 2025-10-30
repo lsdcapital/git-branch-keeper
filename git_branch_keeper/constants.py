@@ -11,24 +11,13 @@ class ColumnDefinition:
     width: int = 0  # 0 means auto-width
 
 
-# Column definitions for CLI (original order)
-CLI_COLUMNS: List[ColumnDefinition] = [
-    ColumnDefinition("branch", "Branch", 30),
-    ColumnDefinition("last_commit", "Last Commit", 12),
-    ColumnDefinition("age", "Age (days)", 8),
-    ColumnDefinition("status", "Status", 10),
-    ColumnDefinition("sync", "Sync", 12),
-    ColumnDefinition("remote", "Remote", 8),
-    ColumnDefinition("prs", "PRs", 15),
-    ColumnDefinition("notes", "Notes", 30),
-]
-
-# Column definitions for TUI
-TUI_COLUMNS: List[ColumnDefinition] = [
+# Unified column definitions for both CLI and TUI
+COLUMNS: List[ColumnDefinition] = [
     ColumnDefinition("branch", "Branch", 30),
     ColumnDefinition("status", "Status", 10),
     ColumnDefinition("last_commit", "Last Commit", 12),
     ColumnDefinition("age", "Age", 8),
+    ColumnDefinition("changes", "Branch State", 12),
     ColumnDefinition("sync", "Sync", 12),
     ColumnDefinition("remote", "Remote", 8),
     ColumnDefinition("prs", "PRs", 15),
@@ -39,8 +28,8 @@ TUI_COLUMNS: List[ColumnDefinition] = [
 # Symbol constants
 SYMBOL_HAS_REMOTE = "✓"
 SYMBOL_NO_REMOTE = "✗"
-SYMBOL_MARKED = "☑"
-SYMBOL_UNMARKED = "☐"
+SYMBOL_MARKED = "✓"
+SYMBOL_UNMARKED = " "
 SYMBOL_CURRENT_BRANCH = " *"
 
 
@@ -57,13 +46,15 @@ class BranchStyleType:
     """Style types for branches."""
     PROTECTED = "protected"
     DELETABLE = "deletable"
+    WARNING = "warning"  # Has issues preventing deletion
     ACTIVE = "active"
 
 
 # CLI colors (Rich color names)
 CLI_COLORS = {
     BranchStyleType.PROTECTED: "cyan",
-    BranchStyleType.DELETABLE: "yellow",
+    BranchStyleType.DELETABLE: "red",  # Will be deleted
+    BranchStyleType.WARNING: "yellow",  # Can't delete (has issues)
     BranchStyleType.ACTIVE: None,  # Default color
 }
 
@@ -71,7 +62,8 @@ CLI_COLORS = {
 # TUI colors (color names for Textual)
 TUI_COLORS = {
     BranchStyleType.PROTECTED: "cyan",
-    BranchStyleType.DELETABLE: "red",
+    BranchStyleType.DELETABLE: "red",  # Will be deleted
+    BranchStyleType.WARNING: "yellow",  # Can't delete (has issues)
     BranchStyleType.ACTIVE: "green",
 }
 
@@ -80,9 +72,12 @@ TUI_COLORS = {
 LEGEND_TEXT = """
 Legend:
 ✓ = Has remote branch     ✗ = Local only
-↑ = Unpushed commits      ↓ = Commits to pull
-* = Current branch        +M = Modified files
-+U = Untracked files      +S = Staged files
-Yellow = Would be cleaned up
+@ = Current branch        W = In worktree
++M = Modified files       +U = Untracked files
++S = Staged files         ? = Unknown state
+
+Colors:
+Red = Will be deleted
+Yellow = Has issues (can't delete)
 Cyan = Protected branch
 """

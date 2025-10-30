@@ -27,8 +27,11 @@ class BranchDetails:
     last_commit_date: str
     age_days: int
     status: BranchStatus
-    has_local_changes: bool
+    modified_files: Optional[bool]  # None = couldn't check
+    untracked_files: Optional[bool]  # None = couldn't check
+    staged_files: Optional[bool]  # None = couldn't check
     has_remote: bool
     sync_status: str
     pr_status: Optional[str] = None
     notes: Optional[str] = None # Added notes field
+    in_worktree: bool = False  # True if branch is checked out in a worktree

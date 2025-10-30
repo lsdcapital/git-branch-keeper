@@ -79,6 +79,42 @@ def format_status(status: BranchStatus) -> str:
     return STATUS_DISPLAY.get(status.value, status.value)
 
 
+def format_deletion_reason(status: BranchStatus) -> str:
+    """
+    Format deletion reason based on branch status.
+
+    Args:
+        status: Branch status enum value
+
+    Returns:
+        Deletion reason string ("stale" or "merged")
+    """
+    return "stale" if status == BranchStatus.STALE else "merged"
+
+
+def format_deletion_confirmation_items(branches: list[BranchDetails]) -> str:
+    """
+    Format a list of branches for deletion confirmation message.
+
+    Args:
+        branches: List of BranchDetails objects to delete
+
+    Returns:
+        Formatted string with bullet-pointed list including reason and remote info.
+        Each branch is on a separate line with format:
+        "  • branch-name (reason, local and remote/local only)"
+
+    Example:
+        "  • feature/old (merged, local and remote)\\n  • bugfix/temp (stale, local only)"
+    """
+    lines = []
+    for branch in branches:
+        reason = format_deletion_reason(branch.status)
+        remote_info = "local and remote" if branch.has_remote else "local only"
+        lines.append(f"  • {branch.name} ({reason}, {remote_info})")
+    return "\n".join(lines)
+
+
 def get_branch_style_type(
     branch: BranchDetails,
     protected_branches: list[str]
@@ -95,40 +131,26 @@ def get_branch_style_type(
     """
     if branch.name in protected_branches:
         return BranchStyleType.PROTECTED
+
     if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]:
-        return BranchStyleType.DELETABLE
+        # Check if branch has issues preventing deletion
+        has_uncommitted = (
+            branch.modified_files is True or
+            branch.untracked_files is True or
+            branch.staged_files is True
+        )
+        is_in_worktree = branch.in_worktree
+
+        # Debug logging
+        from git_branch_keeper.logging_config import get_logger
+        logger = get_logger(__name__)
+        logger.debug(f"Branch {branch.name}: status={branch.status.value}, in_worktree={is_in_worktree}, has_uncommitted={has_uncommitted}")
+
+        if has_uncommitted or is_in_worktree:
+            return BranchStyleType.WARNING  # Can't delete - has issues
+        return BranchStyleType.DELETABLE  # Will be deleted
+
     return BranchStyleType.ACTIVE
-
-
-def is_deletable(branch: BranchDetails, protected_branches: list[str]) -> bool:
-    """
-    Check if a branch is deletable.
-
-    Args:
-        branch: Branch details
-        protected_branches: List of protected branch names
-
-    Returns:
-        True if branch can be deleted
-    """
-    return (
-        branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
-        and branch.name not in protected_branches
-    )
-
-
-def is_protected(branch: BranchDetails, protected_branches: list[str]) -> bool:
-    """
-    Check if a branch is protected.
-
-    Args:
-        branch: Branch details
-        protected_branches: List of protected branch names
-
-    Returns:
-        True if branch is protected
-    """
-    return branch.name in protected_branches
 
 
 def format_pr_link(
@@ -182,3 +204,52 @@ def format_branch_link(
         return display_name
 
     return f"[link={github_base_url}/tree/{branch_name}]{display_name}[/link]"
+
+
+def format_changes(branch: BranchDetails, current_branch: Optional[str] = None) -> str:
+    """
+    Format branch state indicators showing uncommitted changes.
+
+    Args:
+        branch: Branch details
+        current_branch: Name of the current branch (optional)
+
+    Returns:
+        String with change indicators, @ if current, W if in worktree, ✓ if clean, or ? if unknown.
+        @ = Current branch (you are here)
+        W = In worktree (checked out elsewhere)
+        ✓ = Clean (no uncommitted changes)
+        ? = Unknown (couldn't check status)
+        +M = Modified files
+        +U = Untracked files
+        +S = Staged files
+
+    Example:
+        "@" for current branch
+        "W" for branch in worktree
+        "✓" for clean branch
+        "?" for unchecked branch
+        "+M+U" for modified and untracked files
+        "+S" for only staged files
+    """
+    # If this is the current branch, show @ indicator
+    if current_branch and branch.name == current_branch:
+        return "@"
+
+    # If branch is in a worktree, show W indicator
+    if branch.in_worktree:
+        return "W"
+
+    # If any status is None, we couldn't check the branch
+    if branch.modified_files is None or branch.untracked_files is None or branch.staged_files is None:
+        return "?"
+
+    indicators = []
+    if branch.modified_files:
+        indicators.append("+M")
+    if branch.untracked_files:
+        indicators.append("+U")
+    if branch.staged_files:
+        indicators.append("+S")
+
+    return "".join(indicators) if indicators else "✓"

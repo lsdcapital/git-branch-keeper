@@ -145,7 +145,7 @@ class CacheService:
     def save_cache(self, branches: List[BranchDetails], main_branch: str) -> None:
         """Save branch data to cache using atomic writes with file locking.
 
-        Only saves branches that are immutable (merged with closed/no PR).
+        Saves all branches with metadata indicating stability.
 
         Args:
             branches: List of branch details to cache
@@ -155,29 +155,16 @@ class CacheService:
             # Load existing cache to preserve data
             existing_cache = self.load_cache()
 
-            # Update with new immutable branches
-            immutable_count = 0
+            # Update with all branches
             for branch in branches:
-                # Never cache the main branch
-                if branch.name == main_branch:
-                    logger.debug(f"Skipping cache for main branch: {branch.name}")
+                serialized = self._serialize_branch(branch)
+                # Skip if branch has invalid data
+                if serialized.get('last_commit_date') == 'unknown':
+                    logger.debug(f"Skipping cache for branch '{branch.name}' with invalid date")
                     continue
+                existing_cache[branch.name] = serialized
 
-                is_immutable = self.is_immutable(branch)
-                logger.debug(f"Branch '{branch.name}': status={branch.status.value}, pr_status={repr(branch.pr_status)}, immutable={is_immutable}")
-                if is_immutable:
-                    serialized = self._serialize_branch(branch)
-                    # Skip if branch has invalid data
-                    if serialized.get('last_commit_date') == 'unknown':
-                        logger.debug(f"Skipping cache for branch '{branch.name}' with invalid date")
-                        continue
-                    existing_cache[branch.name] = serialized
-                    immutable_count += 1
-
-            logger.debug(f"Found {immutable_count} immutable branches to cache out of {len(branches)} total")
-
-            # Remove branches that no longer exist or are no longer immutable
-            # (This will be handled by the caller filtering out non-existent branches)
+            logger.debug(f"Cached {len(existing_cache)} branches out of {len(branches)} total")
 
             cache_data = {
                 "repo_path": str(self.repo_path),
@@ -198,8 +185,8 @@ class CacheService:
                 # Atomic rename (POSIX systems guarantee atomicity)
                 temp_file.replace(self.cache_file)
 
-                immutable_count = sum(1 for b in existing_cache.values() if b.get('immutable', False))
-                logger.debug(f"Saved cache with {len(existing_cache)} branches ({immutable_count} immutable)")
+                stable_count = sum(1 for b in existing_cache.values() if b.get('stable', False))
+                logger.debug(f"Saved cache with {len(existing_cache)} branches ({stable_count} stable)")
             finally:
                 # Clean up temp file if it still exists
                 if temp_file.exists():
@@ -210,26 +197,26 @@ class CacheService:
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
 
-    def is_immutable(self, branch: BranchDetails) -> bool:
-        """Check if a branch's state is immutable (won't change).
+    def is_stable(self, branch: BranchDetails) -> bool:
+        """Check if a branch's state is stable (unlikely to change).
 
-        A branch is immutable if:
+        A branch is stable if:
         - It's merged AND (has a closed PR OR has no PR)
 
         Args:
             branch: Branch details to check
 
         Returns:
-            True if the branch state is immutable
+            True if the branch state is stable
         """
         if branch.status != BranchStatus.MERGED:
             return False
 
-        # If there's no PR status (None or empty string), the branch is merged and immutable
+        # If there's no PR status (None or empty string), the branch is merged and stable
         if not branch.pr_status:
             return True
 
-        # If the PR is closed (not open), it's immutable
+        # If the PR is closed (not open), it's stable
         # pr_status format is like "open" or "closed:merged" or "closed:unmerged"
         if not branch.pr_status.startswith("open"):
             return True
@@ -250,12 +237,14 @@ class CacheService:
             "last_commit_date": branch.last_commit_date,
             "age_days": branch.age_days,
             "status": branch.status.value,
-            "has_local_changes": branch.has_local_changes,
+            "modified_files": branch.modified_files,
+            "untracked_files": branch.untracked_files,
+            "staged_files": branch.staged_files,
             "has_remote": branch.has_remote,
             "sync_status": branch.sync_status,
             "pr_status": branch.pr_status,
             "notes": branch.notes,
-            "immutable": self.is_immutable(branch),
+            "stable": self.is_stable(branch),
             "cached_at": datetime.now().isoformat()
         }
 
@@ -279,22 +268,24 @@ class CacheService:
                 last_commit_date=data["last_commit_date"],
                 age_days=data["age_days"],
                 status=BranchStatus(data["status"]),
-                has_local_changes=data["has_local_changes"],
+                modified_files=data["modified_files"],
+                untracked_files=data["untracked_files"],
+                staged_files=data["staged_files"],
                 has_remote=data["has_remote"],
                 sync_status=data["sync_status"],
                 pr_status=data.get("pr_status"),
-                notes=data.get("notes")
+                notes=data.get("notes"),
+                in_worktree=False  # Don't cache worktree status - it's dynamic
             )
         except Exception as e:
             logger.warning(f"Failed to deserialize branch {data.get('name', 'unknown')}: {e}")
             return None
 
-    def get_cached_branches(self, current_branches: List[str], main_branch: Optional[str] = None) -> Dict[str, BranchDetails]:
-        """Get cached branch details for branches that still exist.
+    def get_cached_branches(self, current_branches: List[str]) -> Dict[str, BranchDetails]:
+        """Get cached branch details for all branches that still exist.
 
         Args:
             current_branches: List of current branch names in the repository
-            main_branch: Name of the main branch to exclude from cache
 
         Returns:
             Dictionary mapping branch names to cached BranchDetails
@@ -303,21 +294,56 @@ class CacheService:
         cached_branches = {}
 
         for branch_name in current_branches:
-            # Never load the main branch from cache
-            if main_branch and branch_name == main_branch:
-                logger.debug(f"Skipping main branch from cache: {branch_name}")
-                continue
-
             if branch_name in cache:
                 branch_data = cache[branch_name]
-                # Only use cache if it's marked as immutable
-                if branch_data.get('immutable', False):
-                    branch_details = self.deserialize_branch(branch_data)
-                    if branch_details:
-                        cached_branches[branch_name] = branch_details
+                branch_details = self.deserialize_branch(branch_data)
+                if branch_details:
+                    cached_branches[branch_name] = branch_details
 
-        logger.debug(f"Found {len(cached_branches)} cached immutable branches")
+        stable_count = sum(1 for b in cache.values() if b.get('stable', False))
+        logger.debug(f"Found {len(cached_branches)} cached branches ({stable_count} stable)")
         return cached_branches
+
+    def get_stale_branches(self, current_branches: List[str], main_branch: str) -> List[str]:
+        """Get list of branches that need to be refreshed (unstable or not cached).
+
+        A branch needs refresh if:
+        - It's not in cache, OR
+        - It's the main branch (always check sync status), OR
+        - It's marked as unstable (not merged or has open PR)
+
+        Args:
+            current_branches: List of current branch names in the repository
+            main_branch: Name of the main branch (always refreshed)
+
+        Returns:
+            List of branch names that need to be refreshed
+        """
+        cache = self.load_cache()
+        stale_branches = []
+
+        for branch_name in current_branches:
+            # Always refresh main branch to check sync status
+            if branch_name == main_branch:
+                logger.debug(f"Main branch '{branch_name}' needs refresh")
+                stale_branches.append(branch_name)
+                continue
+
+            # If not in cache, needs refresh
+            if branch_name not in cache:
+                logger.debug(f"Branch '{branch_name}' not in cache, needs refresh")
+                stale_branches.append(branch_name)
+                continue
+
+            # If in cache but not stable, needs refresh
+            branch_data = cache[branch_name]
+            if not branch_data.get('stable', False):
+                logger.debug(f"Branch '{branch_name}' is unstable, needs refresh")
+                stale_branches.append(branch_name)
+
+        stable_skipped = len(current_branches) - len(stale_branches)
+        logger.debug(f"Found {len(stale_branches)} branches needing refresh, {stable_skipped} stable branches skipped")
+        return stale_branches
 
     def clear_cache(self) -> None:
         """Clear all cached data for this repository."""
@@ -327,3 +353,124 @@ class CacheService:
                 logger.info("Cache cleared")
         except Exception as e:
             logger.warning(f"Failed to clear cache: {e}")
+
+    def remove_branch_from_cache(self, branch_name: str) -> None:
+        """Remove a single branch from the cache.
+
+        Args:
+            branch_name: Name of the branch to remove from cache
+        """
+        try:
+            # Load existing cache
+            cache = self.load_cache()
+
+            # Check if branch exists in cache
+            if branch_name not in cache:
+                logger.debug(f"Branch '{branch_name}' not in cache, nothing to remove")
+                return
+
+            # Remove the branch
+            del cache[branch_name]
+            logger.debug(f"Removed branch '{branch_name}' from cache")
+
+            # Save updated cache back to disk
+            # We need to reconstruct the full cache structure for saving
+            if not self.cache_file.exists():
+                logger.debug("Cache file no longer exists, skipping save")
+                return
+
+            # Read the full cache data to preserve metadata
+            try:
+                with open(self.cache_file, 'r') as f:
+                    with self._acquire_cache_lock(f, operation="read"):
+                        full_cache_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to read full cache data: {e}")
+                return
+
+            # Update the branches section
+            full_cache_data['branches'] = cache
+            full_cache_data['last_updated'] = datetime.now().isoformat()
+
+            # Atomic write: write to temp file, then rename
+            temp_file = self.cache_file.with_suffix('.tmp')
+            try:
+                with open(temp_file, 'w') as f:
+                    with self._acquire_cache_lock(f, operation="write"):
+                        json.dump(full_cache_data, f, indent=2)
+                        f.flush()
+
+                temp_file.replace(self.cache_file)
+                logger.debug(f"Cache updated, {len(cache)} branches remaining")
+            finally:
+                if temp_file.exists():
+                    try:
+                        temp_file.unlink()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Failed to remove branch '{branch_name}' from cache: {e}")
+
+    def remove_branches_from_cache(self, branch_names: List[str]) -> None:
+        """Remove multiple branches from the cache in a single operation.
+
+        Args:
+            branch_names: List of branch names to remove from cache
+        """
+        if not branch_names:
+            logger.debug("No branches to remove from cache")
+            return
+
+        try:
+            # Load existing cache
+            cache = self.load_cache()
+
+            # Remove all branches that exist in cache
+            removed_count = 0
+            for branch_name in branch_names:
+                if branch_name in cache:
+                    del cache[branch_name]
+                    removed_count += 1
+
+            if removed_count == 0:
+                logger.debug("No branches were in cache, nothing to remove")
+                return
+
+            logger.debug(f"Removing {removed_count} branch(es) from cache")
+
+            # Save updated cache back to disk
+            if not self.cache_file.exists():
+                logger.debug("Cache file no longer exists, skipping save")
+                return
+
+            # Read the full cache data to preserve metadata
+            try:
+                with open(self.cache_file, 'r') as f:
+                    with self._acquire_cache_lock(f, operation="read"):
+                        full_cache_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to read full cache data: {e}")
+                return
+
+            # Update the branches section
+            full_cache_data['branches'] = cache
+            full_cache_data['last_updated'] = datetime.now().isoformat()
+
+            # Atomic write: write to temp file, then rename
+            temp_file = self.cache_file.with_suffix('.tmp')
+            try:
+                with open(temp_file, 'w') as f:
+                    with self._acquire_cache_lock(f, operation="write"):
+                        json.dump(full_cache_data, f, indent=2)
+                        f.flush()
+
+                temp_file.replace(self.cache_file)
+                logger.debug(f"Cache updated after removing {removed_count} branches, {len(cache)} branches remaining")
+            finally:
+                if temp_file.exists():
+                    try:
+                        temp_file.unlink()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Failed to remove branches from cache: {e}")

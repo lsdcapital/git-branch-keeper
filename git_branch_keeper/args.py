@@ -2,7 +2,11 @@ import argparse
 from .__version__ import __version__
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Git branch management tool")
+    parser = argparse.ArgumentParser(
+        description="Git branch management tool for GitHub repositories",
+        epilog="Setup: Requires GITHUB_TOKEN environment variable or 'github_token' in config file. "
+               "Get a token at https://github.com/settings/tokens (scopes: repo or public_repo)"
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Show verbose output")
     parser.add_argument("--version", action="version", version=f"git-branch-keeper {__version__}")
     parser.add_argument("--dry-run", action="store_true", help="Preview mode - show what would be deleted without actually deleting")
