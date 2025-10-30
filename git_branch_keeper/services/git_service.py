@@ -131,6 +131,24 @@ class GitService:
         try:
             repo = self._get_repo()
 
+            # Main branch cannot be merged into itself - skip merge checks
+            if branch_name == main_branch:
+                if not self.has_remote_branch(branch_name):
+                    return SyncStatus.LOCAL_ONLY.value
+
+                # For main branch, just check sync status with remote
+                ahead = list(repo.iter_commits(f"origin/{branch_name}..{branch_name}"))
+                behind = list(repo.iter_commits(f"{branch_name}..origin/{branch_name}"))
+
+                if ahead and behind:
+                    return SyncStatus.DIVERGED.value
+                elif ahead:
+                    return f"ahead {len(ahead)}"
+                elif behind:
+                    return f"behind {len(behind)}"
+                else:
+                    return SyncStatus.SYNCED.value
+
             # Skip merge checks for protected branches
             if branch_name in self.config.get('protected_branches', ['main', 'master']):
                 if not self.has_remote_branch(branch_name):
@@ -183,34 +201,6 @@ class GitService:
         except Exception as e:
             logger.debug(f"Error getting last commit date for {branch_name}: {e}")
             return "unknown"
-
-    def update_main_branch(self, main_branch: str) -> bool:
-        """Update the main branch from remote."""
-        with self._git_operation():
-            try:
-                repo = self._get_repo()
-                remote = repo.remote(self.remote_name)
-                logger.debug(f"Updating {main_branch} from remote...")
-                remote.pull(main_branch)
-                return True
-            except Exception as e:
-                logger.debug(f"Error updating {main_branch}: {e}")
-                return False
-
-    def get_remote_branches(self) -> list:
-        """Get list of remote branches."""
-        with self._git_operation():
-            try:
-                repo = self._get_repo()
-                remote = repo.remote(self.remote_name)
-                logger.debug("Fetching remote branches...")
-                remote.fetch()
-                branches = [ref.name for ref in remote.refs]
-                logger.debug(f"Found {len(branches)} remote branches")
-                return branches
-            except Exception as e:
-                logger.debug(f"Error fetching remote branches: {e}")
-                return []
 
     def get_branch_status_details(self, branch_name: str) -> dict:
         """Get detailed status of a branch."""
@@ -280,6 +270,11 @@ class GitService:
 
     def is_branch_merged(self, branch_name: str, main_branch: str) -> bool:
         """Check if a branch is merged using multiple methods, ordered by speed."""
+        # A branch cannot be merged into itself
+        if branch_name == main_branch:
+            logger.debug(f"Skipping merge check: {branch_name} is the main branch")
+            return False
+
         # Check cache first (thread-safe)
         cache_key = f"{branch_name}:{main_branch}"
         found, value = self._check_cache(cache_key)

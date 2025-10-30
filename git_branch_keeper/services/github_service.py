@@ -69,43 +69,6 @@ class GitHubService:
             logger.debug(f"[GitHub] Failed to setup GitHub API: {e}")
             self.github_enabled = False
 
-    def get_branch_pr_status(self, branch_name: str) -> dict:
-        """Get detailed PR status for a branch."""
-        if not self.github_enabled or self.gh_repo is None or self.github_repo is None:
-            return {'has_pr': False, 'state': 'unknown'}
-
-        try:
-            pulls = list(self.gh_repo.get_pulls(
-                state='all',
-                head=f"{self.github_repo.split('/')[0]}:{branch_name}"
-            ))
-            if not pulls:
-                return {'has_pr': False, 'state': 'no_pr'}
-            
-            closed_or_merged_prs = [pr for pr in pulls if pr.state == 'closed' or pr.merged]
-            
-            if not closed_or_merged_prs:
-                latest_pr = max(pulls, key=lambda pr: pr.created_at)
-                return {
-                    'has_pr': True,
-                    'state': 'merged' if latest_pr.merged else 'closed' if latest_pr.state == 'closed' else 'open',
-                    'pr_number': latest_pr.number,
-                    'closed_at': latest_pr.closed_at.isoformat() if latest_pr.closed_at else None,
-                    'merged_at': latest_pr.merged_at.isoformat() if latest_pr.merged_at else None
-                }
-            
-            latest_pr = max(closed_or_merged_prs, key=lambda pr: pr.created_at)
-            return {
-                'has_pr': True,
-                'state': 'merged' if latest_pr.merged else 'closed',
-                'pr_number': latest_pr.number,
-                'closed_at': latest_pr.closed_at.isoformat() if latest_pr.closed_at else None,
-                'merged_at': latest_pr.merged_at.isoformat() if latest_pr.merged_at else None
-            }
-        except Exception as e:
-            logger.debug(f"[GitHub] Error getting PR status for {branch_name}: {e}")
-            return {'has_pr': False, 'state': 'error'}
-
     def has_open_pr(self, branch_name: str) -> bool:
         """Check if a branch has any open PRs."""
         if not self.github_enabled or self.gh_repo is None or self.github_repo is None:
@@ -114,56 +77,6 @@ class GitHubService:
         try:
             pulls = self.gh_repo.get_pulls(state='open', head=f"{self.github_repo.split('/')[0]}:{branch_name}")
             return pulls.totalCount > 0
-        except Exception as e:
-            logger.debug(f"[GitHub] Error checking PR status for {branch_name}: {e}")
-            return False
-
-    def get_pr_count(self, branch_name: str) -> int:
-        """Get the number of open PRs for or targeting a branch."""
-        if not self.github_enabled or self.gh_repo is None or self.github_repo is None:
-            return 0
-
-        try:
-            pulls = self.gh_repo.get_pulls(state='open', head=f"{self.github_repo.split('/')[0]}:{branch_name}")
-            count = pulls.totalCount
-
-            # For main/protected branches, also check PRs targeting this branch
-            if branch_name in self.config.get('protected_branches', ['main', 'master']):
-                base_pulls = self.gh_repo.get_pulls(state='open', base=branch_name)
-                count += base_pulls.totalCount
-
-            return count
-        except Exception as e:
-            logger.debug(f"[GitHub] Error checking PR count for {branch_name}: {e}")
-            return 0
-
-    def get_pr_status(self, branch_name: str) -> Tuple[int, bool]:
-        """Get PR count and merged status for a branch."""
-        if not self.github_enabled or self.gh_repo is None or self.github_repo is None:
-            return 0, False
-
-        try:
-            pulls = list(self.gh_repo.get_pulls(state='all', head=f"{self.github_repo.split('/')[0]}:{branch_name}"))
-            open_count = sum(1 for pr in pulls if pr.state == 'open')
-            was_merged = any(pr.merged for pr in pulls)
-
-            if was_merged and self.debug_mode:
-                merged_pr = next(pr for pr in pulls if pr.merged)
-                logger.debug(f"[GitHub] Found merged PR #{merged_pr.number} for {branch_name}")
-
-            return open_count, was_merged
-        except Exception as e:
-            logger.debug(f"[GitHub] Error getting PR status for {branch_name}: {e}")
-            return 0, False
-
-    def was_merged_via_pr(self, branch_name: str) -> bool:
-        """Check if a branch was ever merged via PR."""
-        if not self.github_enabled:
-            return False
-
-        try:
-            pr_status = self.get_branch_pr_status(branch_name)
-            return pr_status['has_pr'] and pr_status['state'] == 'merged'
         except Exception as e:
             logger.debug(f"[GitHub] Error checking PR status for {branch_name}: {e}")
             return False
@@ -252,3 +165,12 @@ class GitHubService:
         except Exception as e:
             logger.debug(f"[GitHub] Error getting bulk PR data: {e}")
             return {}
+
+    def close(self) -> None:
+        """Close the GitHub API connection to clean up resources."""
+        if self.github:
+            try:
+                self.github.close()
+                logger.debug("[GitHub] Closed GitHub API connection")
+            except Exception as e:
+                logger.debug(f"[GitHub] Error closing GitHub API connection: {e}")

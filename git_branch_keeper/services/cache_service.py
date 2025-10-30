@@ -158,6 +158,11 @@ class CacheService:
             # Update with new immutable branches
             immutable_count = 0
             for branch in branches:
+                # Never cache the main branch
+                if branch.name == main_branch:
+                    logger.debug(f"Skipping cache for main branch: {branch.name}")
+                    continue
+
                 is_immutable = self.is_immutable(branch)
                 logger.debug(f"Branch '{branch.name}': status={branch.status.value}, pr_status={repr(branch.pr_status)}, immutable={is_immutable}")
                 if is_immutable:
@@ -284,11 +289,12 @@ class CacheService:
             logger.warning(f"Failed to deserialize branch {data.get('name', 'unknown')}: {e}")
             return None
 
-    def get_cached_branches(self, current_branches: List[str]) -> Dict[str, BranchDetails]:
+    def get_cached_branches(self, current_branches: List[str], main_branch: Optional[str] = None) -> Dict[str, BranchDetails]:
         """Get cached branch details for branches that still exist.
 
         Args:
             current_branches: List of current branch names in the repository
+            main_branch: Name of the main branch to exclude from cache
 
         Returns:
             Dictionary mapping branch names to cached BranchDetails
@@ -297,6 +303,11 @@ class CacheService:
         cached_branches = {}
 
         for branch_name in current_branches:
+            # Never load the main branch from cache
+            if main_branch and branch_name == main_branch:
+                logger.debug(f"Skipping main branch from cache: {branch_name}")
+                continue
+
             if branch_name in cache:
                 branch_data = cache[branch_name]
                 # Only use cache if it's marked as immutable

@@ -1,10 +1,18 @@
 """Display and formatting service for branch information"""
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress
 from typing import List, Optional, TYPE_CHECKING
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.constants import CLI_COLUMNS, CLI_COLORS
+from git_branch_keeper.formatters import (
+    format_date,
+    format_remote_status,
+    format_status,
+    format_pr_link,
+    format_branch_link,
+    get_branch_style_type,
+)
 import git
 
 if TYPE_CHECKING:
@@ -32,47 +40,27 @@ class DisplayService:
         self.repo = repo
         self.branch_status_service = branch_status_service
         table = Table()
-        
-        # Add columns
-        table.add_column("Branch")
-        table.add_column("Last Commit")
-        table.add_column("Age (days)")
-        table.add_column("Status")
-        table.add_column("Sync")
-        table.add_column("Remote")
-        table.add_column("PRs")
-        table.add_column("Notes") # Added Notes column
+
+        # Add columns using shared constants
+        for col in CLI_COLUMNS:
+            table.add_column(col.label)
 
         # Add rows
         for branch in branch_details:
-            row_style = self._get_row_style(branch)
-            
-            # Format the last commit date (date only)
-            last_commit_date = branch.last_commit_date
-            if hasattr(last_commit_date, 'strftime'):
-                last_commit_date = last_commit_date.strftime("%Y-%m-%d")
-            
-            remote_status = "✓" if branch.has_remote else "✗"
-            
-            # Format branch name with link if GitHub is enabled
-            branch_name = branch.name + (" *" if branch.name == repo.active_branch.name else "")
-            if github_base_url:
-                branch_name = f"[link={github_base_url}/tree/{branch.name}]{branch_name}[/link]"
-            
-            # Format status with more descriptive text
-            status_text = self._format_status(branch.status)
-            
-            # Format PR status with link if GitHub is enabled
-            pr_display = branch.pr_status
-            if github_base_url and pr_display:
-                if pr_display.startswith('target:'):
-                    # For main branch, show PRs targeting it and add overview link
-                    count = pr_display.split(':')[1]
-                    pr_display = f"[link={github_base_url}/pulls]{count}[/link]"
-                else:
-                    # For other branches, link to the specific PR
-                    pr_display = f"[link={github_base_url}/pull/{pr_display}]{pr_display}[/link]"
-            
+            # Get row style using shared formatter
+            protected_branches = self.branch_status_service.config.get('protected_branches', ['main', 'master'])
+            style_type = get_branch_style_type(branch, protected_branches)
+            row_style = CLI_COLORS.get(style_type)
+
+            # Format fields using shared formatters
+            is_current = branch.name == repo.active_branch.name
+            branch_name = format_branch_link(branch.name, github_base_url, is_current)
+            last_commit_date = format_date(branch.last_commit_date)
+            remote_status = format_remote_status(branch.has_remote)
+            status_text = format_status(branch.status)
+            pr_display = format_pr_link(branch.pr_status, github_base_url)
+
+            # Match CLI_COLUMNS order: Branch, Last Commit, Age, Status, Sync, Remote, PRs, Notes
             table.add_row(
                 branch_name,
                 last_commit_date,
@@ -80,8 +68,8 @@ class DisplayService:
                 status_text,
                 branch.sync_status,
                 remote_status,
-                pr_display if pr_display else "",
-                branch.notes if branch.notes else "", # Added notes
+                pr_display,
+                branch.notes if branch.notes else "",
                 style=row_style
             )
 
@@ -129,27 +117,3 @@ class DisplayService:
             if merge_stats != "No merges detected":
                 console.print("\nMerge Detection Stats:")
                 console.print(merge_stats)
-
-    def print_progress(self, total: int, description: str = "Processing branches..."):
-        """Create and return a progress bar."""
-        progress = Progress()
-        task = progress.add_task(description, total=total)
-        return progress, task
-
-    def _format_status(self, status: BranchStatus) -> str:
-        """Format branch status with descriptive text."""
-        if status == BranchStatus.ACTIVE:
-            return "active"
-        elif status == BranchStatus.STALE:
-            return "stale"
-        elif status == BranchStatus.MERGED:
-            return "merged"
-        return str(status.value)
-
-    def _get_row_style(self, branch: BranchDetails) -> Optional[str]:
-        """Get the style for a table row based on branch status."""
-        if self.branch_status_service and branch.name in self.branch_status_service.config.get('protected_branches', ['main', 'master']):
-            return "cyan"
-        if branch.status == BranchStatus.STALE or branch.status == BranchStatus.MERGED:
-            return "yellow"
-        return None

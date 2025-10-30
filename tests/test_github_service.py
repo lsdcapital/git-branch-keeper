@@ -134,63 +134,6 @@ class TestGitHubServicePROperations:
 
         assert result is False
 
-    def test_get_pr_status(self, mock_git_repo, mock_config):
-        """Test getting PR status."""
-        mock_config['github_token'] = "test_token"
-        service = GitHubService(mock_git_repo.working_dir, mock_config)
-
-        service.github_enabled = True
-        service.github_repo = "test/repo"
-        service.gh_repo = Mock()
-
-        # Create mock PRs
-        open_pr = Mock()
-        open_pr.state = 'open'
-        open_pr.merged = False
-
-        merged_pr = Mock()
-        merged_pr.state = 'closed'
-        merged_pr.merged = True
-
-        service.gh_repo.get_pulls.return_value = [open_pr, merged_pr]
-
-        count, was_merged = service.get_pr_status("feature/test")
-
-        assert count == 1  # One open PR
-        assert was_merged is True  # Branch was merged via PR
-
-    def test_was_merged_via_pr_true(self, mock_git_repo, mock_config):
-        """Test detecting branch merged via PR."""
-        mock_config['github_token'] = "test_token"
-        service = GitHubService(mock_git_repo.working_dir, mock_config)
-
-        service.github_enabled = True
-
-        with patch.object(service, 'get_branch_pr_status') as mock_get_status:
-            mock_get_status.return_value = {
-                'has_pr': True,
-                'state': 'merged'
-            }
-
-            result = service.was_merged_via_pr("feature/test")
-            assert result is True
-
-    def test_was_merged_via_pr_false(self, mock_git_repo, mock_config):
-        """Test detecting branch not merged via PR."""
-        mock_config['github_token'] = "test_token"
-        service = GitHubService(mock_git_repo.working_dir, mock_config)
-
-        service.github_enabled = True
-
-        with patch.object(service, 'get_branch_pr_status') as mock_get_status:
-            mock_get_status.return_value = {
-                'has_pr': True,
-                'state': 'open'
-            }
-
-            result = service.was_merged_via_pr("feature/test")
-            assert result is False
-
 
 class TestGitHubServiceBulkOperations:
     """Test bulk PR data fetching."""
@@ -306,62 +249,6 @@ class TestGitHubServiceBulkOperations:
         assert result["feature/test"]["count"] == 0
         assert result["feature/test"]["merged"] is False
         assert result["feature/test"]["closed"] is False
-
-
-class TestGitHubServicePRCounts:
-    """Test PR count operations."""
-
-    def test_get_pr_count_for_branch(self, mock_git_repo, mock_config):
-        """Test getting PR count for a regular branch."""
-        mock_config['github_token'] = "test_token"
-        mock_config['protected_branches'] = ['main']
-        service = GitHubService(mock_git_repo.working_dir, mock_config)
-
-        service.github_enabled = True
-        service.github_repo = "test/repo"
-        service.gh_repo = Mock()
-
-        mock_pulls = Mock()
-        mock_pulls.totalCount = 2
-        service.gh_repo.get_pulls.return_value = mock_pulls
-
-        count = service.get_pr_count("feature/test")
-
-        assert count == 2
-
-    def test_get_pr_count_for_protected_branch(self, mock_git_repo, mock_config):
-        """Test getting PR count for protected branch (includes targeting PRs)."""
-        mock_config['github_token'] = "test_token"
-        mock_config['protected_branches'] = ['main']
-        service = GitHubService(mock_git_repo.working_dir, mock_config)
-
-        service.github_enabled = True
-        service.github_repo = "test/repo"
-        service.gh_repo = Mock()
-
-        # Mock PRs from branch
-        from_branch_pulls = Mock()
-        from_branch_pulls.totalCount = 1
-
-        # Mock PRs targeting branch
-        to_branch_pulls = Mock()
-        to_branch_pulls.totalCount = 3
-
-        service.gh_repo.get_pulls.side_effect = [from_branch_pulls, to_branch_pulls]
-
-        count = service.get_pr_count("main")
-
-        # Should sum both
-        assert count == 4
-
-    def test_get_pr_count_github_disabled(self, mock_git_repo, mock_config):
-        """Test get_pr_count when GitHub is disabled."""
-        service = GitHubService(mock_git_repo.working_dir, mock_config)
-        service.github_enabled = False
-
-        count = service.get_pr_count("feature/test")
-
-        assert count == 0
 
 
 class TestGitHubServiceEdgeCases:

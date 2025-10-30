@@ -117,22 +117,6 @@ class TestNetworkErrors:
         result = service.has_open_pr("feature/test")
         assert result is False
 
-    def test_git_remote_network_error(self, git_repo, mock_config):
-        """Test handling Git remote network errors."""
-        service = GitService(git_repo.working_dir, mock_config)
-
-        # Mock the _get_repo to simulate network error
-        with patch.object(service, '_get_repo') as mock_get_repo:
-            mock_repo = Mock()
-            mock_remote = Mock()
-            mock_remote.pull.side_effect = git.exc.GitCommandError('fetch', 128, stderr="Connection refused")
-            mock_repo.remote.return_value = mock_remote
-            mock_get_repo.return_value = mock_repo
-
-            # Should handle gracefully
-            result = service.update_main_branch('main')
-            assert result is False
-
 
 class TestInvalidBranchNames:
     """Test handling of invalid or special branch names."""
@@ -209,7 +193,7 @@ class TestConfigurationEdgeCases:
 
         # Config validation should catch invalid filter and raise ValueError
         with pytest.raises(ValueError, match="status_filter must be one of"):
-            keeper = BranchKeeper(git_repo.working_dir, mock_config)
+            BranchKeeper(git_repo.working_dir, mock_config)
 
 
 class TestConcurrencyEdgeCases:

@@ -1,57 +1,7 @@
 """Configuration handling for git-branch-keeper"""
 
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional, Dict, Any, List
-
-
-def load_config(config_file: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Load configuration from JSON file.
-
-    Args:
-        config_file: Optional path to config file. If not provided,
-                    looks in current directory first, then user's home directory.
-
-    Returns:
-        Dict containing configuration values
-    """
-    if config_file:
-        config_path = Path(config_file)
-        if config_path.exists():
-            try:
-                config = json.loads(config_path.read_text())
-                print(f"Loaded config from {config_file}")
-                return config
-            except json.JSONDecodeError as e:
-                print(f"Error loading config file: {e}")
-                return {}
-            except Exception as e:
-                print(f"Error reading config file: {e}")
-                return {}
-
-    # Look for config in current directory
-    current_config = Path("git-branch-keeper.json")
-    if current_config.exists():
-        try:
-            config = json.loads(current_config.read_text())
-            print("Loaded config from git-branch-keeper.json")
-            return config
-        except Exception:
-            pass
-
-    # Look for config in home directory
-    home_config = Path.home() / ".git-branch-keeper.json"
-    if home_config.exists():
-        try:
-            config = json.loads(home_config.read_text())
-            print(f"Loaded config from {home_config}")
-            return config
-        except Exception:
-            pass
-
-    return {}
+from typing import Optional, List
 
 
 @dataclass
@@ -69,7 +19,7 @@ class Config:
 
     # Execution modes
     interactive: bool = True
-    dry_run: bool = True
+    dry_run: bool = False  # Default to cleanup mode (use --dry-run for preview)
     force: bool = False
     verbose: bool = False
     debug: bool = False

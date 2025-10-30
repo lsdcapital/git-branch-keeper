@@ -269,19 +269,3 @@ class TestGitServiceEdgeCases:
 
         assert service.is_tag('refs/tags/v1.0.0') is True
         assert service.is_tag('main') is False
-
-    def test_operations_with_network_error(self, git_repo, mock_config):
-        """Test handling network errors gracefully."""
-        service = GitService(git_repo.working_dir, mock_config)
-
-        # Mock the _get_repo to simulate network error
-        with patch.object(service, '_get_repo') as mock_get_repo:
-            mock_repo = Mock()
-            mock_remote = Mock()
-            mock_remote.pull.side_effect = git.exc.GitCommandError('fetch', 128)
-            mock_repo.remote.return_value = mock_remote
-            mock_get_repo.return_value = mock_repo
-
-            # Should handle error gracefully
-            result = service.update_main_branch('main')
-            assert result is False
