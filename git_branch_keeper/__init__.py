@@ -2,9 +2,8 @@
 git-branch-keeper - A smart Git branch management tool
 """
 
-__version__ = "0.1.0"
-
+from .__version__ import __version__
 from .core import BranchKeeper
 from .cli import main
 
-__all__ = ["BranchKeeper", "main"]
+__all__ = ["BranchKeeper", "main", "__version__"]

@@ -1,4 +1,5 @@
 """Logging configuration for git-branch-keeper"""
+
 import logging
 import sys
 from pathlib import Path
@@ -9,12 +10,12 @@ class ColoredFormatter(logging.Formatter):
 
     # ANSI color codes
     COLORS = {
-        'DEBUG': '\033[36m',     # Cyan
-        'INFO': '\033[32m',      # Green
-        'WARNING': '\033[33m',   # Yellow
-        'ERROR': '\033[31m',     # Red
-        'CRITICAL': '\033[35m',  # Magenta
-        'RESET': '\033[0m'       # Reset
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
+        "RESET": "\033[0m",  # Reset
     }
 
     def format(self, record):
@@ -58,14 +59,13 @@ def setup_logging(verbose: bool = False, debug: bool = False, tui_mode: bool = F
 
     # Always add file handler in TUI mode or debug mode
     if tui_mode or debug:
-        log_dir = Path.home() / '.git-branch-keeper'
+        log_dir = Path.home() / ".git-branch-keeper"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / 'git-branch-keeper.log'
-        file_handler = logging.FileHandler(log_file, mode='w')  # Overwrite each run
+        log_file = log_dir / "git-branch-keeper.log"
+        file_handler = logging.FileHandler(log_file, mode="w")  # Overwrite each run
         file_handler.setLevel(logging.DEBUG)  # Always log everything to file
         file_formatter = logging.Formatter(
-            fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)
@@ -79,14 +79,12 @@ def setup_logging(verbose: bool = False, debug: bool = False, tui_mode: bool = F
         if debug:
             # Detailed format for debug mode
             formatter = ColoredFormatter(
-                fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
+                fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
         else:
             # Simple format for normal/verbose mode
-            formatter = ColoredFormatter(
-                fmt='[%(name)s] %(message)s'
-            )
+            formatter = ColoredFormatter(fmt="[%(name)s] %(message)s")
 
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
@@ -103,9 +101,9 @@ def get_logger(name: str) -> logging.Logger:
         Logger instance
     """
     # Strip the package prefix for cleaner log names
-    if name.startswith('git_branch_keeper.'):
-        name = name.replace('git_branch_keeper.', '')
-    if name.startswith('services.'):
-        name = name.replace('services.', '')
+    if name.startswith("git_branch_keeper."):
+        name = name.replace("git_branch_keeper.", "")
+    if name.startswith("services."):
+        name = name.replace("services.", "")
 
     return logging.getLogger(name)

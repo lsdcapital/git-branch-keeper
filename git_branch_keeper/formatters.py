@@ -21,7 +21,7 @@ def format_date(date: Any) -> str:
     Returns:
         Formatted date string
     """
-    if hasattr(date, 'strftime'):
+    if hasattr(date, "strftime"):
         return date.strftime("%Y-%m-%d")
     return str(date)
 
@@ -64,6 +64,25 @@ def format_branch_name(name: str, is_current: bool = False) -> str:
         Formatted branch name
     """
     return name + (SYMBOL_CURRENT_BRANCH if is_current else "")
+
+
+def format_branch_name_with_indent(
+    name: str, is_worktree: bool = False, is_current: bool = False
+) -> str:
+    """
+    Format branch name with optional indent for worktrees and current branch indicator.
+
+    Args:
+        name: Branch name
+        is_worktree: Whether this is a worktree entry
+        is_current: Whether this is the current branch
+
+    Returns:
+        Formatted branch name with indent if worktree
+    """
+    indent = "  └─ " if is_worktree else ""
+    current_marker = SYMBOL_CURRENT_BRANCH if is_current else ""
+    return f"{indent}{name}{current_marker}"
 
 
 def format_status(status: BranchStatus) -> str:
@@ -115,10 +134,7 @@ def format_deletion_confirmation_items(branches: list[BranchDetails]) -> str:
     return "\n".join(lines)
 
 
-def get_branch_style_type(
-    branch: BranchDetails,
-    protected_branches: list[str]
-) -> str:
+def get_branch_style_type(branch: BranchDetails, protected_branches: list[str]) -> str:
     """
     Determine the style type for a branch based on its properties.
 
@@ -133,18 +149,29 @@ def get_branch_style_type(
         return BranchStyleType.PROTECTED
 
     if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]:
+        # Check if this is an orphaned worktree (directory doesn't exist)
+        is_orphaned = branch.notes and "[ORPHANED]" in branch.notes
+
+        # Orphaned worktrees are always deletable (will be cleaned up)
+        # This includes both worktree entries and parent branches with orphaned worktrees
+        if is_orphaned or branch.worktree_is_orphaned:
+            return BranchStyleType.DELETABLE
+
         # Check if branch has issues preventing deletion
         has_uncommitted = (
-            branch.modified_files is True or
-            branch.untracked_files is True or
-            branch.staged_files is True
+            branch.modified_files is True
+            or branch.untracked_files is True
+            or branch.staged_files is True
         )
         is_in_worktree = branch.in_worktree
 
         # Debug logging
         from git_branch_keeper.logging_config import get_logger
+
         logger = get_logger(__name__)
-        logger.debug(f"Branch {branch.name}: status={branch.status.value}, in_worktree={is_in_worktree}, has_uncommitted={has_uncommitted}")
+        logger.debug(
+            f"Branch {branch.name}: status={branch.status.value}, in_worktree={is_in_worktree}, has_uncommitted={has_uncommitted}"
+        )
 
         if has_uncommitted or is_in_worktree:
             return BranchStyleType.WARNING  # Can't delete - has issues
@@ -153,10 +180,7 @@ def get_branch_style_type(
     return BranchStyleType.ACTIVE
 
 
-def format_pr_link(
-    pr_status: Optional[str],
-    github_base_url: Optional[str]
-) -> str:
+def format_pr_link(pr_status: Optional[str], github_base_url: Optional[str]) -> str:
     """
     Format PR status with optional link for CLI output.
 
@@ -174,8 +198,8 @@ def format_pr_link(
         return pr_status
 
     # For main branch showing target PRs
-    if pr_status.startswith('target:'):
-        count = pr_status.split(':')[1]
+    if pr_status.startswith("target:"):
+        count = pr_status.split(":")[1]
         return f"[link={github_base_url}/pulls]{count}[/link]"
 
     # For branch with specific PR
@@ -183,9 +207,7 @@ def format_pr_link(
 
 
 def format_branch_link(
-    branch_name: str,
-    github_base_url: Optional[str],
-    is_current: bool = False
+    branch_name: str, github_base_url: Optional[str], is_current: bool = False
 ) -> str:
     """
     Format branch name with optional GitHub link for CLI output.
@@ -206,6 +228,34 @@ def format_branch_link(
     return f"[link={github_base_url}/tree/{branch_name}]{display_name}[/link]"
 
 
+def format_branch_link_with_indent(
+    branch_name: str,
+    github_base_url: Optional[str],
+    is_worktree: bool = False,
+    is_current: bool = False,
+) -> str:
+    """
+    Format branch name with optional indent and GitHub link for CLI output.
+
+    Args:
+        branch_name: Branch name
+        github_base_url: Base GitHub URL (if available)
+        is_worktree: Whether this is a worktree entry
+        is_current: Whether this is the current branch
+
+    Returns:
+        Formatted branch name (may include indent and Rich markup for link)
+    """
+    indent = "  └─ " if is_worktree else ""
+    display_name = format_branch_name(branch_name, is_current)
+
+    if not github_base_url:
+        return f"{indent}{display_name}"
+
+    # Add indent before the link
+    return f"{indent}[link={github_base_url}/tree/{branch_name}]{display_name}[/link]"
+
+
 def format_changes(branch: BranchDetails, current_branch: Optional[str] = None) -> str:
     """
     Format branch state indicators showing uncommitted changes.
@@ -215,41 +265,62 @@ def format_changes(branch: BranchDetails, current_branch: Optional[str] = None) 
         current_branch: Name of the current branch (optional)
 
     Returns:
-        String with change indicators, @ if current, W if in worktree, ✓ if clean, or ? if unknown.
+        String with change indicators, @ if current, W if has worktree, ⊢ if is worktree, ✓ if clean, or ⚠ if unknown.
         @ = Current branch (you are here)
-        W = In worktree (checked out elsewhere)
+        W = Has worktree(s) (branch is checked out elsewhere)
+        ⊢ = Is a worktree entry (this is the worktree itself)
         ✓ = Clean (no uncommitted changes)
-        ? = Unknown (couldn't check status)
-        +M = Modified files
-        +U = Untracked files
-        +S = Staged files
+        ⚠ = Unknown (couldn't check status - see info tab for details)
+        M = Modified files
+        U = Untracked files
+        S = Staged files
 
     Example:
-        "@" for current branch
-        "W" for branch in worktree
+        "@" for current branch (clean)
+        "@MU" for current branch with modified and untracked files
+        "W" for branch with worktree(s) (clean)
+        "WS" for branch with worktree(s) and staged files
+        "⊢✓" for worktree entry (clean)
+        "⊢U" for worktree entry with untracked files
         "✓" for clean branch
-        "?" for unchecked branch
-        "+M+U" for modified and untracked files
-        "+S" for only staged files
+        "⚠" for unchecked branch (see info tab)
+        "MU" for modified and untracked files
+        "S" for only staged files
     """
-    # If this is the current branch, show @ indicator
-    if current_branch and branch.name == current_branch:
-        return "@"
-
-    # If branch is in a worktree, show W indicator
-    if branch.in_worktree:
-        return "W"
+    # Determine location prefix (current branch, has worktree, or is worktree)
+    location_prefix = ""
+    if branch.is_worktree:
+        # This IS a worktree entry
+        location_prefix = "⊢"
+    elif current_branch and branch.name == current_branch:
+        # Current branch (you are here)
+        location_prefix = "@"
+    elif branch.in_worktree:
+        # Has worktree(s) (checked out elsewhere)
+        location_prefix = "W"
 
     # If any status is None, we couldn't check the branch
-    if branch.modified_files is None or branch.untracked_files is None or branch.staged_files is None:
-        return "?"
+    if (
+        branch.modified_files is None
+        or branch.untracked_files is None
+        or branch.staged_files is None
+    ):
+        # Use ⚠ to indicate status couldn't be determined
+        # Check if there's an error in notes that the user should see
+        return location_prefix + "⚠" if location_prefix else "⚠"
 
-    indicators = []
+    # Build change indicators
+    change_indicators = []
     if branch.modified_files:
-        indicators.append("+M")
+        change_indicators.append("M")
     if branch.untracked_files:
-        indicators.append("+U")
+        change_indicators.append("U")
     if branch.staged_files:
-        indicators.append("+S")
+        change_indicators.append("S")
 
-    return "".join(indicators) if indicators else "✓"
+    # Combine location prefix with change indicators
+    if change_indicators:
+        return location_prefix + "".join(change_indicators)
+    else:
+        # Clean branch - show location prefix alone (@ or W), or ✓ if no location
+        return location_prefix if location_prefix else "✓"

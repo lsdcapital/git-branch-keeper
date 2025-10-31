@@ -47,3 +47,25 @@ config.prod.py
 git-branch-keeper.json
 .git-branch-keeper.json
 !git-branch-keeper.example.json
+
+# Tool cache directory
+.git-branch-keeper/
+
+# Logs
+*.log
+logs/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# MyPy type checker
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# Generated version file
+git_branch_keeper/_version.py

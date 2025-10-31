@@ -3,9 +3,11 @@
 from dataclasses import dataclass
 from typing import List
 
+
 @dataclass
 class ColumnDefinition:
     """Definition of a table column."""
+
     key: str
     label: str
     width: int = 0  # 0 means auto-width
@@ -44,6 +46,7 @@ STATUS_DISPLAY = {
 # Color/style constants for different branch states
 class BranchStyleType:
     """Style types for branches."""
+
     PROTECTED = "protected"
     DELETABLE = "deletable"
     WARNING = "warning"  # Has issues preventing deletion
@@ -72,9 +75,10 @@ TUI_COLORS = {
 LEGEND_TEXT = """
 Legend:
 ✓ = Has remote branch     ✗ = Local only
-@ = Current branch        W = In worktree
-+M = Modified files       +U = Untracked files
-+S = Staged files         ? = Unknown state
+@ = Current branch        W = Has worktree(s)
+⊢ = Is a worktree         M = Modified files
+U = Untracked files       S = Staged files
+⚠ = Status unknown (press i for error details)
 
 Colors:
 Red = Will be deleted

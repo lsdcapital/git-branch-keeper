@@ -1,17 +1,17 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "git-branch-keeper"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A smart Git branch management tool that helps keep your repository clean and organized"
 readme = "README.md"
 requires-python = ">=3.8"
-license = "MIT"
+license = { text = "MIT" }
 keywords = ["git", "branch", "management", "cleanup"]
 authors = [
-    { name = "Stefan Lesicnik" }
+    { name = "Stefan Lesicnik", email = "stefan@lsdcapital.com" }
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -23,6 +23,10 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Typing :: Typed",
 ]
 dependencies = [
     "gitpython>=3.1.0",
@@ -55,14 +59,25 @@ target-version = "py38"
 dev = [
     "black>=24.8.0",
     "mypy>=1.14.1",
+    "pytest>=7.0.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.1",
     "ruff>=0.14.2",
+    "twine>=5.0.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/lsdcapital/git-branch-keeper"
 Repository = "https://github.com/lsdcapital/git-branch-keeper.git"
+"Bug Tracker" = "https://github.com/lsdcapital/git-branch-keeper/issues"
+Changelog = "https://github.com/lsdcapital/git-branch-keeper/blob/main/CHANGELOG.md"
+"Contributing" = "https://github.com/lsdcapital/git-branch-keeper/blob/main/CONTRIBUTING.md"
 
 [project.scripts]
 git-branch-keeper = "git_branch_keeper.cli:main"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "git_branch_keeper/_version.py"

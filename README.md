@@ -1,188 +1,305 @@
-# git-branch-keeper
+# 🌿 git-branch-keeper
 
-A smart Git branch management tool that helps keep your repository clean and organized. It identifies and helps you clean up merged and stale branches while protecting branches with open pull requests.
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-## Features
+A smart Git branch management tool that helps keep your repository clean and organized. Stop manually tracking which branches are safe to delete—let `git-branch-keeper` do the heavy lifting.
 
-- 📊 Display branch status in a beautiful table format
-- 🔍 Filter branches by status (merged/stale/all)
-- 🔄 Detect merged branches
-- ⏰ Identify stale branches based on age
-- 🔒 Protect branches with open PRs
-- 🚀 Support for both local and remote branch cleanup
-- 📝 Detailed status reporting
-- ⚡ Force mode for automated cleanup
-- 🔍 Dry-run mode to preview changes
+## ✨ Features
 
-## Understanding Branch Status
+- 🖥️ **Interactive TUI** - Beautiful terminal interface for managing branches with keyboard shortcuts
+- 📊 **Smart Detection** - Automatically identifies merged and stale branches
+- 🔍 **GitHub Integration** - Protects branches with open pull requests
+- 🌳 **Worktree Support** - Handles git worktrees intelligently
+- ⚡ **Fast & Efficient** - Caching and parallel processing for large repositories
+- 🎨 **Rich Output** - Color-coded status with detailed information
+- 🔒 **Safety First** - Protected branches, confirmation prompts, and dry-run mode
+- 📝 **Flexible Filtering** - View all, merged, or stale branches
+- 🔄 **Sync Awareness** - Shows ahead/behind status for remote tracking
 
-When you run `git-branch-keeper`, you'll see a table with these columns:
+## 📸 Screenshots
 
-- **Branch**: The branch name (* indicates current branch)
-- **Last Commit**: Date of the most recent commit
-- **Age (days)**: Days since the last commit
-- **Status**: 
-  - `active` - Branch has unmerged changes
-  - `merged` - Branch changes are in the main branch (safe to delete)
-  - `stale` - Branch is older than the configured stale days
-- **Sync**:
-  - `synced` - Local and remote are at the same commit
-  - `ahead X` - Local is X commits ahead of remote
-  - `behind X` - Local is X commits behind remote
-  - `diverged` - Local and remote have different commits
-  - `local-only` - No remote branch exists
-  - `merged-git` - Detected as merged by git
-  - `merged-pr` - Merged via GitHub PR
-- **Remote**: ✓ if branch exists on remote, ✗ if local only
-- **PRs**: Number of open pull requests (if GitHub token configured)
-- **Notes**: Additional information about the branch
+### Interactive TUI Mode
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ Git Branch Keeper                                         v0.1.0       │
+├────────────────────────────────────────────────────────────────────────┤
+│   ✓  feature/old-feature    merged     2024-01-15    45    ✗  synced  │
+│   ✗  feature/new-work       active     2024-03-20     2    ✓  ahead 3 │
+│   ✓  bugfix/old-bug        merged     2023-12-10    90    ✓  synced  │
+├────────────────────────────────────────────────────────────────────────┤
+│ Total: 15 | Protected: 2 | Deletable: 8 | Marked: 2                   │
+├────────────────────────────────────────────────────────────────────────┤
+│ (q) Quit (d) Delete (space) Mark (a) Mark All (i) Info (r) Refresh   │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
-## Installation
+<!-- TODO: Add actual screenshots here once deployed -->
 
-### Development Installation
+## 🚀 Installation
 
-Since this package is currently in development, install it directly from the source:
-
+### Using pipx (Recommended)
 ```bash
-# Clone the repository
-git clone https://github.com/WeR1Hub/git-branch-keeper.git
+pipx install git-branch-keeper
+```
+
+### Using pip
+```bash
+pip install git-branch-keeper
+```
+
+### From Source
+```bash
+git clone https://github.com/lsdcapital/git-branch-keeper.git
 cd git-branch-keeper
-
-# Install using uv
 uv sync --dev
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
-### Future Installation (Once Published)
+## 🎯 Quick Start
 
-Once the package is published to PyPI, you'll be able to install it using:
+### Interactive Mode (Default)
+Launch the beautiful TUI to interactively manage your branches:
 
 ```bash
-# Using uv
-uv tool install git-branch-keeper
+cd your-git-repo
+git-branch-keeper
 ```
 
-## Usage
+Use keyboard shortcuts to navigate and manage branches:
+- `↑/↓` - Navigate branches
+- `space` - Mark/unmark branch for deletion
+- `a` - Mark all deletable branches
+- `d` - Delete marked branches
+- `i` - Show detailed branch info
+- `r` - Refresh branch data
+- `q` - Quit
 
-Basic usage:
+### CLI Mode
+For scripting and automation, use the non-interactive CLI mode:
 
 ```bash
-# Show status of all branches
-git-branch-keeper --status all
+# View merged branches
+git-branch-keeper --no-interactive --filter merged
 
-# Show only merged branches
-git-branch-keeper --status merged
+# Delete merged branches (with confirmation)
+git-branch-keeper --no-interactive --filter merged
 
-# Show only stale branches
-git-branch-keeper --status stale
+# Force delete without confirmation
+git-branch-keeper --no-interactive --filter merged --force
 
-# Delete merged branches (interactive)
-git-branch-keeper --status merged
-
-# Delete stale branches (interactive)
-git-branch-keeper --status stale
-
-# Force delete merged branches (no confirmation)
-git-branch-keeper --status merged -f
-
-# Dry run to see what would be deleted
-git-branch-keeper --status merged --dry-run
+# Dry run to preview changes
+git-branch-keeper --no-interactive --filter merged --dry-run
 ```
 
-## Configuration
+## 📖 Usage
 
-The tool can be configured using a JSON configuration file. By default, it looks for:
-1. A file specified via command line argument
-2. `git-branch-keeper.json` in the current directory
-3. `.git-branch-keeper.json` in your home directory
-
-Copy the example configuration file to get started:
+### Command Line Options
 
 ```bash
-cp git-branch-keeper.example.json git-branch-keeper.json
+git-branch-keeper [OPTIONS]
+```
+
+**Display Options:**
+- `--filter {all,merged,stale}` - Filter branches by status (default: all)
+- `--sort-by {name,age,status}` - Sort branches by field (default: age)
+- `--sort-order {asc,desc}` - Sort order (default: desc)
+- `--stale-days N` - Days before branch is stale (default: 30)
+
+**Mode Options:**
+- `--interactive` / `--no-interactive` - Enable/disable TUI mode
+- `--dry-run` - Preview changes without deleting
+- `--force` - Delete without confirmation (use with caution!)
+- `--refresh` - Bypass cache and refresh all data
+
+**Configuration:**
+- `-c, --config PATH` - Path to config file
+- `--main-branch NAME` - Override main branch name
+- `--protected BRANCH` - Additional protected branches (repeatable)
+- `--ignore PATTERN` - Branch patterns to ignore (repeatable)
+
+**Other:**
+- `--debug` - Enable debug logging
+- `--version` - Show version information
+- `-v, --verbose` - Verbose output
+
+### Understanding Branch Status
+
+| Status | Description | Safe to Delete |
+|--------|-------------|----------------|
+| `merged` | Changes are fully merged into main branch | ✅ Yes |
+| `stale` | No commits in N days (default: 30) | ⚠️ Maybe |
+| `active` | Recent commits, not yet merged | ❌ No |
+
+### Understanding Sync Status
+
+| Status | Description |
+|--------|-------------|
+| `synced` | Local and remote at same commit |
+| `ahead X` | Local has X commits not pushed |
+| `behind X` | Remote has X commits not pulled |
+| `diverged` | Local and remote have different commits |
+| `local-only` | No remote branch exists |
+| `merged-git` | Detected as merged by git |
+| `merged-pr` | Merged via GitHub pull request |
+
+## ⚙️ Configuration
+
+Create a configuration file to customize behavior. The tool looks for config files in this order:
+
+1. Path specified with `--config` flag
+2. `git-branch-keeper.json` in current directory
+3. `.git-branch-keeper.json` in home directory
+
+### Example Configuration
+
+```json
+{
+    "protected_branches": ["main", "master", "develop"],
+    "ignore_patterns": [
+        "release/*",
+        "hotfix/*",
+        "staging"
+    ],
+    "stale_days": 30,
+    "github_token": "${GITHUB_TOKEN}"
+}
 ```
 
 ### Configuration Options
 
-```json
-{
-    "protected_branches": [                        // Branches that will never be modified
-        "main",
-        "master",
-        "dev"
-    ],
-    "ignore_patterns": [                          // Branch patterns to ignore (glob syntax)
-        "develop",                                // Exact match
-        "staging",                                // Exact match
-        "release/*",                              // All release branches
-        "feature/*",                              // All feature branches
-        "hotfix/*"                                // All hotfix branches
-    ],
-    "stale_days": 30,                            // Number of days before a branch is considered stale
-    "github_token": "your-github-token-here"      // GitHub personal access token (optional)
-}
-```
-
-The `protected_branches` list specifies branches that will never be modified or deleted by the tool. By default, this includes "main" and "master". The repository information is automatically detected from your git remote URL.
+| Option | Type | Description | Default |
+|--------|------|-------------|---------|
+| `protected_branches` | array | Branches never to delete | `["main", "master"]` |
+| `ignore_patterns` | array | Glob patterns to ignore | `[]` |
+| `stale_days` | integer | Days before branch is stale | `30` |
+| `github_token` | string | GitHub personal access token | `null` |
 
 ### GitHub Token Setup
 
-The GitHub token enables the tool to check for open pull requests and detect merged PRs. To set up a token:
+To enable pull request detection and protection:
 
-1. **Create a GitHub Personal Access Token**:
-   - Go to https://github.com/settings/tokens/new
-   - Or navigate: GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
-   - Select these scopes:
-     - `repo` - Full control of private repositories
-     - `read:org` - Read org and team membership (if working with org repos)
-   - Generate the token and copy it
+1. **Create a token** at https://github.com/settings/tokens/new
+   - Select scope: `repo` (for private repos) or `public_repo` (for public only)
+   - Select scope: `read:org` (if using organization repos)
 
-2. **Configure the token** (choose one method):
-   
+2. **Configure the token** (choose one):
+
    **Option A: Environment Variable (Recommended)**
    ```bash
-   # Set for current session
-   export GITHUB_TOKEN="your-token-here"
-   
-   # Add to shell config for persistence
-   echo 'export GITHUB_TOKEN="your-token-here"' >> ~/.zshrc  # or ~/.bashrc
-   source ~/.zshrc
+   export GITHUB_TOKEN="ghp_your_token_here"
    ```
-   
-   **Option B: Configuration File**
+
+   **Option B: Config File**
    ```json
    {
-       "github_token": "your-token-here",
-       // ... other config options
+       "github_token": "ghp_your_token_here"
    }
    ```
-   
-   ⚠️ **Security Note**: If using the config file method, ensure you don't commit the token to version control. Add `git-branch-keeper.json` to your `.gitignore`.
 
-Branch patterns support glob syntax:
-- `*` matches any sequence of characters
-- `?` matches any single character
-- `[seq]` matches any character in seq
-- `[!seq]` matches any character not in seq
+   ⚠️ **Security**: Never commit tokens to version control! Add config files to `.gitignore`.
 
-For example:
-- `feature/*` matches all feature branches
-- `release/v?.?.*` matches release branches like "release/v1.2.3"
-- `hotfix-*` matches all hotfix branches
+### Pattern Matching
 
-## Options
+Ignore patterns support glob syntax:
+- `feature/*` - All feature branches
+- `release/v?.?.*` - Releases like v1.2.3
+- `hotfix-*` - All hotfix branches
+- `[!main]*` - Everything except main
 
-- `--status {all,merged,stale}`: Filter branches by status
-- `-f, --force`: Force deletion without confirmation
-- `--dry-run`: Show what would be deleted without making changes
-- `-v, --verbose`: Enable verbose output
-- `-c, --config`: Path to config file
-- `--stale-days`: Days before a branch is considered stale (default: 30)
-- `--version`: Show version information
+## 🎨 Examples
 
-## Contributing
+### Example 1: Weekly Cleanup
+```bash
+# Interactive review of all merged branches
+git-branch-keeper --filter merged
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+# Mark branches in TUI, press 'd' to delete
+```
 
-## License
+### Example 2: Automated Cleanup in CI/CD
+```bash
+# Delete all merged branches older than 60 days (no confirmation)
+git-branch-keeper --no-interactive --filter merged --stale-days 60 --force
+```
 
-MIT License
+### Example 3: Safe Exploration
+```bash
+# See what would be deleted without making changes
+git-branch-keeper --filter merged --dry-run
+```
+
+### Example 4: Custom Main Branch
+```bash
+# For repos using 'develop' as main branch
+git-branch-keeper --main-branch develop --filter merged
+```
+
+### Example 5: Stale Branch Review
+```bash
+# Find branches inactive for 90+ days
+git-branch-keeper --filter stale --stale-days 90
+```
+
+## 🏗️ Architecture
+
+Built with modern Python tools:
+- **GitPython** - Git repository operations
+- **Textual** - Interactive terminal UI
+- **Rich** - Beautiful terminal output
+- **PyGithub** - GitHub API integration
+
+The project follows a service-oriented architecture:
+- `core.py` - Main orchestration
+- `services/` - Git, GitHub, caching, and display services
+- `models/` - Data models for branches and status
+- `tui.py` - Interactive terminal interface
+
+## 🤝 Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on:
+
+- Development setup and prerequisites
+- Coding standards and style guidelines
+- Testing procedures
+- Pull request process
+- How to report bugs and suggest features
+
+Quick summary:
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes following our code style (Black, Ruff, MyPy)
+4. Submit a pull request
+
+For bug reports and feature requests, please [open an issue](https://github.com/lsdcapital/git-branch-keeper/issues).
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- Built with [Textual](https://github.com/Textualize/textual) - Amazing TUI framework
+- Inspired by the need to keep Git repositories clean and maintainable
+- Thanks to all contributors!
+
+## 💬 Support
+
+- **Bug reports & feature requests**: [Open an issue](https://github.com/lsdcapital/git-branch-keeper/issues)
+- **Contributing guidelines**: See [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Questions & discussions**: Start a [discussion](https://github.com/lsdcapital/git-branch-keeper/discussions)
+
+## 📚 Related Projects
+
+- [git-extras](https://github.com/tj/git-extras) - Git utilities collection
+- [git-trim](https://github.com/foriequal0/git-trim) - Automatic branch cleanup
+- [git-gone](https://github.com/lunaryorn/git-gone) - Remove merged branches
+
+---
+
+<div align="center">
+Made with ❤️ by <a href="https://github.com/lsdcapital">Stefan Lesicnik</a>
+<br>
+<sub>Star ⭐ this repo if you find it useful!</sub>
+</div>

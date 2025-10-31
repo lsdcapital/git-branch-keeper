@@ -1,3 +1,3 @@
-from .github_service import GitHubService
+from .git import GitHubService, GitOperations, WorktreeService
 
-__all__ = ['GitHubService'] 
+__all__ = ["GitHubService", "GitOperations", "WorktreeService"]

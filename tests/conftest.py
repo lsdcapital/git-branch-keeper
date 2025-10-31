@@ -1,4 +1,5 @@
 """Pytest fixtures for git-branch-keeper tests"""
+
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock
@@ -19,18 +20,18 @@ def temp_dir():
 def mock_config():
     """Create a mock configuration dictionary."""
     return {
-        'verbose': False,
-        'debug': False,
-        'stale_days': 30,
-        'protected_branches': ['main', 'master'],
-        'ignore_patterns': [],
-        'status_filter': 'all',
-        'interactive': False,
-        'dry_run': True,
-        'force': False,
-        'main_branch': 'main',
-        'github_token': 'test_token_for_testing',  # Required for GitHub repos
-        'max_prs_to_fetch': 500
+        "verbose": False,
+        "debug": False,
+        "stale_days": 30,
+        "protected_branches": ["main", "master"],
+        "ignore_patterns": [],
+        "status_filter": "all",
+        "interactive": False,
+        "dry_run": True,
+        "force": False,
+        "main_branch": "main",
+        "github_token": "test_token_for_testing",  # Required for GitHub repos
+        "max_prs_to_fetch": 500,
     }
 
 
@@ -55,13 +56,13 @@ def git_repo(temp_dir):
 
     # Rename master to main if needed
     try:
-        repo.git.branch('-M', 'main')
+        repo.git.branch("-M", "main")
     except Exception:
         pass
 
     # Add a fake GitHub remote for testing
     try:
-        repo.create_remote('origin', 'git@github.com:test/test-repo.git')
+        repo.create_remote("origin", "git@github.com:test/test-repo.git")
     except Exception:
         pass
 
@@ -78,15 +79,15 @@ def git_repo_with_branches(git_repo):
     repo_path = Path(repo.working_dir)
 
     # Create feature branch
-    repo.git.checkout('-b', 'feature/test-feature')
+    repo.git.checkout("-b", "feature/test-feature")
     test_file = repo_path / "feature.txt"
     test_file.write_text("Feature content\n")
     repo.index.add(["feature.txt"])
     repo.index.commit("Add feature")
 
     # Create stale branch (old commit)
-    repo.git.checkout('main')
-    repo.git.checkout('-b', 'stale/old-branch')
+    repo.git.checkout("main")
+    repo.git.checkout("-b", "stale/old-branch")
     old_file = repo_path / "old.txt"
     old_file.write_text("Old content\n")
     repo.index.add(["old.txt"])
@@ -94,19 +95,19 @@ def git_repo_with_branches(git_repo):
     # Make the commit appear old (this is a simulation - real age would require waiting)
 
     # Create merged branch
-    repo.git.checkout('main')
-    repo.git.checkout('-b', 'feature/to-merge')
+    repo.git.checkout("main")
+    repo.git.checkout("-b", "feature/to-merge")
     merge_file = repo_path / "merge.txt"
     merge_file.write_text("Merge content\n")
     repo.index.add(["merge.txt"])
     repo.index.commit("Feature to merge")
 
     # Merge it back to main
-    repo.git.checkout('main')
-    repo.git.merge('feature/to-merge', '--no-ff', '-m', 'Merge feature/to-merge')
+    repo.git.checkout("main")
+    repo.git.merge("feature/to-merge", "--no-ff", "-m", "Merge feature/to-merge")
 
     # Go back to main
-    repo.git.checkout('main')
+    repo.git.checkout("main")
 
     yield repo
 
@@ -152,7 +153,7 @@ def mock_github():
     repo.full_name = "test/repo"
 
     # Mock pulls
-    def mock_get_pulls(state='open', head=None, base=None):
+    def mock_get_pulls(state="open", head=None, base=None):
         pulls = Mock()
         pulls.totalCount = 0
         pulls.__iter__ = Mock(return_value=iter([]))
@@ -168,7 +169,7 @@ def mock_github():
 @pytest.fixture
 def mock_github_service(mock_config, mock_git_repo):
     """Create a mock GitHubService."""
-    from git_branch_keeper.services.github_service import GitHubService
+    from git_branch_keeper.services.git import GitHubService
 
     service = GitHubService(mock_git_repo, mock_config)
     # Set up minimal mocks for testing
@@ -180,9 +181,9 @@ def mock_github_service(mock_config, mock_git_repo):
 @pytest.fixture
 def mock_git_service(mock_config, mock_git_repo):
     """Create a mock GitService."""
-    from git_branch_keeper.services.git_service import GitService
+    from git_branch_keeper.services.git import GitOperations
 
-    service = Mock(spec=GitService)
+    service = Mock(spec=GitOperations)
     service.repo = mock_git_repo
     service.config = mock_config
     service.verbose = False
@@ -214,7 +215,7 @@ def sample_branch_data():
             has_remote=True,
             sync_status=SyncStatus.SYNCED.value,
             pr_status="",
-            notes=None
+            notes=None,
         ),
         BranchDetails(
             name="feature/stale",
@@ -225,7 +226,7 @@ def sample_branch_data():
             has_remote=True,
             sync_status=SyncStatus.BEHIND.value,
             pr_status="",
-            notes=None
+            notes=None,
         ),
         BranchDetails(
             name="feature/merged",
@@ -236,7 +237,7 @@ def sample_branch_data():
             has_remote=False,
             sync_status=SyncStatus.MERGED_GIT.value,
             pr_status="",
-            notes=None
+            notes=None,
         ),
     ]
 
@@ -245,19 +246,7 @@ def sample_branch_data():
 def mock_pr_data():
     """Create mock PR data for testing."""
     return {
-        "feature/with-pr": {
-            "count": 1,
-            "merged": False,
-            "closed": False
-        },
-        "feature/merged-pr": {
-            "count": 0,
-            "merged": True,
-            "closed": False
-        },
-        "feature/closed-pr": {
-            "count": 0,
-            "merged": False,
-            "closed": True
-        }
+        "feature/with-pr": {"count": 1, "merged": False, "closed": False},
+        "feature/merged-pr": {"count": 0, "merged": True, "closed": False},
+        "feature/closed-pr": {"count": 0, "merged": False, "closed": True},
     }

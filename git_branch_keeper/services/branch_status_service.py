@@ -1,4 +1,5 @@
 """Service for determining branch status and related operations"""
+
 from typing import Optional, Dict, Union, TYPE_CHECKING
 from fnmatch import fnmatch
 from rich.console import Console
@@ -11,24 +12,34 @@ if TYPE_CHECKING:
 console = Console()
 logger = get_logger(__name__)
 
+
 class BranchStatusService:
     """Service for determining branch status."""
 
-    def __init__(self, repo_path: str, config: Union['Config', dict], git_service, github_service, verbose: bool = False):
+    def __init__(
+        self,
+        repo_path: str,
+        config: Union["Config", dict],
+        git_service,
+        github_service,
+        verbose: bool = False,
+    ):
         """Initialize the service."""
         self.repo_path = repo_path
         self.config = config
         self.git_service = git_service
         self.github_service = github_service
         self.verbose = verbose
-        self.debug_mode = config.get('debug', False)
-        self.protected_branches = config.get('protected_branches', ["main", "master"])
-        self.ignore_patterns = config.get('ignore_patterns', [])
-        self.min_stale_days = config.get('stale_days', 30)
-        self.status_filter = config.get('status_filter', "all")
-        self.main_branch = config.get('main_branch', 'main')
+        self.debug_mode = config.get("debug", False)
+        self.protected_branches = config.get("protected_branches", ["main", "master"])
+        self.ignore_patterns = config.get("ignore_patterns", [])
+        self.min_stale_days = config.get("stale_days", 30)
+        self.status_filter = config.get("status_filter", "all")
+        self.main_branch = config.get("main_branch", "main")
 
-    def get_branch_status(self, branch_name: str, main_branch: str, pr_data: Optional[Dict] = None) -> BranchStatus:
+    def get_branch_status(
+        self, branch_name: str, main_branch: str, pr_data: Optional[Dict] = None
+    ) -> BranchStatus:
         """Get the status of a branch."""
         logger.debug(f"Checking status for branch: {branch_name}")
 
@@ -45,13 +56,15 @@ class BranchStatusService:
         # Check PR data if available (only use this during bulk processing)
         if pr_data and branch_name in pr_data:
             pr_info = pr_data[branch_name]
-            if pr_info.get('merged', False):
+            if pr_info.get("merged", False):
                 logger.debug(f"Branch {branch_name} is merged (PR was merged)")
                 return BranchStatus.MERGED
-            if pr_info.get('closed', False):
-                logger.debug(f"Branch {branch_name} had PR closed without merging, marking as active")
+            if pr_info.get("closed", False):
+                logger.debug(
+                    f"Branch {branch_name} had PR closed without merging, marking as active"
+                )
                 return BranchStatus.ACTIVE
-            if pr_info.get('count', 0) > 0:
+            if pr_info.get("count", 0) > 0:
                 logger.debug(f"Branch {branch_name} marked as active (has open PRs)")
                 return BranchStatus.ACTIVE
 
@@ -64,8 +77,8 @@ class BranchStatusService:
         # Check branch age last (simplest check)
         age_days = self.git_service.get_branch_age(branch_name)
         logger.debug(f"Branch age: {age_days} days")
-        
-        if age_days >= self.config.get('stale_days', 30):
+
+        if age_days >= self.config.get("stale_days", 30):
             logger.debug(f"Branch {branch_name} marked as stale (age: {age_days} days)")
             return BranchStatus.STALE
 

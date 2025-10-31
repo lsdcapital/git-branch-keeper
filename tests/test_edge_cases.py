@@ -1,11 +1,12 @@
 """Tests for edge cases and error scenarios"""
+
 from unittest.mock import Mock, patch
 import git
 import pytest
 
 from git_branch_keeper.core import BranchKeeper
-from git_branch_keeper.services.git_service import GitService
-from git_branch_keeper.services.github_service import GitHubService
+from git_branch_keeper.services.git import GitOperations
+from git_branch_keeper.services.git import GitHubService
 from git_branch_keeper.models.branch import SyncStatus
 
 
@@ -19,25 +20,25 @@ class TestDetachedHeadHandling:
         git_repo_with_branches.git.checkout(commit_sha)
 
         keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
-        mock_config['dry_run'] = False
+        mock_config["dry_run"] = False
 
         # Should not crash when checking active_branch
-        result = keeper.delete_branch('feature/test-feature', 'test')
+        result = keeper.delete_branch("feature/test-feature", "test")
 
         # Should allow deletion since no active branch
         assert result is not None
 
     def test_get_branch_status_detached_head(self, git_repo_with_branches, mock_config):
         """Test getting branch status when in detached HEAD."""
-        service = GitService(git_repo_with_branches.working_dir, mock_config)
+        service = GitOperations(git_repo_with_branches.working_dir, mock_config)
 
         # Create detached HEAD
         commit_sha = git_repo_with_branches.head.commit.hexsha
         git_repo_with_branches.git.checkout(commit_sha)
 
         # Should not crash
-        details = service.get_branch_status_details('main')
-        assert 'modified' in details
+        details = service.get_branch_status_details("main")
+        assert "modified" in details
 
 
 class TestProtectedRemoteBranches:
@@ -45,24 +46,22 @@ class TestProtectedRemoteBranches:
 
     def test_delete_protected_remote_branch(self, git_repo, mock_config):
         """Test deletion of branch with protected remote."""
-        service = GitService(git_repo.working_dir, mock_config)
+        service = GitOperations(git_repo.working_dir, mock_config)
 
-        with patch.object(service, 'has_remote_branch', return_value=True):
+        with patch.object(service, "has_remote_branch", return_value=True):
             # Mock the repo.remote() call to simulate protected branch error
-            with patch.object(service, '_get_repo') as mock_get_repo:
+            with patch.object(service, "_get_repo") as mock_get_repo:
                 mock_repo = Mock()
                 mock_remote = Mock()
                 mock_remote.push.side_effect = git.exc.GitCommandError(
-                    'push',
-                    status=1,
-                    stderr="remote: error: GH006: Protected branch update failed"
+                    "push", status=1, stderr="remote: error: GH006: Protected branch update failed"
                 )
                 mock_repo.remote.return_value = mock_remote
                 mock_repo.delete_head = Mock()
                 mock_get_repo.return_value = mock_repo
 
                 # Should handle gracefully
-                result = service.delete_branch('main', dry_run=False)
+                result = service.delete_branch("main", dry_run=False)
 
                 # Local deletion should succeed even if remote fails
                 assert result is True
@@ -73,8 +72,8 @@ class TestGitHubAPIPagination:
 
     def test_bulk_pr_data_respects_limit(self, mock_git_repo, mock_config):
         """Test that bulk PR fetching respects the limit."""
-        mock_config['github_token'] = "test_token"
-        mock_config['max_prs_to_fetch'] = 5
+        mock_config["github_token"] = "test_token"
+        mock_config["max_prs_to_fetch"] = 5
 
         service = GitHubService(mock_git_repo, mock_config)
         service.github_repo = "test/repo"
@@ -84,7 +83,7 @@ class TestGitHubAPIPagination:
         prs = []
         for i in range(10):
             pr = Mock()
-            pr.state = 'open'
+            pr.state = "open"
             pr.merged = False
             pr.head = Mock()
             pr.head.ref = f"branch{i}"
@@ -105,7 +104,7 @@ class TestNetworkErrors:
 
     def test_github_api_network_error(self, mock_git_repo, mock_config):
         """Test handling GitHub API network errors."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo, mock_config)
         service.github_repo = "test/repo"
         service.gh_repo = Mock()
@@ -123,11 +122,11 @@ class TestInvalidBranchNames:
 
     def test_branch_with_special_characters(self, git_repo, mock_config):
         """Test handling branches with special characters."""
-        service = GitService(git_repo, mock_config)
+        service = GitOperations(git_repo, mock_config)
 
         # GitPython should handle escaping automatically
         # Test that we don't crash with special characters
-        age = service.get_branch_age('nonexistent/branch-with-dashes_and_underscores')
+        age = service.get_branch_age("nonexistent/branch-with-dashes_and_underscores")
         assert age == 0  # Returns 0 for non-existent branches
 
 
@@ -147,10 +146,10 @@ class TestMergeDetectionEdgeCases:
 
     def test_merge_detection_with_cache(self, git_repo_with_branches, mock_config):
         """Test that merge detection caching works correctly."""
-        service = GitService(git_repo_with_branches, mock_config)
+        service = GitOperations(git_repo_with_branches, mock_config)
 
-        branch = 'feature/to-merge'
-        main = 'main'
+        branch = "feature/to-merge"
+        main = "main"
 
         # First call
         result1 = service.is_branch_merged(branch, main)
@@ -166,9 +165,9 @@ class TestMergeDetectionEdgeCases:
 
     def test_merge_detection_non_existent_branch(self, git_repo, mock_config):
         """Test merge detection with non-existent branch."""
-        service = GitService(git_repo, mock_config)
+        service = GitOperations(git_repo, mock_config)
 
-        result = service.is_branch_merged('nonexistent', 'main')
+        result = service.is_branch_merged("nonexistent", "main")
 
         # Should return False for non-existent branches
         assert result is False
@@ -179,17 +178,17 @@ class TestConfigurationEdgeCases:
 
     def test_missing_config_values_use_defaults(self, git_repo):
         """Test that missing config values use sensible defaults."""
-        minimal_config = {'github_token': 'test_token'}  # Required for GitHub repos
+        minimal_config = {"github_token": "test_token"}  # Required for GitHub repos
 
         keeper = BranchKeeper(git_repo.working_dir, minimal_config)
 
         # Should use defaults
         assert keeper.min_stale_days == 30
-        assert 'main' in keeper.protected_branches or 'master' in keeper.protected_branches
+        assert "main" in keeper.protected_branches or "master" in keeper.protected_branches
 
     def test_invalid_filter_values(self, git_repo, mock_config):
         """Test handling of invalid filter values."""
-        mock_config['status_filter'] = 'invalid_filter'
+        mock_config["status_filter"] = "invalid_filter"
 
         # Config validation should catch invalid filter and raise ValueError
         with pytest.raises(ValueError, match="status_filter must be one of"):
@@ -204,7 +203,7 @@ class TestConcurrencyEdgeCases:
         keeper = BranchKeeper(git_repo.working_dir, mock_config)
 
         # Verify that git_service has in_git_operation flag
-        assert hasattr(keeper.git_service, 'in_git_operation')
+        assert hasattr(keeper.git_service, "in_git_operation")
         assert not keeper.git_service.in_git_operation
 
         # Simulate being in a git operation
@@ -220,9 +219,9 @@ class TestSyncStatusEdgeCases:
 
     def test_sync_status_with_no_remote(self, git_repo, mock_config):
         """Test sync status when branch has no remote."""
-        service = GitService(git_repo, mock_config)
+        service = GitOperations(git_repo, mock_config)
 
-        status = service.get_branch_sync_status('main', 'main')
+        status = service.get_branch_sync_status("main", "main")
 
         # Should handle gracefully
         assert status == SyncStatus.LOCAL_ONLY.value

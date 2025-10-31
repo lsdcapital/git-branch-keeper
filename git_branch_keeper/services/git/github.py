@@ -1,4 +1,5 @@
 """GitHub API integration service"""
+
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict, Tuple, TYPE_CHECKING, Union
@@ -15,21 +16,22 @@ if TYPE_CHECKING:
 console = Console()
 logger = get_logger(__name__)
 
+
 class GitHubService:
-    def __init__(self, repo_path: str, config: Union['Config', dict]):
+    def __init__(self, repo_path: str, config: Union["Config", dict]):
         """Initialize the service.
 
         Note: GitHub token is required and validated before this service is initialized.
         """
         self.repo_path = repo_path
         self.config = config
-        self.verbose = config.get('verbose', False)
-        self.debug_mode = config.get('debug', False)
+        self.verbose = config.get("verbose", False)
+        self.debug_mode = config.get("debug", False)
         self.github_token = config.get("github_token") or os.environ.get("GITHUB_TOKEN")
         self.github_api_url: Optional[str] = None
         self.github_repo: Optional[str] = None
         self.github: Optional[Github] = None
-        self.gh_repo: Optional['Repository'] = None
+        self.gh_repo: Optional["Repository"] = None
 
     def setup_github_api(self, remote_url: str) -> None:
         """Setup GitHub API access.
@@ -72,7 +74,9 @@ class GitHubService:
             assert self.gh_repo is not None
             assert self.github_repo is not None
 
-            pulls = self.gh_repo.get_pulls(state='open', head=f"{self.github_repo.split('/')[0]}:{branch_name}")
+            pulls = self.gh_repo.get_pulls(
+                state="open", head=f"{self.github_repo.split('/')[0]}:{branch_name}"
+            )
             return pulls.totalCount > 0
         except Exception as e:
             logger.debug(f"[GitHub] Error checking PR status for {branch_name}: {e}")
@@ -85,31 +89,26 @@ class GitHubService:
             assert self.github_repo is not None
             assert self.gh_repo is not None
 
-            org_name = self.github_repo.split('/')[0]
+            org_name = self.github_repo.split("/")[0]
 
-            if branch_name in self.config.get('protected_branches', ['main', 'master']):
+            if branch_name in self.config.get("protected_branches", ["main", "master"]):
                 # For protected branches, fetch PRs targeting this branch
-                branch_prs = list(self.gh_repo.get_pulls(state='all', base=branch_name))
-                open_prs = sum(1 for pr in branch_prs if pr.state == 'open')
+                branch_prs = list(self.gh_repo.get_pulls(state="all", base=branch_name))
+                open_prs = sum(1 for pr in branch_prs if pr.state == "open")
                 # Protected branches are merge targets, not branches to be merged
                 merged_prs = False
                 closed_prs = False
             else:
                 # For other branches, fetch PRs from this branch
-                branch_prs = list(self.gh_repo.get_pulls(
-                    state='all',
-                    head=f"{org_name}:{branch_name}"
-                ))
-                open_prs = sum(1 for pr in branch_prs if pr.state == 'open')
+                branch_prs = list(
+                    self.gh_repo.get_pulls(state="all", head=f"{org_name}:{branch_name}")
+                )
+                open_prs = sum(1 for pr in branch_prs if pr.state == "open")
                 # Check if this branch was merged via PR
                 merged_prs = any(pr.merged for pr in branch_prs)
-                closed_prs = any(pr.state == 'closed' and not pr.merged for pr in branch_prs)
+                closed_prs = any(pr.state == "closed" and not pr.merged for pr in branch_prs)
 
-            pr_data = {
-                'count': open_prs,
-                'merged': merged_prs,
-                'closed': closed_prs
-            }
+            pr_data = {"count": open_prs, "merged": merged_prs, "closed": closed_prs}
 
             if self.debug_mode:
                 if merged_prs:
@@ -124,11 +123,7 @@ class GitHubService:
         except Exception as e:
             logger.debug(f"[GitHub] Error fetching PRs for branch {branch_name}: {e}")
             # Return default values if branch PR fetch fails
-            return (branch_name, {
-                'count': 0,
-                'merged': False,
-                'closed': False
-            })
+            return (branch_name, {"count": 0, "merged": False, "closed": False})
 
     def get_bulk_pr_data(self, branch_names: List[str]) -> Dict[str, Dict]:
         """Get PR data for multiple branches by fetching PRs in parallel.
@@ -145,9 +140,12 @@ class GitHubService:
             # Use parallel fetching with ThreadPoolExecutor
             # Benefits from Python 3.14 free-threading when available
             from git_branch_keeper.threading_utils import get_optimal_worker_count
+
             max_workers = min(10, get_optimal_worker_count())  # Cap at 10 for API rate limiting
 
-            logger.debug(f"[GitHub] Fetching PR data for {len(branch_names)} branches using {max_workers} workers")
+            logger.debug(
+                f"[GitHub] Fetching PR data for {len(branch_names)} branches using {max_workers} workers"
+            )
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_branch = {

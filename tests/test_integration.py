@@ -1,4 +1,5 @@
 """Integration tests for BranchKeeper"""
+
 import pytest
 from unittest.mock import patch
 
@@ -14,8 +15,8 @@ class TestBranchKeeperInit:
 
         assert keeper.repo_path == git_repo.working_dir
         # Config is now a proper Config object, not a dict
-        assert keeper.config.get('stale_days') == mock_config['stale_days']
-        assert keeper.config.get('protected_branches') == mock_config['protected_branches']
+        assert keeper.config.get("stale_days") == mock_config["stale_days"]
+        assert keeper.config.get("protected_branches") == mock_config["protected_branches"]
         assert keeper.repo is not None
 
     def test_init_with_invalid_repo(self, temp_dir, mock_config):
@@ -43,8 +44,10 @@ class TestBranchKeeperProcessing:
         # Should not raise an exception
         keeper.process_branches(cleanup_enabled=False)
 
-    @patch('git_branch_keeper.services.display_service.console')
-    def test_process_branches_displays_results(self, mock_console, git_repo_with_branches, mock_config):
+    @patch("git_branch_keeper.services.display_service.console")
+    def test_process_branches_displays_results(
+        self, mock_console, git_repo_with_branches, mock_config
+    ):
         """Test that process_branches displays branch information."""
         keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
 
@@ -59,7 +62,7 @@ class TestBranchKeeperCleanup:
 
     def test_cleanup_dry_run(self, git_repo_with_branches, mock_config):
         """Test cleanup in dry-run mode."""
-        mock_config['dry_run'] = True
+        mock_config["dry_run"] = True
         keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
 
         initial_branches = list(git_repo_with_branches.branches)
@@ -72,13 +75,13 @@ class TestBranchKeeperCleanup:
 
     def test_cleanup_with_merged_branch(self, git_repo_with_branches, mock_config):
         """Test cleanup deletes merged branches."""
-        mock_config['dry_run'] = False
-        mock_config['force'] = True  # Skip confirmation
-        mock_config['status_filter'] = 'merged'
+        mock_config["dry_run"] = False
+        mock_config["force"] = True  # Skip confirmation
+        mock_config["status_filter"] = "merged"
         keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
 
         # Ensure we're on main
-        git_repo_with_branches.git.checkout('main')
+        git_repo_with_branches.git.checkout("main")
 
         initial_branch_count = len(list(git_repo_with_branches.branches))
 
@@ -112,12 +115,12 @@ class TestBranchKeeperEdgeCases:
 
     def test_delete_branch_while_on_it(self, git_repo_with_branches, mock_config):
         """Test cannot delete current branch."""
-        git_repo_with_branches.git.checkout('feature/test-feature')
+        git_repo_with_branches.git.checkout("feature/test-feature")
 
         keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
 
         # Try to delete current branch
-        success, error_msg = keeper.delete_branch('feature/test-feature', 'test')
+        success, error_msg = keeper.delete_branch("feature/test-feature", "test")
 
         assert success is False
-        assert error_msg == 'Cannot delete current branch'
+        assert error_msg == "Cannot delete current branch"

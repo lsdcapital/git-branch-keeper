@@ -1,4 +1,5 @@
 """Cache service for storing branch analysis results."""
+
 import json
 import hashlib
 import logging
@@ -12,6 +13,7 @@ from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 # Import fcntl for POSIX file locking (Unix/Linux/macOS)
 try:
     import fcntl
+
     HAS_FCNTL = True
 except ImportError:
     HAS_FCNTL = False
@@ -81,29 +83,29 @@ class CacheService:
                 logger.warning("Cache data is not a dictionary")
                 return False
 
-            if 'branches' not in cache_data:
+            if "branches" not in cache_data:
                 logger.warning("Cache missing 'branches' key")
                 return False
 
-            if not isinstance(cache_data['branches'], dict):
+            if not isinstance(cache_data["branches"], dict):
                 logger.warning("Cache 'branches' is not a dictionary")
                 return False
 
             # Validate each branch entry
-            for branch_name, branch_data in cache_data['branches'].items():
+            for branch_name, branch_data in cache_data["branches"].items():
                 if not isinstance(branch_data, dict):
                     logger.warning(f"Branch data for '{branch_name}' is not a dictionary")
                     return False
 
                 # Check required fields
-                required_fields = ['name', 'last_commit_date', 'age_days', 'status']
+                required_fields = ["name", "last_commit_date", "age_days", "status"]
                 for field in required_fields:
                     if field not in branch_data:
                         logger.warning(f"Branch '{branch_name}' missing required field '{field}'")
                         return False
 
                 # Validate last_commit_date is not "unknown"
-                if branch_data['last_commit_date'] == 'unknown':
+                if branch_data["last_commit_date"] == "unknown":
                     logger.warning(f"Branch '{branch_name}' has invalid last_commit_date")
                     return False
 
@@ -123,7 +125,7 @@ class CacheService:
             return {}
 
         try:
-            with open(self.cache_file, 'r') as f:
+            with open(self.cache_file, "r") as f:
                 # Acquire shared lock for reading
                 with self._acquire_cache_lock(f, operation="read"):
                     cache_data = json.load(f)
@@ -134,7 +136,7 @@ class CacheService:
                 return {}
 
             logger.debug(f"Loaded cache with {len(cache_data.get('branches', {}))} branches")
-            return cache_data.get('branches', {})
+            return cache_data.get("branches", {})
         except json.JSONDecodeError as e:
             logger.warning(f"Invalid JSON in cache file: {e}")
             return {}
@@ -159,7 +161,7 @@ class CacheService:
             for branch in branches:
                 serialized = self._serialize_branch(branch)
                 # Skip if branch has invalid data
-                if serialized.get('last_commit_date') == 'unknown':
+                if serialized.get("last_commit_date") == "unknown":
                     logger.debug(f"Skipping cache for branch '{branch.name}' with invalid date")
                     continue
                 existing_cache[branch.name] = serialized
@@ -170,13 +172,13 @@ class CacheService:
                 "repo_path": str(self.repo_path),
                 "main_branch": main_branch,
                 "last_updated": datetime.now().isoformat(),
-                "branches": existing_cache
+                "branches": existing_cache,
             }
 
             # Atomic write: write to temp file, then rename
-            temp_file = self.cache_file.with_suffix('.tmp')
+            temp_file = self.cache_file.with_suffix(".tmp")
             try:
-                with open(temp_file, 'w') as f:
+                with open(temp_file, "w") as f:
                     # Acquire exclusive lock for writing
                     with self._acquire_cache_lock(f, operation="write"):
                         json.dump(cache_data, f, indent=2)
@@ -185,8 +187,10 @@ class CacheService:
                 # Atomic rename (POSIX systems guarantee atomicity)
                 temp_file.replace(self.cache_file)
 
-                stable_count = sum(1 for b in existing_cache.values() if b.get('stable', False))
-                logger.debug(f"Saved cache with {len(existing_cache)} branches ({stable_count} stable)")
+                stable_count = sum(1 for b in existing_cache.values() if b.get("stable", False))
+                logger.debug(
+                    f"Saved cache with {len(existing_cache)} branches ({stable_count} stable)"
+                )
             finally:
                 # Clean up temp file if it still exists
                 if temp_file.exists():
@@ -245,7 +249,7 @@ class CacheService:
             "pr_status": branch.pr_status,
             "notes": branch.notes,
             "stable": self.is_stable(branch),
-            "cached_at": datetime.now().isoformat()
+            "cached_at": datetime.now().isoformat(),
         }
 
     def deserialize_branch(self, data: Dict) -> Optional[BranchDetails]:
@@ -275,7 +279,7 @@ class CacheService:
                 sync_status=data["sync_status"],
                 pr_status=data.get("pr_status"),
                 notes=data.get("notes"),
-                in_worktree=False  # Don't cache worktree status - it's dynamic
+                in_worktree=False,  # Don't cache worktree status - it's dynamic
             )
         except Exception as e:
             logger.warning(f"Failed to deserialize branch {data.get('name', 'unknown')}: {e}")
@@ -300,7 +304,7 @@ class CacheService:
                 if branch_details:
                     cached_branches[branch_name] = branch_details
 
-        stable_count = sum(1 for b in cache.values() if b.get('stable', False))
+        stable_count = sum(1 for b in cache.values() if b.get("stable", False))
         logger.debug(f"Found {len(cached_branches)} cached branches ({stable_count} stable)")
         return cached_branches
 
@@ -337,12 +341,14 @@ class CacheService:
 
             # If in cache but not stable, needs refresh
             branch_data = cache[branch_name]
-            if not branch_data.get('stable', False):
+            if not branch_data.get("stable", False):
                 logger.debug(f"Branch '{branch_name}' is unstable, needs refresh")
                 stale_branches.append(branch_name)
 
         stable_skipped = len(current_branches) - len(stale_branches)
-        logger.debug(f"Found {len(stale_branches)} branches needing refresh, {stable_skipped} stable branches skipped")
+        logger.debug(
+            f"Found {len(stale_branches)} branches needing refresh, {stable_skipped} stable branches skipped"
+        )
         return stale_branches
 
     def clear_cache(self) -> None:
@@ -381,7 +387,7 @@ class CacheService:
 
             # Read the full cache data to preserve metadata
             try:
-                with open(self.cache_file, 'r') as f:
+                with open(self.cache_file, "r") as f:
                     with self._acquire_cache_lock(f, operation="read"):
                         full_cache_data = json.load(f)
             except Exception as e:
@@ -389,13 +395,13 @@ class CacheService:
                 return
 
             # Update the branches section
-            full_cache_data['branches'] = cache
-            full_cache_data['last_updated'] = datetime.now().isoformat()
+            full_cache_data["branches"] = cache
+            full_cache_data["last_updated"] = datetime.now().isoformat()
 
             # Atomic write: write to temp file, then rename
-            temp_file = self.cache_file.with_suffix('.tmp')
+            temp_file = self.cache_file.with_suffix(".tmp")
             try:
-                with open(temp_file, 'w') as f:
+                with open(temp_file, "w") as f:
                     with self._acquire_cache_lock(f, operation="write"):
                         json.dump(full_cache_data, f, indent=2)
                         f.flush()
@@ -445,7 +451,7 @@ class CacheService:
 
             # Read the full cache data to preserve metadata
             try:
-                with open(self.cache_file, 'r') as f:
+                with open(self.cache_file, "r") as f:
                     with self._acquire_cache_lock(f, operation="read"):
                         full_cache_data = json.load(f)
             except Exception as e:
@@ -453,19 +459,21 @@ class CacheService:
                 return
 
             # Update the branches section
-            full_cache_data['branches'] = cache
-            full_cache_data['last_updated'] = datetime.now().isoformat()
+            full_cache_data["branches"] = cache
+            full_cache_data["last_updated"] = datetime.now().isoformat()
 
             # Atomic write: write to temp file, then rename
-            temp_file = self.cache_file.with_suffix('.tmp')
+            temp_file = self.cache_file.with_suffix(".tmp")
             try:
-                with open(temp_file, 'w') as f:
+                with open(temp_file, "w") as f:
                     with self._acquire_cache_lock(f, operation="write"):
                         json.dump(full_cache_data, f, indent=2)
                         f.flush()
 
                 temp_file.replace(self.cache_file)
-                logger.debug(f"Cache updated after removing {removed_count} branches, {len(cache)} branches remaining")
+                logger.debug(
+                    f"Cache updated after removing {removed_count} branches, {len(cache)} branches remaining"
+                )
             finally:
                 if temp_file.exists():
                     try:

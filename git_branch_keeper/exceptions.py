@@ -5,6 +5,7 @@ from typing import Optional
 
 class GitBranchKeeperError(Exception):
     """Base exception for all git-branch-keeper errors."""
+
     pass
 
 

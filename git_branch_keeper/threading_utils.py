@@ -1,4 +1,5 @@
 """Threading utilities for detecting and optimizing Python threading mode."""
+
 import os
 import sys
 from typing import Dict, Any, Optional
@@ -14,7 +15,7 @@ def is_free_threading_enabled() -> bool:
     try:
         # sys._is_gil_enabled() returns False when GIL is disabled
         # Available in Python 3.13+
-        return hasattr(sys, '_is_gil_enabled') and not sys._is_gil_enabled()
+        return hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
     except Exception:
         # Python < 3.13 always has GIL enabled
         return False
@@ -27,7 +28,7 @@ def get_python_threading_mode() -> str:
         String describing threading mode: "free-threading", "GIL-enabled", or "GIL-enabled (Python < 3.13)"
     """
     try:
-        if hasattr(sys, '_is_gil_enabled'):
+        if hasattr(sys, "_is_gil_enabled"):
             if sys._is_gil_enabled():
                 return "GIL-enabled"
             else:
@@ -75,9 +76,9 @@ def get_threading_info() -> Dict[str, Any]:
         Dictionary containing threading mode, worker count, and other details
     """
     return {
-        'mode': get_python_threading_mode(),
-        'free_threading': is_free_threading_enabled(),
-        'cpu_count': os.cpu_count() or 1,
-        'optimal_workers': get_optimal_worker_count(),
-        'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        "mode": get_python_threading_mode(),
+        "free_threading": is_free_threading_enabled(),
+        "cpu_count": os.cpu_count() or 1,
+        "optimal_workers": get_optimal_worker_count(),
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
     }

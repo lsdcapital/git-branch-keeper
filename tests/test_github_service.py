@@ -1,7 +1,8 @@
 """Tests for GitHubService"""
+
 from unittest.mock import Mock, patch
 
-from git_branch_keeper.services.github_service import GitHubService
+from git_branch_keeper.services.git import GitHubService
 
 
 class TestGitHubServiceInit:
@@ -9,22 +10,22 @@ class TestGitHubServiceInit:
 
     def test_init_without_token(self, mock_git_repo, mock_config):
         """Test initialization without GitHub token."""
-        mock_config['github_token'] = None
+        mock_config["github_token"] = None
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         assert service.github_token is None
 
     def test_init_with_token_from_config(self, mock_git_repo, mock_config):
         """Test initialization with token from config."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         assert service.github_token == "test_token"
 
-    @patch.dict('os.environ', {'GITHUB_TOKEN': 'env_token'})
+    @patch.dict("os.environ", {"GITHUB_TOKEN": "env_token"})
     def test_init_with_token_from_env(self, mock_git_repo, mock_config):
         """Test initialization with token from environment."""
-        mock_config['github_token'] = None
+        mock_config["github_token"] = None
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         assert service.github_token == "env_token"
@@ -35,10 +36,10 @@ class TestGitHubServiceSetup:
 
     def test_setup_with_github_url(self, mock_git_repo, mock_config):
         """Test setup with GitHub repository URL."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
-        with patch('git_branch_keeper.services.github_service.Github') as mock_github_class:
+        with patch("git_branch_keeper.services.git.github.Github") as mock_github_class:
             mock_gh = Mock()
             mock_repo = Mock()
             mock_github_class.return_value = mock_gh
@@ -52,10 +53,10 @@ class TestGitHubServiceSetup:
 
     def test_setup_with_https_url(self, mock_git_repo, mock_config):
         """Test setup with HTTPS GitHub URL."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
-        with patch('git_branch_keeper.services.github_service.Github') as mock_github_class:
+        with patch("git_branch_keeper.services.git.github.Github") as mock_github_class:
             mock_gh = Mock()
             mock_repo = Mock()
             mock_github_class.return_value = mock_gh
@@ -72,7 +73,7 @@ class TestGitHubServicePROperations:
 
     def test_has_open_pr_true(self, mock_git_repo, mock_config):
         """Test detecting open PR."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         # Setup mock
@@ -90,7 +91,7 @@ class TestGitHubServicePROperations:
 
     def test_has_open_pr_false(self, mock_git_repo, mock_config):
         """Test detecting no open PR."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         service.github_repo = "test/repo"
@@ -106,7 +107,7 @@ class TestGitHubServicePROperations:
 
     def test_has_open_pr_error_handling(self, mock_git_repo, mock_config):
         """Test has_open_pr handles errors gracefully."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         service.github_repo = "test/repo"
@@ -123,8 +124,8 @@ class TestGitHubServiceBulkOperations:
 
     def test_get_bulk_pr_data(self, mock_git_repo, mock_config):
         """Test fetching PR data for multiple branches."""
-        mock_config['github_token'] = "test_token"
-        mock_config['max_prs_to_fetch'] = 500
+        mock_config["github_token"] = "test_token"
+        mock_config["max_prs_to_fetch"] = 500
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         service.github_repo = "test/repo"
@@ -132,7 +133,7 @@ class TestGitHubServiceBulkOperations:
 
         # Create mock PRs
         pr1 = Mock()
-        pr1.state = 'open'
+        pr1.state = "open"
         pr1.merged = False
         pr1.head = Mock()
         pr1.head.ref = "feature/branch1"
@@ -140,7 +141,7 @@ class TestGitHubServiceBulkOperations:
         pr1.base.ref = "main"
 
         pr2 = Mock()
-        pr2.state = 'closed'
+        pr2.state = "closed"
         pr2.merged = True
         pr2.head = Mock()
         pr2.head.ref = "feature/branch2"
@@ -148,7 +149,7 @@ class TestGitHubServiceBulkOperations:
         pr2.base.ref = "main"
 
         # Mock get_pulls to return PRs based on head parameter (per-branch fetching)
-        def mock_get_pulls(state='all', head=None, base=None):
+        def mock_get_pulls(state="all", head=None, base=None):
             if head == "test:feature/branch1":
                 return [pr1]
             elif head == "test:feature/branch2":
@@ -175,8 +176,8 @@ class TestGitHubServiceBulkOperations:
 
     def test_get_bulk_pr_data_pagination_limit(self, mock_git_repo, mock_config):
         """Test PR data fetching respects pagination limit."""
-        mock_config['github_token'] = "test_token"
-        mock_config['max_prs_to_fetch'] = 2  # Very low limit for testing
+        mock_config["github_token"] = "test_token"
+        mock_config["max_prs_to_fetch"] = 2  # Very low limit for testing
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         service.github_repo = "test/repo"
@@ -186,7 +187,7 @@ class TestGitHubServiceBulkOperations:
         prs = []
         for i in range(10):
             pr = Mock()
-            pr.state = 'open'
+            pr.state = "open"
             pr.merged = False
             pr.head = Mock()
             pr.head.ref = f"feature/branch{i}"
@@ -204,7 +205,7 @@ class TestGitHubServiceBulkOperations:
 
     def test_get_bulk_pr_data_empty_branches(self, mock_git_repo, mock_config):
         """Test bulk PR data with empty branch list."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
         service.gh_repo = Mock()
 
@@ -214,7 +215,7 @@ class TestGitHubServiceBulkOperations:
 
     def test_get_bulk_pr_data_error_handling(self, mock_git_repo, mock_config):
         """Test bulk PR data handles errors gracefully."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         service.github_repo = "test/repo"
@@ -239,7 +240,7 @@ class TestGitHubServiceEdgeCases:
         """Test handling API rate limit errors."""
         from github import GithubException
 
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         service.github_repo = "test/repo"
@@ -247,8 +248,7 @@ class TestGitHubServiceEdgeCases:
 
         # Simulate rate limit error
         service.gh_repo.get_pulls.side_effect = GithubException(
-            status=403,
-            data={'message': 'API rate limit exceeded'}
+            status=403, data={"message": "API rate limit exceeded"}
         )
 
         result = service.has_open_pr("feature/test")
@@ -258,7 +258,7 @@ class TestGitHubServiceEdgeCases:
 
     def test_operations_with_network_error(self, mock_git_repo, mock_config):
         """Test handling network errors."""
-        mock_config['github_token'] = "test_token"
+        mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         service.github_repo = "test/repo"
