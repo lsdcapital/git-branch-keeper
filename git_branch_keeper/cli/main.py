@@ -77,7 +77,7 @@ def main():
         if use_interactive:
             # Launch interactive TUI mode immediately
             # TUI will load data in background with loading indicator
-            from git_branch_keeper.tui import BranchKeeperApp
+            from git_branch_keeper.ui import BranchKeeperApp
 
             # Auto-mark branches when not in dry-run mode (cleanup is default)
             app = BranchKeeperApp(keeper, cleanup_mode=not parsed_args.dry_run)
