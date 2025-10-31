@@ -74,7 +74,7 @@ Changelog = "https://github.com/lsdcapital/git-branch-keeper/blob/main/CHANGELOG
 "Contributing" = "https://github.com/lsdcapital/git-branch-keeper/blob/main/CONTRIBUTING.md"
 
 [project.scripts]
-git-branch-keeper = "git_branch_keeper.cli:main"
+git-branch-keeper = "git_branch_keeper.cli.main:main"
 
 [tool.hatch.version]
 source = "vcs"

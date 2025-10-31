@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.table import Table
 from typing import List, Optional, TYPE_CHECKING
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
-from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.utils.logging import get_logger
 from git_branch_keeper.constants import COLUMNS, CLI_COLORS
 from git_branch_keeper.formatters import (
     format_date,

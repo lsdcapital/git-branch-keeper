@@ -35,7 +35,7 @@ from .formatters import (
     get_branch_style_type,
 )
 from .services.branch_validation_service import BranchValidationService
-from .logging_config import get_logger
+from .utils.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -1002,10 +1002,6 @@ class BranchKeeperApp(App):
         if saved_row is not None and saved_row < len(self.branches):
             new_row = min(saved_row + 1, len(self.branches) - 1)
             table.cursor_coordinate = Coordinate(new_row, 0)
-
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Handle Enter key press on DataTable - triggers delete action."""
-        self.action_delete_marked()
 
     def action_delete_marked(self) -> None:
         """Delete all marked branches."""

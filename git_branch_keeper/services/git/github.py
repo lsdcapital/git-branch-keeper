@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from github import Github, Auth
 from rich.console import Console
 
-from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from github.Repository import Repository
@@ -139,7 +139,7 @@ class GitHubService:
 
             # Use parallel fetching with ThreadPoolExecutor
             # Benefits from Python 3.14 free-threading when available
-            from git_branch_keeper.threading_utils import get_optimal_worker_count
+            from git_branch_keeper.utils.threading import get_optimal_worker_count
 
             max_workers = min(10, get_optimal_worker_count())  # Cap at 10 for API rate limiting
 

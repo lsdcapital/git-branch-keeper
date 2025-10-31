@@ -10,7 +10,7 @@ from threading import Lock
 
 from git_branch_keeper.models.worktree import WorktreeInfo
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
-from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.utils.logging import get_logger
 
 logger = get_logger(__name__)
 

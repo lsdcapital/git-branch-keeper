@@ -11,7 +11,7 @@ from threading import Lock
 
 from git_branch_keeper.models.branch import SyncStatus
 from git_branch_keeper.services.git.worktrees import WorktreeService
-from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from git_branch_keeper.config import Config

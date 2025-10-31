@@ -4,7 +4,7 @@ from typing import Optional, Dict, Union, TYPE_CHECKING
 from fnmatch import fnmatch
 from rich.console import Console
 from git_branch_keeper.models.branch import BranchStatus
-from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from git_branch_keeper.config import Config

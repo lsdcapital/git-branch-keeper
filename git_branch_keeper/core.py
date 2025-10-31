@@ -16,8 +16,8 @@ from git_branch_keeper.services.display_service import DisplayService
 from git_branch_keeper.services.branch_status_service import BranchStatusService
 from git_branch_keeper.services.cache_service import CacheService
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
-from git_branch_keeper.threading_utils import get_optimal_worker_count
-from git_branch_keeper.logging_config import get_logger
+from git_branch_keeper.utils.threading import get_optimal_worker_count
+from git_branch_keeper.utils.logging import get_logger
 from git_branch_keeper.config import Config
 from git_branch_keeper.formatters import format_deletion_confirmation_items, format_deletion_reason
 
