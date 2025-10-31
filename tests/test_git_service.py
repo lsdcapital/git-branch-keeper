@@ -129,9 +129,9 @@ class TestGitServiceMergeDetection:
         result2 = service.is_branch_merged("feature/to-merge", "main")
 
         assert result1 == result2
-        # Check cache was used
+        # Check cache was used (cache is now in merge_detector)
         cache_key = f"feature/to-merge:{mock_config['main_branch']}"
-        assert cache_key in service._merge_status_cache
+        assert cache_key in service.merge_detector._merge_status_cache
 
     def test_merge_detection_statistics(self, git_repo_with_branches, mock_config):
         """Test that merge detection statistics are tracked."""
@@ -140,8 +140,8 @@ class TestGitServiceMergeDetection:
 
         service.is_branch_merged("feature/to-merge", "main")
 
-        # At least one method should have been incremented
-        total_attempts = sum(service.merge_detection_stats.values())
+        # At least one method should have been incremented (stats are now in merge_detector)
+        total_attempts = sum(service.merge_detector.merge_detection_stats.values())
         assert total_attempts > 0
 
 

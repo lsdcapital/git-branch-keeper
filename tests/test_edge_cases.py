@@ -154,9 +154,9 @@ class TestMergeDetectionEdgeCases:
         # First call
         result1 = service.is_branch_merged(branch, main)
 
-        # Cache should be populated
+        # Cache should be populated (cache is now in merge_detector)
         cache_key = f"{branch}:{main}"
-        assert cache_key in service._merge_status_cache
+        assert cache_key in service.merge_detector._merge_status_cache
 
         # Second call should use cache
         result2 = service.is_branch_merged(branch, main)
