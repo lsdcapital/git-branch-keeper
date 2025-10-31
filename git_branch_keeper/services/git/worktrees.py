@@ -249,10 +249,40 @@ class WorktreeService:
             repo = self._get_repo()
             status = repo.git.execute(["git", "-C", worktree_path, "status", "--porcelain"])
 
+            # Parse porcelain format: XY filename
+            # X = index status (first char), Y = working tree status (second char)
+            has_modified = False
+            has_untracked = False
+            has_staged = False
+
+            for line in status.split("\n"):
+                if not line:
+                    continue
+
+                # Get the two-character status code
+                if len(line) < 2:
+                    continue
+
+                index_status = line[0]  # Staged changes
+                worktree_status = line[1]  # Working tree changes
+
+                # Untracked files
+                if line.startswith("??"):
+                    has_untracked = True
+                    continue
+
+                # Check for staged changes (index status is not space)
+                if index_status != ' ':
+                    has_staged = True
+
+                # Check for working tree changes (worktree status is not space)
+                if worktree_status != ' ':
+                    has_modified = True
+
             return {
-                "modified": bool([line for line in status.split("\n") if line.startswith(" M")]),
-                "untracked": bool([line for line in status.split("\n") if line.startswith("??")]),
-                "staged": bool([line for line in status.split("\n") if line.startswith("M ")]),
+                "modified": has_modified,
+                "untracked": has_untracked,
+                "staged": has_staged,
             }
         except git.exc.GitCommandError as e:
             # Extract detailed error information from GitCommandError
@@ -291,7 +321,9 @@ class WorktreeService:
         temp_dir = None
         try:
             # Create a temporary directory for the worktree
-            temp_dir = tempfile.mkdtemp(prefix=f"gbk-{branch_name}-")
+            # Sanitize branch name to avoid issues with slashes in branch names (e.g., feat/branch-name)
+            sanitized_name = branch_name.replace("/", "-")
+            temp_dir = tempfile.mkdtemp(prefix=f"gbk-{sanitized_name}-")
             logger.debug(f"Created temp directory: {temp_dir}")
 
             # Create worktree in temp directory

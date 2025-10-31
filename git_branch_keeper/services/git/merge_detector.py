@@ -28,6 +28,7 @@ class MergeDetector:
         self.debug_mode = config.get("debug", False)
         self._merge_status_cache: Dict[str, bool] = {}  # Cache for merge status checks
         self._cache_lock = Lock()  # Thread safety for cache access
+        self._main_branch_sha_cache: Dict[str, str] = {}  # Track main branch SHA for cache invalidation
         # Add counters for merge detection methods
         self.merge_detection_stats = {
             "method0": 0,  # Squash merge detection
@@ -68,6 +69,32 @@ class MergeDetector:
         with self._stats_lock:
             self.merge_detection_stats[method] += 1
 
+    def _get_main_branch_sha(self, main_branch: str) -> str:
+        """Get the current SHA of the main branch."""
+        try:
+            repo = self._get_repo()
+            return repo.refs[main_branch].commit.hexsha
+        except Exception as e:
+            logger.debug(f"Error getting main branch SHA: {e}")
+            return ""
+
+    def _invalidate_cache_if_needed(self, main_branch: str):
+        """Invalidate cache if main branch has changed."""
+        current_sha = self._get_main_branch_sha(main_branch)
+        if not current_sha:
+            return
+
+        with self._cache_lock:
+            cached_sha = self._main_branch_sha_cache.get(main_branch)
+            if cached_sha and cached_sha != current_sha:
+                # Main branch has changed, invalidate all cached merge statuses
+                logger.debug(
+                    f"Main branch {main_branch} changed ({cached_sha[:7]} -> {current_sha[:7]}), invalidating cache"
+                )
+                self._merge_status_cache.clear()
+            # Update cached SHA
+            self._main_branch_sha_cache[main_branch] = current_sha
+
     def is_tag(self, ref_name: str) -> bool:
         """Check if a reference is a tag."""
         try:
@@ -107,6 +134,9 @@ class MergeDetector:
             logger.debug(f"Skipping merge check: {branch_name} is the main branch")
             return False
 
+        # Invalidate cache if main branch has changed
+        self._invalidate_cache_if_needed(main_branch)
+
         # Check cache first (thread-safe)
         cache_key = f"{branch_name}:{main_branch}"
         found, value = self._check_cache(cache_key)
@@ -122,12 +152,11 @@ class MergeDetector:
 
             # Try each detection method in order (fastest first)
             methods = [
-                self._check_squash_merge,
-                self._check_remote_deletion,
-                self._check_fast_revlist,
-                self._check_ancestor,
-                self._check_merge_commit_message,
-                self._check_full_commit_history,
+                self._check_fast_revlist,          # Fastest: single git command
+                self._check_ancestor,               # Fast: single git command
+                self._check_merge_commit_message,   # Medium: scans 100 commit messages
+                self._check_full_commit_history,    # Slow: loads all commits
+                self._check_squash_merge,           # Slowest: diffs + 50 commits (last resort)
             ]
 
             for method in methods:
@@ -144,7 +173,11 @@ class MergeDetector:
             return False
 
     def _check_squash_merge(self, branch_name: str, main_branch: str) -> bool:
-        """Method 0: Check for squash merge by comparing diffs."""
+        """Method 0: Check for squash merge by comparing diffs.
+
+        This is an expensive operation (last resort) that compares the combined diff
+        of the branch against recent commits in main to detect squash merges.
+        """
         logger.debug("[Method 0] Checking for squash merge...")
         try:
             repo = self._get_repo()
@@ -153,49 +186,57 @@ class MergeDetector:
             if not branch_commits:
                 return False
 
-            # Get the combined diff of all branch commits
-            branch_diff = repo.git.diff(f"{main_branch}...{branch_name}", "--no-color")
+            # Get the combined diff of all branch commits (normalized)
+            branch_diff = repo.git.diff(
+                f"{main_branch}...{branch_name}",
+                "--no-color",
+                "--ignore-space-change",  # Normalize whitespace
+                "--ignore-blank-lines",    # Ignore blank line changes
+            )
 
-            if not branch_diff:
+            if not branch_diff or len(branch_diff) < 100:
+                # Skip if diff is empty or too small to be meaningful
                 return False
 
-            # Search recent commits in main for similar changes
-            for commit in repo.iter_commits(main_branch, max_count=100):
+            # Search recent commits in main for matching changes
+            # Only check recent commits (50 instead of 100 for performance)
+            for commit in repo.iter_commits(main_branch, max_count=50):
                 try:
-                    commit_diff = repo.git.show(commit.hexsha, "--no-color", "--format=")
+                    commit_diff = repo.git.show(
+                        commit.hexsha,
+                        "--no-color",
+                        "--format=",  # No commit message in output
+                        "--ignore-space-change",
+                        "--ignore-blank-lines",
+                    )
 
-                    # If the branch diff is contained in the commit diff, likely a squash merge
-                    if len(branch_diff) > 50 and branch_diff in commit_diff:
-                        logger.debug(f"[Method 0] Found squash merge in commit {commit.hexsha}")
+                    # Check for exact match (not substring)
+                    # This is more reliable than substring matching
+                    if branch_diff == commit_diff:
+                        logger.debug(
+                            f"[Method 0] Found squash merge (exact diff match) in commit {commit.hexsha[:7]}"
+                        )
                         self._increment_stat("method0")
                         return True
+
+                    # Fallback: check if branch diff is substantial portion of commit diff
+                    # (handles cases where commit has additional changes)
+                    if len(branch_diff) > 200 and branch_diff in commit_diff:
+                        similarity = len(branch_diff) / len(commit_diff)
+                        if similarity > 0.9:  # 90% match
+                            logger.debug(
+                                f"[Method 0] Found likely squash merge (high similarity) in commit {commit.hexsha[:7]}"
+                            )
+                            self._increment_stat("method0")
+                            return True
+
                 except Exception as e:
-                    logger.debug(f"[Method 0] Error processing commit {commit.hexsha}: {e}")
+                    logger.debug(f"[Method 0] Error processing commit {commit.hexsha[:7]}: {e}")
                     continue
         except git.exc.GitCommandError as e:
             logger.debug(f"[Method 0] Error checking squash merge: {e}")
 
         return False
-
-    def _check_remote_deletion(self, branch_name: str, main_branch: str) -> bool:
-        """Method 0.5: Check if branch was deleted on remote (hint only)."""
-        logger.debug("[Method 0.5] Checking if branch was deleted on remote...")
-        try:
-            repo = self._get_repo()
-            # Check if branch has remote tracking configured
-            try:
-                tracking = repo.git.config("--get", f"branch.{branch_name}.merge")
-                if tracking:
-                    logger.debug(
-                        f"[Method 0.5] Branch {branch_name} was tracking remote but remote is gone"
-                    )
-                    # This is a hint, not definitive - continue to other methods
-            except Exception as e:
-                logger.debug(f"[Method 0.5] Error getting tracking info: {e}")
-        except Exception as e:
-            logger.debug(f"[Method 0.5] Error checking remote branch: {e}")
-
-        return False  # Not a definitive check
 
     def _check_fast_revlist(self, branch_name: str, main_branch: str) -> bool:
         """Method 1: Fast check using rev-list."""

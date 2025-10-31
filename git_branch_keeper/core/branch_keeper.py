@@ -1067,12 +1067,11 @@ class BranchKeeper:
 
         # Step 3: Ensure sync_status reflects how merge was detected
         if status == BranchStatus.MERGED:
-            if sync_status not in [SyncStatus.MERGED_GIT.value, SyncStatus.MERGED_PR.value]:
-                # Branch was detected as merged but sync_status doesn't reflect it
-                if pr_data and branch in pr_data and pr_data[branch].get("merged"):
-                    sync_status = SyncStatus.MERGED_PR.value
-                else:
-                    sync_status = SyncStatus.MERGED_GIT.value
+            # Determine merge method from PR data
+            if pr_data and branch in pr_data and pr_data[branch].get("merged"):
+                sync_status = SyncStatus.MERGED_PR.value
+            else:
+                sync_status = SyncStatus.MERGED_GIT.value
 
         return status, sync_status, pr_status, notes
 

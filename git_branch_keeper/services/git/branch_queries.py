@@ -207,14 +207,38 @@ class BranchQueries:
                 logger.debug(f"Checking current branch {branch_name} directly")
                 status = repo.git.status("--porcelain")
 
+                # Parse porcelain format: XY filename
+                # X = index status (first char), Y = working tree status (second char)
+                has_modified = False
+                has_untracked = False
+                has_staged = False
+
+                for line in status.split("\n"):
+                    if not line:
+                        continue
+                    if len(line) < 2:
+                        continue
+
+                    index_status = line[0]  # Staged changes
+                    worktree_status = line[1]  # Working tree changes
+
+                    # Untracked files
+                    if line.startswith("??"):
+                        has_untracked = True
+                        continue
+
+                    # Check for staged changes (index status is not space)
+                    if index_status != ' ':
+                        has_staged = True
+
+                    # Check for working tree changes (worktree status is not space)
+                    if worktree_status != ' ':
+                        has_modified = True
+
                 return {
-                    "modified": bool(
-                        [line for line in status.split("\n") if line.startswith(" M")]
-                    ),
-                    "untracked": bool(
-                        [line for line in status.split("\n") if line.startswith("??")]
-                    ),
-                    "staged": bool([line for line in status.split("\n") if line.startswith("M ")]),
+                    "modified": has_modified,
+                    "untracked": has_untracked,
+                    "staged": has_staged,
                 }
             else:
                 # Not current - use temporary worktree (safe, isolated)
@@ -223,16 +247,38 @@ class BranchQueries:
                     # Get status from the worktree (without checking out current branch)
                     status = repo.git.execute(["git", "-C", temp_dir, "status", "--porcelain"])
 
+                    # Parse porcelain format: XY filename
+                    # X = index status (first char), Y = working tree status (second char)
+                    has_modified = False
+                    has_untracked = False
+                    has_staged = False
+
+                    for line in status.split("\n"):
+                        if not line:
+                            continue
+                        if len(line) < 2:
+                            continue
+
+                        index_status = line[0]  # Staged changes
+                        worktree_status = line[1]  # Working tree changes
+
+                        # Untracked files
+                        if line.startswith("??"):
+                            has_untracked = True
+                            continue
+
+                        # Check for staged changes (index status is not space)
+                        if index_status != ' ':
+                            has_staged = True
+
+                        # Check for working tree changes (worktree status is not space)
+                        if worktree_status != ' ':
+                            has_modified = True
+
                     return {
-                        "modified": bool(
-                            [line for line in status.split("\n") if line.startswith(" M")]
-                        ),
-                        "untracked": bool(
-                            [line for line in status.split("\n") if line.startswith("??")]
-                        ),
-                        "staged": bool(
-                            [line for line in status.split("\n") if line.startswith("M ")]
-                        ),
+                        "modified": has_modified,
+                        "untracked": has_untracked,
+                        "staged": has_staged,
                     }
 
         except git.exc.GitCommandError as e:
