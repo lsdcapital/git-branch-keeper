@@ -1,6 +1,7 @@
 """Main TUI application for git-branch-keeper."""
 
 import asyncio
+import os
 from typing import List, Set, Optional, TYPE_CHECKING
 
 from textual import work
@@ -47,7 +48,7 @@ class BranchKeeperApp(App):
 
     ENABLE_COMMAND_PALETTE = True
     TITLE = "Git Branch Keeper"
-    SUB_TITLE = f"v{__version__}"
+    SUB_TITLE = ""  # Will be set dynamically to repo name
 
     CSS = """
     Screen {
@@ -110,9 +111,14 @@ class BranchKeeperApp(App):
         self.sort_reverse = False  # Newest first by default
         self.cleanup_mode = cleanup_mode
 
+        # Set subtitle to show repository name (version displays on right via clock)
+        repo_path = self.keeper.repo.working_dir
+        repo_name = os.path.basename(repo_path) if repo_path else "unknown"
+        self.sub_title = repo_name
+
     def compose(self) -> ComposeResult:
         """Create child widgets."""
-        yield NonExpandingHeader(show_clock=False, icon="")
+        yield NonExpandingHeader(show_clock=True, icon="")
         yield DataTable(id="branch-table", cursor_type="row", zebra_stripes=True)
         yield Static(id="status-bar")
         yield Footer()
