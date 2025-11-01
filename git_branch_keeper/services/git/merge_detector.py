@@ -28,7 +28,9 @@ class MergeDetector:
         self.debug_mode = config.get("debug", False)
         self._merge_status_cache: Dict[str, bool] = {}  # Cache for merge status checks
         self._cache_lock = Lock()  # Thread safety for cache access
-        self._main_branch_sha_cache: Dict[str, str] = {}  # Track main branch SHA for cache invalidation
+        self._main_branch_sha_cache: Dict[str, str] = (
+            {}
+        )  # Track main branch SHA for cache invalidation
         # Add counters for merge detection methods
         self.merge_detection_stats = {
             "method0": 0,  # Squash merge detection
@@ -152,11 +154,11 @@ class MergeDetector:
 
             # Try each detection method in order (fastest first)
             methods = [
-                self._check_fast_revlist,          # Fastest: single git command
-                self._check_ancestor,               # Fast: single git command
-                self._check_merge_commit_message,   # Medium: scans 100 commit messages
-                self._check_full_commit_history,    # Slow: loads all commits
-                self._check_squash_merge,           # Slowest: diffs + 50 commits (last resort)
+                self._check_fast_revlist,  # Fastest: single git command
+                self._check_ancestor,  # Fast: single git command
+                self._check_merge_commit_message,  # Medium: scans 100 commit messages
+                self._check_full_commit_history,  # Slow: loads all commits
+                self._check_squash_merge,  # Slowest: diffs + 50 commits (last resort)
             ]
 
             for method in methods:
@@ -191,7 +193,7 @@ class MergeDetector:
                 f"{main_branch}...{branch_name}",
                 "--no-color",
                 "--ignore-space-change",  # Normalize whitespace
-                "--ignore-blank-lines",    # Ignore blank line changes
+                "--ignore-blank-lines",  # Ignore blank line changes
             )
 
             if not branch_diff or len(branch_diff) < 100:

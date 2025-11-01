@@ -1,7 +1,5 @@
 """Tests for branch status detection (M/U/S indicators)."""
 
-import pytest
-
 
 def parse_git_status_porcelain(status_output: str) -> dict:
     """Helper function that replicates the git status parsing logic from the code.
@@ -29,11 +27,11 @@ def parse_git_status_porcelain(status_output: str) -> dict:
             continue
 
         # Check for staged changes (index status is not space)
-        if index_status != ' ':
+        if index_status != " ":
             has_staged = True
 
         # Check for working tree changes (worktree status is not space)
-        if worktree_status != ' ':
+        if worktree_status != " ":
             has_modified = True
 
     return {

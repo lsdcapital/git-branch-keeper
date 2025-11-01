@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-git-branch-keeper is a Git branch management tool that helps developers identify and clean up merged and stale branches while protecting branches with open pull requests. It uses GitPython for repository operations and PyGithub for GitHub API integration.
+git-branch-keeper is a Git branch management tool that helps developers identify and clean up merged and stale branches while protecting branches with open pull requests. It works with any Git repository (GitHub, GitLab, Bitbucket, or local). It uses GitPython for repository operations and PyGithub for optional GitHub API integration.
 
 ## Key Commands
 
@@ -23,18 +23,26 @@ git-branch-keeper [options]
 
 ### Common Usage
 ```bash
-# Show branch status
-git-branch-keeper --filter all
+# Interactive TUI (default, safest)
+git-branch-keeper --filter merged
 
-# Clean up merged branches (interactive)
-git-branch-keeper --filter merged --cleanup
+# Preview what would be deleted (dry run)
+git-branch-keeper --no-interactive --filter merged --dry-run
 
-# Clean up with force (no confirmation)
-git-branch-keeper --filter merged --cleanup --force
+# Delete merged branches with confirmation (CLI mode)
+git-branch-keeper --no-interactive --filter merged
+
+# Delete with force (no confirmation - DANGEROUS!)
+git-branch-keeper --no-interactive --filter merged --force
 
 # Debug mode for troubleshooting
 git-branch-keeper --debug
 ```
+
+**Important**:
+- CLI mode (`--no-interactive`) deletes branches by default (with confirmation)
+- Always use `--dry-run` first to preview changes
+- The `--cleanup` flag is deprecated (cleanup is now the default behavior in CLI mode)
 
 ## Architecture
 
@@ -75,5 +83,7 @@ Configuration follows a hierarchy:
 - The project uses type hints throughout for better code clarity
 - Rich library is used for all terminal output and formatting
 - GitPython is the primary interface for Git operations
-- GitHub integration is optional but enhances functionality by detecting open PRs
-- No test framework is currently set up in the project
+- **GitHub integration is OPTIONAL**: The tool works on any Git repo without a GitHub token
+  - Without token: Branch analysis, merge detection, and cleanup work normally
+  - With token (GitHub only): Adds PR detection and protection against deleting branches with open PRs
+- Test framework: pytest with 102 tests (run with `make test`)

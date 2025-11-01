@@ -1,7 +1,5 @@
 """Tests for merge method detection (merged-pr vs merged-git)."""
 
-import pytest
-from unittest.mock import Mock, patch
 from pathlib import Path
 
 from git_branch_keeper.core.branch_keeper import BranchKeeper
@@ -36,14 +34,13 @@ class TestMergeMethodDetection:
             "feature/pr-merged": {
                 "count": 0,  # No open PRs
                 "merged": True,  # Was merged via PR
-                "closed": False
+                "closed": False,
             }
         }
 
         # Test: Determine branch status with PR data
         status, sync_status, pr_status, notes = keeper._determine_branch_status(
-            "feature/pr-merged",
-            pr_data
+            "feature/pr-merged", pr_data
         )
 
         # Assert: Should be merged with merged-pr sync status
@@ -75,14 +72,13 @@ class TestMergeMethodDetection:
             "feature/git-merged": {
                 "count": 0,  # No open PRs
                 "merged": False,  # NOT merged via PR
-                "closed": False
+                "closed": False,
             }
         }
 
         # Test: Determine branch status with PR data
         status, sync_status, pr_status, notes = keeper._determine_branch_status(
-            "feature/git-merged",
-            pr_data
+            "feature/git-merged", pr_data
         )
 
         # Assert: Should be merged with merged-git sync status
@@ -113,8 +109,7 @@ class TestMergeMethodDetection:
         pr_data = {}
 
         status, sync_status, pr_status, notes = keeper._determine_branch_status(
-            "feature/no-pr-data",
-            pr_data
+            "feature/no-pr-data", pr_data
         )
 
         # Assert: Should be merged with merged-git sync status (default when no PR data)
@@ -142,10 +137,7 @@ class TestMergeMethodDetection:
         keeper = BranchKeeper(str(repo_path), mock_config)
 
         # First test: Without PR data (should be merged-git)
-        status1, sync_status1, _, _ = keeper._determine_branch_status(
-            "feature/override-test",
-            {}
-        )
+        status1, sync_status1, _, _ = keeper._determine_branch_status("feature/override-test", {})
         assert status1 == BranchStatus.MERGED
         assert sync_status1 == SyncStatus.MERGED_GIT.value
 
@@ -154,13 +146,12 @@ class TestMergeMethodDetection:
             "feature/override-test": {
                 "count": 0,
                 "merged": True,  # Indicate it was merged via PR
-                "closed": False
+                "closed": False,
             }
         }
 
         status2, sync_status2, _, _ = keeper._determine_branch_status(
-            "feature/override-test",
-            pr_data
+            "feature/override-test", pr_data
         )
         assert status2 == BranchStatus.MERGED
         assert sync_status2 == SyncStatus.MERGED_PR.value
@@ -187,14 +178,13 @@ class TestMergeMethodDetection:
             "feature/closed-unmerged": {
                 "count": 0,  # No open PRs
                 "merged": False,  # NOT merged
-                "closed": True  # But was closed
+                "closed": True,  # But was closed
             }
         }
 
         # Test: Determine branch status
         status, sync_status, pr_status, notes = keeper._determine_branch_status(
-            "feature/closed-unmerged",
-            pr_data
+            "feature/closed-unmerged", pr_data
         )
 
         # Assert: Should NOT be marked as merged

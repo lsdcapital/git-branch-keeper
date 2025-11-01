@@ -83,51 +83,66 @@ class BranchKeeper:
         self.main_branch = config.get("main_branch", "main")
 
         # Validate GitHub token requirement BEFORE initializing services
+        # Check for GitHub integration (optional)
+        remote_url = None
+        is_github_repo = False
+        has_github_token = False
+
         try:
             remote_url = self.repo.remotes.origin.url
-            if "github.com" in remote_url:
+            is_github_repo = "github.com" in remote_url
+
+            if is_github_repo:
                 # Check if token exists
                 import os
 
                 github_token = config.get("github_token") or os.environ.get("GITHUB_TOKEN")
-                if not github_token:
-                    error_msg = (
-                        "ERROR: GitHub token required for GitHub repositories\n\n"
-                        "This tool requires a GitHub token to safely manage branches:\n"
-                        "  • Prevents deletion of branches with open PRs\n"
-                        "  • Shows PR status and metadata\n\n"
-                        "Setup options:\n"
-                        '  1. Environment variable: export GITHUB_TOKEN="ghp_..."\n'
-                        '  2. Config file: Add "github_token" to git-branch-keeper.json\n\n'
-                        "Get a token at: https://github.com/settings/tokens\n"
-                        "Required scopes: repo (for private repos) or public_repo (for public repos only)"
-                    )
-                    raise RuntimeError(error_msg)
-            else:
-                # Non-GitHub repo
-                error_msg = (
-                    "This tool is designed for GitHub repositories.\n"
-                    "Non-GitHub repos are not currently supported."
-                )
-                raise RuntimeError(error_msg)
-        except AttributeError:
-            # No remote named 'origin'
-            error_msg = (
-                "ERROR: No 'origin' remote found in repository\n"
-                "This tool requires a repository with a GitHub remote."
-            )
-            raise RuntimeError(error_msg)
+                has_github_token = bool(github_token)
 
-        # Initialize services (token is guaranteed to exist at this point for GitHub repos)
+                if not has_github_token:
+                    # GitHub repo without token - inform user about limited functionality
+                    logger.info(
+                        "GitHub token not found. Running in local-only mode.\n"
+                        "  • Branch analysis will work normally\n"
+                        "  • PR detection and protection: DISABLED\n"
+                        "  • To enable: Set GITHUB_TOKEN environment variable or add to config\n"
+                        "  • Get token at: https://github.com/settings/tokens"
+                    )
+                    if not self.tui_mode:
+                        self._console_print(
+                            "[yellow]ℹ GitHub token not found - PR detection disabled[/yellow]"
+                        )
+            else:
+                # Non-GitHub repo (GitLab, Bitbucket, local, etc.)
+                logger.info(
+                    f"Non-GitHub repository detected ({remote_url}). PR detection disabled."
+                )
+                if not self.tui_mode:
+                    self._console_print(
+                        "[blue]ℹ Non-GitHub repository - PR detection disabled[/blue]"
+                    )
+
+        except AttributeError:
+            # No remote named 'origin' - local-only repo
+            logger.info("No origin remote found. Running in local-only mode.")
+            if not self.tui_mode:
+                self._console_print("[blue]ℹ Local repository - no remote tracking[/blue]")
+
+        # Initialize services
         self.github_service = GitHubService(self.repo_path, self.config)
         self.git_service = GitOperations(self.repo_path, self.config)
 
-        # Setup GitHub integration
-        try:
-            logger.debug(f"Setting up GitHub API with remote: {remote_url}")
-            self.github_service.setup_github_api(remote_url)
-        except Exception as e:
-            logger.debug(f"Failed to setup GitHub API: {e}")
+        # Setup GitHub integration (only if available)
+        if is_github_repo and has_github_token and remote_url:
+            try:
+                logger.debug(f"Setting up GitHub API with remote: {remote_url}")
+                self.github_service.setup_github_api(remote_url)
+                logger.info("[GitHub] Integration enabled - PR detection active")
+            except Exception as e:
+                logger.debug(f"Failed to setup GitHub API: {e}")
+                logger.warning("[GitHub] Setup failed - PR detection disabled")
+        else:
+            logger.debug("[GitHub] Integration disabled (no token or non-GitHub repo)")
 
         self.branch_status_service = BranchStatusService(
             self.repo_path, self.config, self.git_service, self.github_service, self.verbose
@@ -653,7 +668,9 @@ class BranchKeeper:
         current_branch_status = None
         try:
             current_branch = self.repo.active_branch.name
-            logger.debug(f"Capturing file status for current branch {current_branch} before stashing")
+            logger.debug(
+                f"Capturing file status for current branch {current_branch} before stashing"
+            )
             current_branch_status = self.git_service.get_branch_status_details(current_branch)
             logger.debug(
                 f"Current branch status: modified={current_branch_status.get('modified')}, "
@@ -686,7 +703,12 @@ class BranchKeeper:
                 # Process branches sequentially in verbose mode for readable logs
                 for branch_name in branches:
                     details = self._process_single_branch(
-                        branch_name, status_filter, pr_data, None, current_branch, current_branch_status
+                        branch_name,
+                        status_filter,
+                        pr_data,
+                        None,
+                        current_branch,
+                        current_branch_status,
                     )
                     if details:
                         branch_details.append(details)
@@ -790,7 +812,12 @@ class BranchKeeper:
         branch_details = []
         for branch_name in branches:
             details = self._process_single_branch(
-                branch_name, status_filter, pr_data, None, current_branch_name, current_branch_status
+                branch_name,
+                status_filter,
+                pr_data,
+                None,
+                current_branch_name,
+                current_branch_status,
             )
             if details:
                 branch_details.append(details)

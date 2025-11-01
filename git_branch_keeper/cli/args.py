@@ -7,30 +7,36 @@ from git_branch_keeper.__version__ import __version__
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Git branch management tool for GitHub repositories",
-        epilog="Setup: Requires GITHUB_TOKEN environment variable or 'github_token' in config file. "
-        "Get a token at https://github.com/settings/tokens (scopes: repo or public_repo)",
+        description="Git branch management tool for any Git repository (GitHub, GitLab, Bitbucket, or local)",
+        epilog="GitHub Integration (OPTIONAL): Set GITHUB_TOKEN to enable PR detection and protection. "
+        "Get token at https://github.com/settings/tokens (scopes: repo or public_repo). "
+        "Tool works without token for basic branch management. "
+        "SAFETY: Use --dry-run first to preview changes!",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Show verbose output")
     parser.add_argument("--version", action="version", version=f"git-branch-keeper {__version__}")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview mode - show what would be deleted without actually deleting",
+        help="[RECOMMENDED] Preview mode - show what would be deleted without making changes",
     )
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="(Deprecated: cleanup is now default) Actually delete branches",
+        help="(Deprecated: cleanup is now default in CLI mode) Ignored - kept for backwards compatibility",
     )
-    parser.add_argument("--force", action="store_true", help="Skip confirmations")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="[DANGEROUS] Skip all confirmations - use with extreme caution!",
+    )
     parser.add_argument(
         "--interactive", action="store_true", help="Launch interactive TUI mode (default for TTY)"
     )
     parser.add_argument(
         "--no-interactive",
         action="store_true",
-        help="Force non-interactive CLI mode (for scripts/automation)",
+        help="Force CLI mode (DELETES branches with confirmation - use --dry-run first!)",
     )
     parser.add_argument("--stale-days", type=int, default=30, help="Days until branch is stale")
     parser.add_argument(

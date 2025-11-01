@@ -21,7 +21,7 @@ class GitHubService:
     def __init__(self, repo_path: str, config: Union["Config", dict]):
         """Initialize the service.
 
-        Note: GitHub token is required and validated before this service is initialized.
+        Note: GitHub integration is optional. Call setup_github_api() to enable.
         """
         self.repo_path = repo_path
         self.config = config
@@ -32,6 +32,10 @@ class GitHubService:
         self.github_repo: Optional[str] = None
         self.github: Optional[Github] = None
         self.gh_repo: Optional["Repository"] = None
+
+    def is_enabled(self) -> bool:
+        """Check if GitHub integration is enabled and configured."""
+        return self.gh_repo is not None
 
     def setup_github_api(self, remote_url: str) -> None:
         """Setup GitHub API access.
@@ -68,8 +72,12 @@ class GitHubService:
     def has_open_pr(self, branch_name: str) -> bool:
         """Check if a branch has any open PRs.
 
-        Note: gh_repo and github_repo are guaranteed to be set after setup_github_api.
+        Returns False if GitHub integration is not enabled.
         """
+        if not self.is_enabled():
+            logger.debug(f"[GitHub] Skipping PR check for {branch_name} - integration disabled")
+            return False
+
         try:
             assert self.gh_repo is not None
             assert self.github_repo is not None
@@ -128,8 +136,12 @@ class GitHubService:
     def get_bulk_pr_data(self, branch_names: List[str]) -> Dict[str, Dict]:
         """Get PR data for multiple branches by fetching PRs in parallel.
 
-        Note: gh_repo is guaranteed to be set after setup_github_api.
+        Returns empty dict if GitHub integration is not enabled.
         """
+        if not self.is_enabled():
+            logger.debug("[GitHub] Skipping bulk PR fetch - integration disabled")
+            return {}
+
         if not branch_names:
             return {}
 

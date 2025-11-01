@@ -4,13 +4,14 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A smart Git branch management tool that helps keep your repository clean and organized. Stop manually tracking which branches are safe to delete—let `git-branch-keeper` do the heavy lifting.
+A smart Git branch management tool that helps keep your repository clean and organized. Works with **any Git repository** (GitHub, GitLab, Bitbucket, or local). Stop manually tracking which branches are safe to delete—let `git-branch-keeper` do the heavy lifting.
 
 ## ✨ Features
 
 - 🖥️ **Interactive TUI** - Beautiful terminal interface for managing branches with keyboard shortcuts
 - 📊 **Smart Detection** - Automatically identifies merged and stale branches
-- 🔍 **GitHub Integration** - Protects branches with open pull requests
+- 🔍 **Optional GitHub Integration** - Protects branches with open pull requests (requires GitHub token)
+- 🌍 **Works Everywhere** - Supports GitHub, GitLab, Bitbucket, and local repositories
 - 🌳 **Worktree Support** - Handles git worktrees intelligently
 - ⚡ **Fast & Efficient** - Caching and parallel processing for large repositories
 - 🎨 **Rich Output** - Color-coded status with detailed information
@@ -80,18 +81,20 @@ Use keyboard shortcuts to navigate and manage branches:
 For scripting and automation, use the non-interactive CLI mode:
 
 ```bash
-# View merged branches
-git-branch-keeper --no-interactive --filter merged
-
-# Delete merged branches (with confirmation)
-git-branch-keeper --no-interactive --filter merged
-
-# Force delete without confirmation
-git-branch-keeper --no-interactive --filter merged --force
-
-# Dry run to preview changes
+# Preview what would be deleted (RECOMMENDED for first run)
 git-branch-keeper --no-interactive --filter merged --dry-run
+
+# View merged branches in interactive TUI (default, safest)
+git-branch-keeper --filter merged
+
+# Delete merged branches with confirmation prompts (CLI mode)
+git-branch-keeper --no-interactive --filter merged
+
+# Force delete without confirmation (DANGEROUS - no undo!)
+git-branch-keeper --no-interactive --filter merged --force
 ```
+
+> **⚠️ Safety Note**: The CLI mode (`--no-interactive`) performs cleanup by default. Always use `--dry-run` first to preview changes, especially on your first run!
 
 ## 📖 Usage
 
@@ -144,6 +147,56 @@ git-branch-keeper [OPTIONS]
 | `merged-git` | Detected as merged by git |
 | `merged-pr` | Merged via GitHub pull request |
 
+## 🔒 Safety & Best Practices
+
+### Default Behavior
+
+`git-branch-keeper` has **different default behaviors** depending on the mode:
+
+| Mode | When It Activates | Default Behavior | Safety Level |
+|------|-------------------|------------------|--------------|
+| **Interactive TUI** | When connected to a terminal (default) | User selects branches, confirms before delete | ✅ **SAFE** |
+| **CLI Mode** | `--no-interactive` flag | **Deletes branches with confirmation prompts** | ⚠️ **CAUTION** |
+| **Force Mode** | `--force` flag | **Deletes immediately without confirmation** | 🔴 **DANGEROUS** |
+| **Dry Run** | `--dry-run` flag | Preview only, no deletion | ✅ **SAFE** |
+
+### ⚠️ Important Safety Warnings
+
+1. **CLI Mode Deletes by Default**: When using `--no-interactive`, the tool will delete branches (with confirmation). If you just want to preview, **always use `--dry-run`**.
+
+2. **Force Mode is Irreversible**: The `--force` flag skips all confirmations and immediately deletes branches. There is **no undo**.
+
+3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
+   ```bash
+   git-branch-keeper --no-interactive --filter merged --dry-run
+   ```
+
+4. **Protected Branches**: Always configure `protected_branches` in your config to prevent accidental deletion of important branches.
+
+5. **GitHub Token Not Required**: The tool works without a GitHub token, but won't protect branches with open PRs if the token is missing.
+
+### Safe Workflow
+
+```bash
+# Step 1: Preview changes (RECOMMENDED FIRST STEP)
+git-branch-keeper --no-interactive --filter merged --dry-run
+
+# Step 2: Review output carefully, then run actual cleanup
+git-branch-keeper --no-interactive --filter merged
+
+# Step 3: Or use interactive TUI for manual control (safest)
+git-branch-keeper --filter merged
+```
+
+### What Gets Protected
+
+The tool automatically protects:
+- ✅ Branches listed in `protected_branches` (default: `main`, `master`)
+- ✅ Branches matching `ignore_patterns`
+- ✅ Branches with open pull requests (if GitHub token configured)
+- ✅ Current branch you're on
+- ✅ Branches in active worktrees
+
 ## ⚙️ Configuration
 
 Create a configuration file to customize behavior. The tool looks for config files in this order:
@@ -176,9 +229,23 @@ Create a configuration file to customize behavior. The tool looks for config fil
 | `stale_days` | integer | Days before branch is stale | `30` |
 | `github_token` | string | GitHub personal access token | `null` |
 
-### GitHub Token Setup
+### GitHub Token Setup (Optional)
 
-To enable pull request detection and protection:
+**This section is OPTIONAL** - `git-branch-keeper` works on any Git repository without a GitHub token. The token only enables extra GitHub-specific features.
+
+#### What works WITHOUT a GitHub token:
+- ✅ Branch detection and analysis
+- ✅ Merge status detection (via Git)
+- ✅ Stale branch identification
+- ✅ Local branch cleanup
+- ✅ Works with GitHub, GitLab, Bitbucket, and local repos
+
+#### What REQUIRES a GitHub token (GitHub repos only):
+- 🔒 Pull request detection and protection
+- 🔒 PR status and metadata display
+- 🔒 Protection against deleting branches with open PRs
+
+#### Setup Instructions (for GitHub repos):
 
 1. **Create a token** at https://github.com/settings/tokens/new
    - Select scope: `repo` (for private repos) or `public_repo` (for public only)

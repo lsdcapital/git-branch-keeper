@@ -272,11 +272,11 @@ class WorktreeService:
                     continue
 
                 # Check for staged changes (index status is not space)
-                if index_status != ' ':
+                if index_status != " ":
                     has_staged = True
 
                 # Check for working tree changes (worktree status is not space)
-                if worktree_status != ' ':
+                if worktree_status != " ":
                     has_modified = True
 
             return {

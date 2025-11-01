@@ -11,7 +11,6 @@ from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Footer, Static
 from rich.text import Text
 
-from git_branch_keeper.__version__ import __version__
 from git_branch_keeper.constants import (
     TUI_COLORS,
     SYMBOL_MARKED,

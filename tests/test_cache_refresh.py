@@ -1,6 +1,5 @@
 """Tests for cache persistence during refresh operations."""
 
-import pytest
 from pathlib import Path
 
 from git_branch_keeper.core.branch_keeper import BranchKeeper
@@ -39,7 +38,9 @@ class TestCacheRefreshPersistence:
         # Verify cache was saved
         cached_branches = keeper.cache_service.load_cache()
         assert "main" in cached_branches, "Main branch should be in cache"
-        assert cached_branches["main"]["untracked_files"] is True, "Cache should have untracked=True"
+        assert (
+            cached_branches["main"]["untracked_files"] is True
+        ), "Cache should have untracked=True"
 
         # Now enable refresh mode and call again
         keeper.config.refresh = True
@@ -52,11 +53,15 @@ class TestCacheRefreshPersistence:
         assert main_branch_refreshed is not None
 
         # Should still have untracked file
-        assert main_branch_refreshed.untracked_files is True, "Should detect untracked file after refresh"
+        assert (
+            main_branch_refreshed.untracked_files is True
+        ), "Should detect untracked file after refresh"
 
         # Verify cache was updated (this is the key test)
         cached_branches_after_refresh = keeper.cache_service.load_cache()
-        assert "main" in cached_branches_after_refresh, "Main branch should be in cache after refresh"
+        assert (
+            "main" in cached_branches_after_refresh
+        ), "Main branch should be in cache after refresh"
         assert (
             cached_branches_after_refresh["main"]["untracked_files"] is True
         ), "Cache should STILL have untracked=True after refresh"
@@ -115,7 +120,7 @@ class TestCacheRefreshPersistence:
         # Clear cache first
         keeper1.cache_service.clear_cache()
 
-        branches1 = keeper1.get_branch_details(show_progress=False)
+        keeper1.get_branch_details(show_progress=False)
         cache1 = keeper1.cache_service.load_cache()
         assert len(cache1) > 0, "Cache should be saved when use_cache=True"
 
@@ -128,7 +133,7 @@ class TestCacheRefreshPersistence:
         config2["refresh"] = True
         keeper2 = BranchKeeper(str(repo_path), config2)
 
-        branches2 = keeper2.get_branch_details(show_progress=False)
+        keeper2.get_branch_details(show_progress=False)
         cache2 = keeper2.cache_service.load_cache()
         assert (
             len(cache2) > 0
