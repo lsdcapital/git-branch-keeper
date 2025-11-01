@@ -408,9 +408,8 @@ class BranchKeeper:
             # Insert worktree entries after their parent branches
             branch_details = self._insert_worktree_entries(branch_details)
 
-            # Save cache with new data
-            if use_cache:
-                self.cache_service.save_cache(branch_details, self.main_branch)
+            # Save cache with new data (always save, regardless of whether we used cache to load)
+            self.cache_service.save_cache(branch_details, self.main_branch)
 
             # Display and optionally cleanup
             self._display_and_cleanup(branch_details, cleanup_enabled)
@@ -536,9 +535,8 @@ class BranchKeeper:
             # Insert worktree entries after their parent branches
             branch_details = self._insert_worktree_entries(branch_details)
 
-            # Save cache with new data
-            if use_cache:
-                self.cache_service.save_cache(branch_details, self.main_branch)
+            # Save cache with new data (always save, regardless of whether we used cache to load)
+            self.cache_service.save_cache(branch_details, self.main_branch)
 
             return branch_details
 
@@ -650,6 +648,23 @@ class BranchKeeper:
         sequential = self.config.get("sequential", False)
         pr_data: Dict[str, Dict] = {}
 
+        # Capture current branch file status BEFORE stashing
+        # (stashing will hide these changes from git status checks)
+        current_branch_status = None
+        try:
+            current_branch = self.repo.active_branch.name
+            logger.debug(f"Capturing file status for current branch {current_branch} before stashing")
+            current_branch_status = self.git_service.get_branch_status_details(current_branch)
+            logger.debug(
+                f"Current branch status: modified={current_branch_status.get('modified')}, "
+                f"untracked={current_branch_status.get('untracked')}, "
+                f"staged={current_branch_status.get('staged')}"
+            )
+        except (TypeError, AttributeError):
+            # Detached HEAD or other error
+            current_branch = None
+            logger.debug("No current branch (detached HEAD?), skipping pre-stash status check")
+
         # Stash uncommitted changes before checking branch status
         was_stashed = False
         try:
@@ -670,7 +685,9 @@ class BranchKeeper:
 
                 # Process branches sequentially in verbose mode for readable logs
                 for branch_name in branches:
-                    details = self._process_single_branch(branch_name, status_filter, pr_data, None)
+                    details = self._process_single_branch(
+                        branch_name, status_filter, pr_data, None, current_branch, current_branch_status
+                    )
                     if details:
                         branch_details.append(details)
             else:
@@ -717,6 +734,8 @@ class BranchKeeper:
                             pr_data,
                             progress if show_progress else None,
                             task,
+                            current_branch,
+                            current_branch_status,
                         )
                     else:
                         # Parallel processing
@@ -726,6 +745,8 @@ class BranchKeeper:
                             pr_data,
                             progress if show_progress else None,
                             task,
+                            current_branch,
+                            current_branch_status,
                         )
 
             # Sort branches according to configuration
@@ -756,12 +777,21 @@ class BranchKeeper:
         return pr_data
 
     def _process_branches_sequential(
-        self, branches: list, status_filter: str, pr_data: Dict, progress, task
+        self,
+        branches: list,
+        status_filter: str,
+        pr_data: Dict,
+        progress,
+        task,
+        current_branch_name: Optional[str] = None,
+        current_branch_status: Optional[dict] = None,
     ) -> list:
         """Process branches sequentially."""
         branch_details = []
         for branch_name in branches:
-            details = self._process_single_branch(branch_name, status_filter, pr_data, None)
+            details = self._process_single_branch(
+                branch_name, status_filter, pr_data, None, current_branch_name, current_branch_status
+            )
             if details:
                 branch_details.append(details)
             if progress:  # Only update if progress bar exists
@@ -769,7 +799,14 @@ class BranchKeeper:
         return branch_details
 
     def _process_branches_parallel(
-        self, branches: list, status_filter: str, pr_data: Dict, progress, task
+        self,
+        branches: list,
+        status_filter: str,
+        pr_data: Dict,
+        progress,
+        task,
+        current_branch_name: Optional[str] = None,
+        current_branch_status: Optional[dict] = None,
     ) -> list:
         """Process branches in parallel using ThreadPoolExecutor."""
         branch_details = []
@@ -782,7 +819,13 @@ class BranchKeeper:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_branch = {
                 executor.submit(
-                    self._process_single_branch, branch, status_filter, pr_data, None
+                    self._process_single_branch,
+                    branch,
+                    status_filter,
+                    pr_data,
+                    None,
+                    current_branch_name,
+                    current_branch_status,
                 ): branch
                 for branch in branches
             }
@@ -1076,9 +1119,24 @@ class BranchKeeper:
         return status, sync_status, pr_status, notes
 
     def _process_single_branch(
-        self, branch: str, status_filter: str, pr_data: dict, progress=None
+        self,
+        branch: str,
+        status_filter: str,
+        pr_data: dict,
+        progress=None,
+        current_branch_name: Optional[str] = None,
+        current_branch_status: Optional[dict] = None,
     ) -> Optional[BranchDetails]:
-        """Process a single branch and return its details if it matches the filter."""
+        """Process a single branch and return its details if it matches the filter.
+
+        Args:
+            branch: Branch name to process
+            status_filter: Filter to apply (all/merged/stale)
+            pr_data: Pull request data
+            progress: Optional progress tracker
+            current_branch_name: Name of the currently checked out branch
+            current_branch_status: Pre-captured file status for current branch (before stashing)
+        """
         # Use consolidated method to determine status
         status, sync_status, pr_status_str, notes = self._determine_branch_status(branch, pr_data)
 
@@ -1097,7 +1155,13 @@ class BranchKeeper:
         worktree_path_for_details = None  # Store worktree path for BranchDetails
         status_error = None
         try:
-            status_details = self.git_service.get_branch_status_details(branch)
+            # Use pre-captured status for current branch (captured before stashing)
+            # to avoid stash hiding the uncommitted changes
+            if branch == current_branch_name and current_branch_status is not None:
+                logger.debug(f"Using pre-captured status for current branch {branch}")
+                status_details = current_branch_status
+            else:
+                status_details = self.git_service.get_branch_status_details(branch)
             if status_details.get("in_worktree"):
                 in_worktree = True
                 worktree_path = status_details.get("worktree_path")
