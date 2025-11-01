@@ -52,6 +52,13 @@ class ConfirmScreen(ModalScreen[bool]):
     }
     """
 
+    BINDINGS = [
+        Binding("enter", "confirm_yes", "Confirm", show=False),
+        Binding("y", "confirm_yes", "Yes", show=False),
+        Binding("escape", "confirm_no", "Cancel", show=False),
+        Binding("n", "confirm_no", "No", show=False),
+    ]
+
     def __init__(self, message: str):
         super().__init__()
         self.message = message
@@ -62,6 +69,14 @@ class ConfirmScreen(ModalScreen[bool]):
             with Container(id="button-container"):
                 yield Button("Yes", variant="error", id="yes")
                 yield Button("No", variant="primary", id="no")
+
+    def action_confirm_yes(self) -> None:
+        """Confirm action (Yes)."""
+        self.dismiss(True)
+
+    def action_confirm_no(self) -> None:
+        """Cancel action (No)."""
+        self.dismiss(False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press."""
@@ -98,6 +113,11 @@ class InfoScreen(ModalScreen):
     }
     """
 
+    BINDINGS = [
+        Binding("enter", "close", "Close", show=False),
+        Binding("escape", "close", "Close", show=False),
+    ]
+
     def __init__(self, info: str):
         super().__init__()
         self.info = info
@@ -107,6 +127,10 @@ class InfoScreen(ModalScreen):
             yield Static(self.info, id="info-content")
             with Container(id="info-button-container"):
                 yield Button("Close", variant="primary", id="close")
+
+    def action_close(self) -> None:
+        """Close the dialog."""
+        self.dismiss()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press."""

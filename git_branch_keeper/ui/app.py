@@ -84,7 +84,6 @@ class BranchKeeperApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("enter", "delete_marked", "Delete Marked"),
         Binding("space", "toggle_mark", "Mark/Unmark"),
         Binding("f", "force_mark", "Force Mark"),
         Binding("a", "mark_all_deletable", "Mark All Deletable"),
@@ -303,6 +302,7 @@ class BranchKeeperApp(App):
         for branch in matching:
             # Check protected branches (always enforced)
             if BranchValidationService.is_protected(branch.name, self.keeper.protected_branches):
+                logger.debug(f"[MARK_WITH_HIERARCHY] {branch.name} is protected")
                 return False, "Cannot mark protected branch"
 
             # Check uncommitted changes (unless force mode)
@@ -321,6 +321,7 @@ class BranchKeeperApp(App):
         # If any validation issues, return error
         if issues:
             error = "This branch's " + " and ".join(issues) + " (press 'f' to force-mark)"
+            logger.debug(f"[MARK_WITH_HIERARCHY] Validation failed: {error}")
             return False, error
 
         # All validations passed - mark all related items
@@ -370,6 +371,7 @@ class BranchKeeperApp(App):
     def action_toggle_mark(self) -> None:
         """Toggle mark on current row."""
         table = self.query_one(DataTable)
+
         if table.cursor_row is None:
             return
 
@@ -482,6 +484,10 @@ class BranchKeeperApp(App):
     def action_delete_marked(self) -> None:
         """Delete all marked branches."""
         total_marked = len(self.marked_branches) + len(self.force_marked_branches)
+        logger.debug(
+            f"[DELETE_MARKED] Called: marked={self.marked_branches}, "
+            f"force_marked={self.force_marked_branches}, total={total_marked}"
+        )
 
         if total_marked == 0:
             self.notify("No branches marked for deletion", severity="warning")
@@ -615,6 +621,18 @@ class BranchKeeperApp(App):
         except Exception as e:
             error_msg = f"Error during deletion:\n\n{str(e)}"
             self.push_screen(InfoScreen(error_msg))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle Enter key press in DataTable (triggers deletion of marked branches).
+
+        This event is fired when:
+        - User presses Enter on a table row
+        - DataTable's built-in select_cursor action is triggered
+
+        By using the event handler instead of a binding, we avoid conflicts with
+        modal screens that also use Enter for confirmation.
+        """
+        self.action_delete_marked()
 
     def action_show_info(self) -> None:
         """Show detailed info for selected branch with tabbed interface."""
