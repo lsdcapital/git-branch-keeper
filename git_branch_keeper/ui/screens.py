@@ -521,8 +521,9 @@ class TabbedInfoScreen(ModalScreen):
             # For main branch, show comparison with remote
             if self.branch.name == self.main_branch:
                 try:
-                    # Show difference between local main and origin/main
-                    diff = repo.git.diff(f"origin/{self.main_branch}...{self.main_branch}")
+                    # Show difference between local main and <remote>/main
+                    remote_name = git_service.remote_name
+                    diff = repo.git.diff(f"{remote_name}/{self.main_branch}...{self.main_branch}")
                     content = f"[bold]Local vs Remote {self.main_branch}[/bold]\n\n"
                     if diff:
                         content += f"{diff}"

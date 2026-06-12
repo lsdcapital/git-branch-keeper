@@ -43,6 +43,7 @@ class DisplayService:
         branch_status_service: "BranchStatusService",
         protected_branches: List[str],
         show_summary: bool = False,
+        delete_remote: bool = False,
     ) -> None:
         """Display a table of branch information."""
         self.repo = repo
@@ -111,7 +112,12 @@ class DisplayService:
                 console.print("\nBranches that would be deleted:")
                 for branch in branches_to_delete:
                     reason = format_deletion_reason(branch.status)
-                    remote_info = "remote and local" if branch.has_remote else "local only"
+                    if branch.has_remote:
+                        remote_info = (
+                            "local and remote" if delete_remote else "local only, remote kept"
+                        )
+                    else:
+                        remote_info = "local only"
                     console.print(f"  {branch.name} ({reason}, {remote_info})")
 
             # Calculate summary statistics

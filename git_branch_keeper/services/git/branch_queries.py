@@ -25,6 +25,7 @@ class BranchQueries:
         repo_path: str,
         config: Union["Config", dict],
         merge_detector: "MergeDetector",
+        remote_name: str = "origin",
     ):
         """Initialize the branch queries service.
 
@@ -32,11 +33,12 @@ class BranchQueries:
             repo_path: Path to the git repository
             config: Configuration dictionary or Config object
             merge_detector: MergeDetector instance for merge checks (dependency injection)
+            remote_name: Name of the remote to query (default "origin")
         """
         self.repo_path = repo_path
         self.config = config
         self.merge_detector = merge_detector
-        self.remote_name = "origin"
+        self.remote_name = remote_name
         self.worktree_service = WorktreeService(repo_path)
         self.in_git_operation = False
 
@@ -60,13 +62,13 @@ class BranchQueries:
             remote = repo.remote(self.remote_name)
 
             # First check if the remote ref exists
-            remote_ref_name = f"origin/{branch_name}"
+            remote_ref_name = f"{self.remote_name}/{branch_name}"
             if remote_ref_name not in [ref.name for ref in remote.refs]:
                 return False
 
             # Then try to get the remote branch
             try:
-                repo.refs[f"origin/{branch_name}"]
+                repo.refs[f"{self.remote_name}/{branch_name}"]
                 return True
             except (IndexError, KeyError):
                 return False
@@ -103,8 +105,8 @@ class BranchQueries:
                     return SyncStatus.LOCAL_ONLY.value
 
                 # For main branch, just check sync status with remote
-                ahead = list(repo.iter_commits(f"origin/{branch_name}..{branch_name}"))
-                behind = list(repo.iter_commits(f"{branch_name}..origin/{branch_name}"))
+                ahead = list(repo.iter_commits(f"{self.remote_name}/{branch_name}..{branch_name}"))
+                behind = list(repo.iter_commits(f"{branch_name}..{self.remote_name}/{branch_name}"))
 
                 if ahead and behind:
                     return SyncStatus.DIVERGED.value
@@ -121,8 +123,8 @@ class BranchQueries:
                     return SyncStatus.LOCAL_ONLY.value
 
                 # For protected branches, just check sync status
-                ahead = list(repo.iter_commits(f"origin/{branch_name}..{branch_name}"))
-                behind = list(repo.iter_commits(f"{branch_name}..origin/{branch_name}"))
+                ahead = list(repo.iter_commits(f"{self.remote_name}/{branch_name}..{branch_name}"))
+                behind = list(repo.iter_commits(f"{branch_name}..{self.remote_name}/{branch_name}"))
 
                 if ahead and behind:
                     return SyncStatus.DIVERGED.value
@@ -142,8 +144,8 @@ class BranchQueries:
                 return SyncStatus.LOCAL_ONLY.value
 
             # Check ahead/behind status
-            ahead = list(repo.iter_commits(f"origin/{branch_name}..{branch_name}"))
-            behind = list(repo.iter_commits(f"{branch_name}..origin/{branch_name}"))
+            ahead = list(repo.iter_commits(f"{self.remote_name}/{branch_name}..{branch_name}"))
+            behind = list(repo.iter_commits(f"{branch_name}..{self.remote_name}/{branch_name}"))
 
             if ahead and behind:
                 return SyncStatus.DIVERGED.value

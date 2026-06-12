@@ -58,7 +58,9 @@ git-branch-keeper --no-interactive --filter merged --force
 - **Behavior**: **IMMEDIATELY DELETES** branches without ANY confirmation
 - **Confirmations**: NONE
 - **Recommended for**: Never use unless you're 100% certain
-- **Risk**: Irreversible deletion, no second chances
+- **Risk**: No second chances at the prompt. Local deletions are journaled and restorable with `git-branch-keeper undo`; combined with `--remote`, the remote branch is also deleted and is much harder to recover.
+
+> **Remote deletion is opt-in.** By default every mode (including `--force`) deletes **local-only** and keeps the remote branch. Add `--remote` to also delete it on `origin`.
 
 ## ⚠️ Known Risks
 
@@ -129,6 +131,7 @@ The tool automatically protects:
 3. **Branches with open PRs**: If GitHub token is configured (GitHub repos only)
 4. **Active worktrees**: Branches checked out in git worktrees
 5. **Ignored patterns**: Branches matching `ignore_patterns` glob patterns
+6. **Remote branches**: Kept by default — deletion is local-only unless you pass `--remote`
 
 ## 📋 Recommended Workflows
 
@@ -203,6 +206,25 @@ Create `git-branch-keeper.json` in your project root:
 - **github_token**: Set via environment variable `GITHUB_TOKEN` (don't commit to git!)
 
 ## 🚨 Emergency: Branch Deleted by Mistake
+
+### Use the built-in undo (easiest)
+
+Every deletion made by `git-branch-keeper` is recorded in `~/.git-branch-keeper/deletions.jsonl` with the branch's tip SHA. To restore:
+
+```bash
+# Restore the most recently deleted branch
+git-branch-keeper undo
+
+# Restore a specific branch
+git-branch-keeper undo <branch-name>
+
+# See what was deleted recently
+git-branch-keeper undo --list
+```
+
+If the remote branch was also deleted, `undo` will offer to push it back. This works as long as the commit objects still exist (git keeps unreachable objects for ~90 days by default).
+
+### Manual recovery (if the journal doesn't have it)
 
 ### If you JUST deleted a branch:
 

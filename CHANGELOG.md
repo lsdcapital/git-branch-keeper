@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Deletion journal & `undo`**: every deleted branch is recorded with its tip SHA in
+  `~/.git-branch-keeper/deletions.jsonl`; `git-branch-keeper undo [BRANCH]` restores it
+  (and `undo --list` shows recent deletions)
+- **Opt-in remote deletion**: deletion is now local-only by default; pass `--remote` to
+  also delete the branch on the remote
+- **Remote auto-detection**: the remote is no longer hardcoded to `origin` — a single
+  non-`origin` remote (e.g. `upstream`) is detected and used automatically
+- TUI test coverage (pure marking-logic unit tests plus Textual `run_test` harness tests)
+
+### Fixed
+- **Rebase-merged branches are now detected.** Merge detection was rewritten around three
+  git-native checks — reachability (`merge-base --is-ancestor`), patch-equivalence
+  (`git cherry`), and combined-diff for multi-commit squashes. The previous diff-only
+  approach missed rebase-merges entirely (branches whose commits are in main under
+  different SHAs). Also removed the merge-commit-message regex (redundant, and it
+  interpolated branch names into a regex unescaped) and two redundant reachability checks.
+
+### Changed
+- Fuzzy squash-merge matches are now advisory only: a high-similarity (non-exact) patch
+  match surfaces a "possible squash-merge - verify before deleting" note instead of
+  marking the branch merged/deletable (prevents deleting unmerged work). Exact diff
+  matches still count as merged.
+- CI now runs the full pytest suite and enforces mypy; test matrix is Python 3.9-3.13
+- Minimum supported Python raised to 3.9 (was 3.8; 3.8 was already broken at import)
+- README clarified: branch/merge analysis works on any Git host; PR detection is GitHub-only
+
+### Added (original release scope)
 - Initial public release
 - Interactive TUI mode using Textual framework
 - CLI mode for scripting and automation

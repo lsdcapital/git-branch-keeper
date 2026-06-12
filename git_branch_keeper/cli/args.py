@@ -13,6 +13,23 @@ def parse_args():
         "Tool works without token for basic branch management. "
         "SAFETY: Use --dry-run first to preview changes!",
     )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["undo"],
+        help="Optional subcommand: 'undo' restores recently deleted branches from the journal",
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        metavar="BRANCH",
+        help="With 'undo': branch name to restore (default: most recent deletion)",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="With 'undo': list recent deletions for this repository",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Show verbose output")
     parser.add_argument("--version", action="version", version=f"git-branch-keeper {__version__}")
     parser.add_argument(
@@ -29,6 +46,12 @@ def parse_args():
         "--force",
         action="store_true",
         help="[DANGEROUS] Skip all confirmations - use with extreme caution!",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="Also delete the remote branch (default: local-only, remote is kept). "
+        "Remote deletions affect collaborators and are harder to undo.",
     )
     parser.add_argument(
         "--interactive", action="store_true", help="Launch interactive TUI mode (default for TTY)"

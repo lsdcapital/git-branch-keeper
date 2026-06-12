@@ -195,6 +195,7 @@ def mock_git_service(mock_config, mock_git_repo):
     service.get_last_commit_date = Mock(return_value="2024-01-01")
     service.get_branch_sync_status = Mock(return_value=SyncStatus.SYNCED.value)
     service.is_branch_merged = Mock(return_value=False)
+    service.is_likely_squash_merged = Mock(return_value=False)
     service.is_tag = Mock(return_value=False)
 
     return service

@@ -18,6 +18,7 @@ from git_branch_keeper.services.cache_service import CacheService
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.utils.threading import get_optimal_worker_count
 from git_branch_keeper.utils.logging import get_logger
+from git_branch_keeper.utils.remotes import detect_remote_name, get_remote_url
 from git_branch_keeper.config import Config
 from git_branch_keeper.formatters import format_deletion_confirmation_items, format_deletion_reason
 
@@ -72,6 +73,9 @@ class BranchKeeper:
         except Exception as e:
             raise Exception(f"Error initializing repository: {e}")
 
+        # Detect which remote to use (prefers "origin"; adapts to a single non-origin remote)
+        self.remote_name = detect_remote_name(self.repo)
+
         # Get configuration values
         self.min_stale_days = config.get("stale_days", 30)
         self.protected_branches = config.get("protected_branches", ["main", "master"])
@@ -80,6 +84,7 @@ class BranchKeeper:
         self.interactive = config.get("interactive", True)
         self.dry_run = config.get("dry_run", True)
         self.force_mode = config.get("force", False)
+        self.delete_remote = config.get("delete_remote", False)
         self.main_branch = config.get("main_branch", "main")
 
         # Validate GitHub token requirement BEFORE initializing services
@@ -88,8 +93,8 @@ class BranchKeeper:
         is_github_repo = False
         has_github_token = False
 
-        try:
-            remote_url = self.repo.remotes.origin.url
+        remote_url = get_remote_url(self.repo, self.remote_name)
+        if remote_url:
             is_github_repo = "github.com" in remote_url
 
             if is_github_repo:
@@ -121,10 +126,9 @@ class BranchKeeper:
                     self._console_print(
                         "[blue]ℹ Non-GitHub repository - PR detection disabled[/blue]"
                     )
-
-        except AttributeError:
-            # No remote named 'origin' - local-only repo
-            logger.info("No origin remote found. Running in local-only mode.")
+        else:
+            # No usable remote - local-only repo
+            logger.info(f"No '{self.remote_name}' remote found. Running in local-only mode.")
             if not self.tui_mode:
                 self._console_print("[blue]ℹ Local repository - no remote tracking[/blue]")
 
@@ -258,16 +262,23 @@ class BranchKeeper:
 
             remote_exists = self.git_service.has_remote_branch(branch_name)
             if self.dry_run:
-                if remote_exists:
+                if remote_exists and self.delete_remote:
                     self._console_print(
                         f"Would delete local and remote branch {branch_name} ({reason})"
+                    )
+                elif remote_exists:
+                    self._console_print(
+                        f"Would delete local branch {branch_name} ({reason}) - "
+                        "remote kept (use --remote to also delete it)"
                     )
                 else:
                     self._console_print(f"Would delete local branch {branch_name} ({reason})")
                 return True, None
 
             # Delete the branch
-            success = self.git_service.delete_branch(branch_name, self.dry_run)
+            success = self.git_service.delete_branch(
+                branch_name, self.dry_run, delete_remote=self.delete_remote
+            )
 
             # If deletion was successful, remove from cache
             if success:
@@ -572,7 +583,7 @@ class BranchKeeper:
                 f"[yellow]Please update your {self.main_branch} branch first:[/yellow]"
             )
             self._console_print(f"  git checkout {self.main_branch}")
-            self._console_print(f"  git pull origin {self.main_branch}")
+            self._console_print(f"  git pull {self.remote_name} {self.main_branch}")
             self._console_print("")
         return True
 
@@ -581,7 +592,7 @@ class BranchKeeper:
         branches = [
             ref.name
             for ref in self.repo.refs
-            if not ref.name.startswith("origin/")
+            if not ref.name.startswith(f"{self.remote_name}/")
             and not ref.name.startswith("refs/stash")
             and not self.git_service.is_tag(ref.name)
         ]
@@ -877,8 +888,8 @@ class BranchKeeper:
     def _get_github_base_url(self) -> Optional[str]:
         """Extract GitHub base URL from remote URL."""
         try:
-            remote_url = self.repo.remotes.origin.url
-            if "github.com" not in remote_url:
+            remote_url = get_remote_url(self.repo, self.remote_name)
+            if not remote_url or "github.com" not in remote_url:
                 return None
 
             if remote_url.startswith("git@"):
@@ -904,6 +915,7 @@ class BranchKeeper:
             self.branch_status_service,
             self.protected_branches,
             show_summary=self.verbose,
+            delete_remote=self.delete_remote,
         )
 
         # Handle cleanup if enabled
@@ -1051,6 +1063,10 @@ class BranchKeeper:
         self._console_print(
             f"\n[green]Successfully removed {total_removed} worktrees and deleted {total_deleted} branches[/green]"
         )
+        if total_deleted > 0 and not self.dry_run:
+            self._console_print(
+                "[dim]Deleted branches can be restored with: git-branch-keeper undo[/dim]"
+            )
 
         if failed_branches:
             self._console_print(f"\n[red]Failed to delete {len(failed_branches)} branches:[/red]")
@@ -1060,7 +1076,9 @@ class BranchKeeper:
     def _confirm_deletion(self, branches_to_delete: list) -> bool:
         """Show branches to delete and ask for confirmation."""
         self._console_print("\nThe following branches will be deleted:")
-        self._console_print(format_deletion_confirmation_items(branches_to_delete))
+        self._console_print(
+            format_deletion_confirmation_items(branches_to_delete, self.delete_remote)
+        )
 
         response = console.input("\nProceed with deletion? [y/N] ")
         return response.lower() == "y"
@@ -1071,7 +1089,9 @@ class BranchKeeper:
         """Show branches and worktrees to delete/remove and ask for confirmation."""
         if branches_to_delete:
             self._console_print("\nThe following branches will be deleted:")
-            self._console_print(format_deletion_confirmation_items(branches_to_delete))
+            self._console_print(
+                format_deletion_confirmation_items(branches_to_delete, self.delete_remote)
+            )
 
         if worktrees_to_remove:
             self._console_print("\nThe following worktrees will be removed:")
@@ -1131,6 +1151,13 @@ class BranchKeeper:
         # If status not determined by PR data, use git analysis
         if status is None:
             status = self.branch_status_service.get_branch_status(branch, self.main_branch, pr_data)
+
+        # If the branch was not confirmed merged but looks squash-merged by fuzzy
+        # diff similarity, surface an advisory note. It is intentionally NOT marked
+        # MERGED - a heuristic guess must never make a branch auto-deletable.
+        if status != BranchStatus.MERGED and self.git_service.is_likely_squash_merged(branch):
+            squash_note = "possible squash-merge - verify before deleting"
+            notes = f"{notes}; {squash_note}" if notes else squash_note
 
         # Step 2: Get sync status
         sync_status = self.git_service.get_branch_sync_status(branch, self.main_branch)

@@ -30,17 +30,20 @@ def format_deletion_reason(status: BranchStatus) -> str:
     return "stale" if status == BranchStatus.STALE else "merged"
 
 
-def format_deletion_confirmation_items(branches: list[BranchDetails]) -> str:
+def format_deletion_confirmation_items(
+    branches: list[BranchDetails], delete_remote: bool = False
+) -> str:
     """
     Format a list of branches for deletion confirmation message.
 
     Args:
         branches: List of BranchDetails objects to delete
+        delete_remote: Whether remote branches will also be deleted
 
     Returns:
         Formatted string with bullet-pointed list including reason and remote info.
         Each branch is on a separate line with format:
-        "  • branch-name (reason, local and remote/local only)"
+        "  • branch-name (reason, <scope>)"
 
     Example:
         "  • feature/old (merged, local and remote)\\n  • bugfix/temp (stale, local only)"
@@ -48,7 +51,10 @@ def format_deletion_confirmation_items(branches: list[BranchDetails]) -> str:
     lines = []
     for branch in branches:
         reason = format_deletion_reason(branch.status)
-        remote_info = "local and remote" if branch.has_remote else "local only"
+        if branch.has_remote:
+            remote_info = "local and remote" if delete_remote else "local only, remote kept"
+        else:
+            remote_info = "local only"
         lines.append(f"  • {branch.name} ({reason}, {remote_info})")
     return "\n".join(lines)
 

@@ -4,14 +4,14 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A smart Git branch management tool that helps keep your repository clean and organized. Works with **any Git repository** (GitHub, GitLab, Bitbucket, or local). Stop manually tracking which branches are safe to delete—let `git-branch-keeper` do the heavy lifting.
+A smart Git branch management tool that helps keep your repository clean and organized. Branch and merge analysis works on **any Git repository** — GitHub, GitLab, Bitbucket, or purely local. Pull-request detection and protection are an optional extra that currently work with **GitHub only**. Stop manually tracking which branches are safe to delete—let `git-branch-keeper` do the heavy lifting.
 
 ## ✨ Features
 
 - 🖥️ **Interactive TUI** - Beautiful terminal interface for managing branches with keyboard shortcuts
 - 📊 **Smart Detection** - Automatically identifies merged and stale branches
-- 🔍 **Optional GitHub Integration** - Protects branches with open pull requests (requires GitHub token)
-- 🌍 **Works Everywhere** - Supports GitHub, GitLab, Bitbucket, and local repositories
+- 🔍 **Optional GitHub Integration** - Protects branches with open pull requests (GitHub only, requires a token)
+- 🌍 **Host-agnostic core** - Branch analysis, merge detection, and cleanup work on any Git repo (GitHub, GitLab, Bitbucket, or local); PR detection is GitHub-only
 - 🌳 **Worktree Support** - Handles git worktrees intelligently
 - ⚡ **Fast & Efficient** - Caching and parallel processing for large repositories
 - 🎨 **Rich Output** - Color-coded status with detailed information
@@ -87,14 +87,19 @@ git-branch-keeper --no-interactive --filter merged --dry-run
 # View merged branches in interactive TUI (default, safest)
 git-branch-keeper --filter merged
 
-# Delete merged branches with confirmation prompts (CLI mode)
+# Delete merged branches with confirmation prompts (deletes local only, keeps remote)
 git-branch-keeper --no-interactive --filter merged
 
-# Force delete without confirmation (DANGEROUS - no undo!)
+# Also delete the remote branch (affects collaborators)
+git-branch-keeper --no-interactive --filter merged --remote
+
+# Force delete without confirmation (DANGEROUS)
 git-branch-keeper --no-interactive --filter merged --force
 ```
 
 > **⚠️ Safety Note**: The CLI mode (`--no-interactive`) performs cleanup by default. Always use `--dry-run` first to preview changes, especially on your first run!
+
+> **🌐 Remote branches**: By default, deletion is **local-only** — the remote branch is kept. Add `--remote` to also delete it on `origin`. Remote deletions affect collaborators and are harder to undo, so they are opt-in.
 
 ## 📖 Usage
 
@@ -113,8 +118,13 @@ git-branch-keeper [OPTIONS]
 **Mode Options:**
 - `--interactive` / `--no-interactive` - Enable/disable TUI mode
 - `--dry-run` - Preview changes without deleting
+- `--remote` - Also delete the remote branch (default: local-only, remote is kept)
 - `--force` - Delete without confirmation (use with caution!)
 - `--refresh` - Bypass cache and refresh all data
+
+**Subcommands:**
+- `undo [BRANCH]` - Restore a deleted branch from the journal (most recent if no name given)
+- `undo --list` - List recent deletions for this repository
 
 **Configuration:**
 - `-c, --config PATH` - Path to config file
@@ -159,12 +169,15 @@ git-branch-keeper [OPTIONS]
 | **CLI Mode** | `--no-interactive` flag | **Deletes branches with confirmation prompts** | ⚠️ **CAUTION** |
 | **Force Mode** | `--force` flag | **Deletes immediately without confirmation** | 🔴 **DANGEROUS** |
 | **Dry Run** | `--dry-run` flag | Preview only, no deletion | ✅ **SAFE** |
+| **Remote deletion** | `--remote` flag | Off by default — deletion is local-only unless opted in | ✅ **SAFE default** |
 
 ### ⚠️ Important Safety Warnings
 
 1. **CLI Mode Deletes by Default**: When using `--no-interactive`, the tool will delete branches (with confirmation). If you just want to preview, **always use `--dry-run`**.
 
-2. **Force Mode is Irreversible**: The `--force` flag skips all confirmations and immediately deletes branches. There is **no undo**.
+2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
+
+   **Deletion is local-only by default**: the remote branch is preserved unless you pass `--remote`. This keeps the easily-recoverable case (local, restorable via reflog and `undo`) separate from the harder-to-undo case (remote, visible to collaborators).
 
 3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
    ```bash
@@ -187,6 +200,23 @@ git-branch-keeper --no-interactive --filter merged
 # Step 3: Or use interactive TUI for manual control (safest)
 git-branch-keeper --filter merged
 ```
+
+### Undo: Restoring Deleted Branches
+
+Every branch deletion is recorded in a journal at `~/.git-branch-keeper/deletions.jsonl`, including the branch's tip commit SHA. As long as the commit still exists in your repository (git keeps unreachable objects for ~90 days by default), you can restore it:
+
+```bash
+# Restore the most recently deleted branch
+git-branch-keeper undo
+
+# Restore a specific branch by name
+git-branch-keeper undo feature/my-branch
+
+# List recent deletions for this repository
+git-branch-keeper undo --list
+```
+
+Running `undo` repeatedly walks back through the deletion history, restoring one branch at a time. If the remote branch was also deleted, `undo` offers to push it back (or prints the `git push` command to do it manually).
 
 ### What Gets Protected
 

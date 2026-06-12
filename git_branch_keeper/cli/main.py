@@ -17,12 +17,25 @@ def main():
         # Parse command line arguments
         parsed_args = parse_args()
 
+        # Handle the 'undo' subcommand before any branch processing
+        if parsed_args.command == "undo":
+            from git_branch_keeper.cli.undo import run_undo
+
+            setup_logging(verbose=parsed_args.verbose, debug=parsed_args.debug, tui_mode=False)
+            return run_undo(
+                os.getcwd(),
+                target=parsed_args.target,
+                list_only=parsed_args.list,
+                force=parsed_args.force,
+            )
+
         # Build config from parsed arguments
         # Note: cleanup is now default, --dry-run enables preview mode
         config = Config(
             interactive=not parsed_args.force,
             dry_run=parsed_args.dry_run,
             force=parsed_args.force,
+            delete_remote=parsed_args.remote,
             verbose=parsed_args.verbose,
             stale_days=parsed_args.stale_days,
             protected_branches=parsed_args.protected,

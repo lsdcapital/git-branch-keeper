@@ -21,6 +21,7 @@ class Config:
     interactive: bool = True
     dry_run: bool = False  # Default to cleanup mode (use --dry-run for preview)
     force: bool = False
+    delete_remote: bool = False  # Opt-in: also delete the remote branch (use --remote)
     verbose: bool = False
     debug: bool = False
     refresh: bool = False  # Force refresh, bypass cache
@@ -99,6 +100,7 @@ class Config:
             "interactive": self.interactive,
             "dry_run": self.dry_run,
             "force": self.force,
+            "delete_remote": self.delete_remote,
             "verbose": self.verbose,
             "debug": self.debug,
             "refresh": self.refresh,
@@ -127,6 +129,7 @@ class Config:
             "interactive",
             "dry_run",
             "force",
+            "delete_remote",
             "verbose",
             "debug",
             "refresh",

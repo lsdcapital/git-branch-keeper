@@ -243,43 +243,29 @@ def restore_stashed_changes(self, was_stashed: bool) -> None:
 
 ### 🟠 6. "origin" Remote Hardcoded - Other Remotes Ignored
 
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
+**Status**: [x] Mostly complete (single-remote auto-detection done; full multi-remote tracking not done)
 
 **Severity**: High (in multi-remote repositories)
 **Impact**: Branches on non-"origin" remotes treated as local-only, incorrectly marked for deletion
 
-**Code Location**: `git_branch_keeper/services/git_service.py:37`
+**Code Location**: `git_branch_keeper/utils/remotes.py` (`detect_remote_name`), consumed by
+`services/git/operations.py`, `services/git/branch_queries.py`, `core/branch_keeper.py`.
 
-**Problem Description**:
-The tool hardcodes the remote name as "origin", so branches existing on different remotes aren't recognized:
+**What was fixed**:
+The remote name is no longer hardcoded. `detect_remote_name(repo)` picks the remote to use:
+prefers `origin` if present (so existing behavior is unchanged), otherwise uses the sole remote
+if there is exactly one, otherwise falls back to `origin` and logs a warning. The detected name
+is threaded through sync-status/divergence queries, `has_remote_branch`, deletion, the GitHub
+URL lookup, and the TUI comparison view. A repo whose only remote is e.g. `upstream` is now
+handled correctly (verified end-to-end).
 
-```python
-class GitService:
-    def __init__(self, repo_path: str, config: Union["Config", dict]):
-        # ...
-        self.remote_name = "origin"  # ⚠️ Hardcoded!
-```
+**Still open (lower priority)**:
+- A branch tracked on *multiple* remotes is still only checked against the single detected remote.
+- No explicit `--remote-name` override flag yet (auto-detection covers the common cases).
+- When multiple remotes exist and none is `origin`, the tool warns and falls back rather than
+  letting the user choose.
 
-Used in:
-- `has_remote_branch()` (line 285)
-- `delete_branch()` (line 1101)
-- Any remote operation assumes "origin"
-
-**Scenario**:
-1. Repository has remotes: `origin` and `upstream`
-2. Branch exists on `upstream` only (or in addition to `origin`)
-3. Tool checks `has_remote_branch("my-feature")`
-4. Returns false (because it only checks "origin")
-5. Branch marked as "local-only"
-6. If deleted, branch is lost from `upstream` as well (or user loses tracking)
-
-**Recommended Fix**:
-- Make remote name configurable
-- Auto-detect primary remote (usually "origin", but fallback to any remote)
-- Support multi-remote tracking
-- Warn if multiple remotes exist and only checking one
-
-**Implementation Complexity**: Medium (configuration + detection logic)
+**Implementation Complexity**: Medium (remaining: per-branch multi-remote tracking)
 
 ---
 

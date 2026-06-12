@@ -122,7 +122,7 @@ class TestInvalidBranchNames:
 
     def test_branch_with_special_characters(self, git_repo, mock_config):
         """Test handling branches with special characters."""
-        service = GitOperations(git_repo, mock_config)
+        service = GitOperations(git_repo.working_dir, mock_config)
 
         # GitPython should handle escaping automatically
         # Test that we don't crash with special characters
@@ -146,7 +146,7 @@ class TestMergeDetectionEdgeCases:
 
     def test_merge_detection_with_cache(self, git_repo_with_branches, mock_config):
         """Test that merge detection caching works correctly."""
-        service = GitOperations(git_repo_with_branches, mock_config)
+        service = GitOperations(git_repo_with_branches.working_dir, mock_config)
 
         branch = "feature/to-merge"
         main = "main"
@@ -165,7 +165,7 @@ class TestMergeDetectionEdgeCases:
 
     def test_merge_detection_non_existent_branch(self, git_repo, mock_config):
         """Test merge detection with non-existent branch."""
-        service = GitOperations(git_repo, mock_config)
+        service = GitOperations(git_repo.working_dir, mock_config)
 
         result = service.is_branch_merged("nonexistent", "main")
 
@@ -219,7 +219,7 @@ class TestSyncStatusEdgeCases:
 
     def test_sync_status_with_no_remote(self, git_repo, mock_config):
         """Test sync status when branch has no remote."""
-        service = GitOperations(git_repo, mock_config)
+        service = GitOperations(git_repo.working_dir, mock_config)
 
         status = service.get_branch_sync_status("main", "main")
 

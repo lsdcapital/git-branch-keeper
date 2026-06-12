@@ -41,6 +41,7 @@ git-branch-keeper --debug
 
 **Important**:
 - CLI mode (`--no-interactive`) deletes branches by default (with confirmation)
+- Deletion is **local-only by default**; the remote branch is kept unless `--remote` is passed (`config.delete_remote`)
 - Always use `--dry-run` first to preview changes
 - The `--cleanup` flag is deprecated (cleanup is now the default behavior in CLI mode)
 
@@ -53,6 +54,7 @@ The codebase follows a service-oriented architecture:
   - `git_service.py`: Handles Git operations (branch listing, deletion, merge detection)
   - `github_service.py`: GitHub API integration for PR status
   - `branch_status_service.py`: Determines branch status (merged, stale, has PR)
+  - `deletion_journal.py`: Records every deleted branch (with tip SHA) to `~/.git-branch-keeper/deletions.jsonl`; powers `git-branch-keeper undo` (see `cli/undo.py`)
   - `display_service.py`: Terminal UI using Rich library
 - **models/branch.py**: Data models for branch information and status
 - **config.py**: Configuration management with JSON file support
@@ -80,12 +82,28 @@ The TUI uses Textual framework with an event-driven design to handle keyboard in
 ## Important Patterns
 
 ### Merge Detection Strategy
-The GitService uses multiple methods to detect merged branches, ordered by speed:
-1. Squash merge detection by patch comparison
-2. Fast rev-list check
-3. Ancestor check
-4. Merge commit message search
-5. Full commit history comparison
+`MergeDetector` (`services/git/merge_detector.py`) uses three principled, git-native
+checks, ordered cheapest-first. Each maps to a real merge style; see
+`tests/test_merge_detection_accuracy.py` for the full matrix.
+1. **Reachability** (`_check_reachable`, `git merge-base --is-ancestor`) — branch tip
+   reachable from main. Covers ordinary merge commits and fast-forward merges.
+2. **Patch-equivalence** (`_check_patch_equivalent`, `git cherry`) — every commit unique
+   to the branch has a patch-identical commit already in main. Covers rebase-merges,
+   cherry-picks, and single-commit squashes (work in main under different SHAs). This is
+   what catches rebase-merges, which the older diff-only approach missed.
+3. **Combined-diff exact match** (`_check_squash_merge`, last resort) — branch's combined
+   diff equals a single commit on main. Covers multi-commit squash merges (N commits
+   collapsed into 1, so no per-commit patch-id match).
+
+**Squash detection has two confidence levels.** An *exact* combined-diff match counts as
+merged/deletable. A *fuzzy* high-similarity substring match does NOT mark the branch
+merged — diff-text containment doesn't prove the work is in main (it may have been
+reverted). Instead it sets `MergeDetector._likely_squash_merged` (exposed via
+`is_likely_squash_merged()`), which surfaces a "possible squash-merge - verify before
+deleting" note. A heuristic guess must never make a branch auto-deletable.
+
+When a GitHub token is present, a merged PR (from the API) is authoritative and is used
+ahead of these git checks in `BranchStatusService`.
 
 ### Error Handling
 - Services use exceptions for error propagation
@@ -106,4 +124,7 @@ Configuration follows a hierarchy:
 - **GitHub integration is OPTIONAL**: The tool works on any Git repo without a GitHub token
   - Without token: Branch analysis, merge detection, and cleanup work normally
   - With token (GitHub only): Adds PR detection and protection against deleting branches with open PRs
-- Test framework: pytest with 102 tests (run with `make test`)
+- Test framework: pytest (run with `make test`); CI runs the full suite on Python 3.9-3.13
+- TUI has tests too: pure marking/validation logic in `tests/test_tui_marking.py`, and
+  Textual `run_test()` pilot harness tests in `tests/test_tui_app.py` (async, `asyncio_mode = "auto"`)
+- Branch deletions are journaled and recoverable via `git-branch-keeper undo` as long as the commit objects exist

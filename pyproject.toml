@@ -7,7 +7,7 @@ name = "git-branch-keeper"
 dynamic = ["version"]
 description = "A smart Git branch management tool that helps keep your repository clean and organized"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 keywords = ["git", "branch", "management", "cleanup"]
 authors = [
@@ -19,7 +19,6 @@ classifiers = [
     "Topic :: Software Development :: Version Control :: Git",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -46,20 +45,22 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
+asyncio_mode = "auto"
 
 [tool.black]
 line-length = 100
-target-version = ["py38"]
+target-version = ["py39"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py39"
 
 [dependency-groups]
 dev = [
     "black>=24.8.0",
     "mypy>=1.14.1",
     "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.1",
     "ruff>=0.14.2",

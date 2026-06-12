@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
@@ -41,18 +41,12 @@ jobs:
     - name: Type check with MyPy
       run: |
         uv run mypy git_branch_keeper --ignore-missing-imports
-      continue-on-error: true  # Don't fail CI on type errors yet
-
-    - name: Check imports with isort
-      run: |
-        uv run python -c "import sys; sys.exit(0)"  # Placeholder for future isort check
-      continue-on-error: true
 
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
@@ -88,18 +82,10 @@ jobs:
 
         # Test in current repo (non-interactive, dry-run)
         uv run git-branch-keeper --no-interactive --dry-run --filter all
-      continue-on-error: true  # Don't fail until proper tests are added
 
-    # Uncomment when tests are added
-    # - name: Run pytest
-    #   run: |
-    #     uv run pytest --cov=git_branch_keeper --cov-report=xml --cov-report=term
-
-    # - name: Upload coverage to Codecov
-    #   uses: codecov/codecov-action@v4
-    #   with:
-    #     file: ./coverage.xml
-    #     fail_ci_if_error: false
+    - name: Run pytest
+      run: |
+        uv run pytest --cov=git_branch_keeper --cov-report=term
 
   build:
     runs-on: ubuntu-latest

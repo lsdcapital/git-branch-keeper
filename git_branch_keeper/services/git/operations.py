@@ -8,7 +8,9 @@ from typing import Union, TYPE_CHECKING, Optional, List
 from git_branch_keeper.services.git.merge_detector import MergeDetector
 from git_branch_keeper.services.git.branch_queries import BranchQueries
 from git_branch_keeper.services.git.worktrees import WorktreeService
+from git_branch_keeper.services.deletion_journal import DeletionJournal
 from git_branch_keeper.utils.logging import get_logger
+from git_branch_keeper.utils.remotes import detect_remote_name
 
 if TYPE_CHECKING:
     from git_branch_keeper.config import Config
@@ -31,13 +33,22 @@ class GitOperations:
         self.config = config
         self.verbose = config.get("verbose", False)
         self.debug_mode = config.get("debug", False)
-        self.remote_name = "origin"  # Store remote name, not object
+        # Detect the remote once (prefers "origin"; adapts to a single non-origin remote).
+        # Defensive: the repo is otherwise opened lazily per-call, so a bad path must not
+        # fail construction here - fall back to the default and let _get_repo() surface it.
+        try:
+            self.remote_name = detect_remote_name(git.Repo(repo_path))
+        except Exception:
+            self.remote_name = "origin"
         self.in_git_operation = False  # Track if operation is in progress
 
         # Compose specialized services (Dependency Injection pattern)
         self.merge_detector = MergeDetector(repo_path, config)
-        self.branch_queries = BranchQueries(repo_path, config, self.merge_detector)
+        self.branch_queries = BranchQueries(
+            repo_path, config, self.merge_detector, remote_name=self.remote_name
+        )
         self.worktree_service = WorktreeService(repo_path)
+        self.deletion_journal = DeletionJournal(repo_path)
 
         logger.info("Git operations initialized")
 
@@ -72,6 +83,14 @@ class GitOperations:
     def get_merge_stats(self) -> str:
         """Get merge detection statistics. Delegates to MergeDetector."""
         return self.merge_detector.get_merge_stats()
+
+    def is_likely_squash_merged(self, branch_name: str) -> bool:
+        """Whether a branch looked squash-merged by fuzzy similarity only (advisory).
+
+        Delegates to MergeDetector. Only meaningful after is_branch_merged() has
+        run for the branch (that is when the fuzzy check executes).
+        """
+        return self.merge_detector.is_likely_squash_merged(branch_name)
 
     # ============================================================================
     # Delegation methods to BranchQueries
@@ -173,53 +192,103 @@ class GitOperations:
             logger.warning("Your changes are still in the stash. Run 'git stash pop' manually.")
             raise
 
-    def delete_branch(self, branch_name: str, dry_run: bool = False) -> bool:
-        """Delete a branch locally and remotely if it exists."""
+    def delete_branch(
+        self, branch_name: str, dry_run: bool = False, delete_remote: bool = False
+    ) -> bool:
+        """Delete a branch locally, and remotely only when explicitly requested.
+
+        By default the remote branch is kept (local-only deletion) because
+        remote deletions affect collaborators and are harder to undo. Pass
+        delete_remote=True to also delete it.
+
+        Every real deletion is recorded in the deletion journal (with the
+        branch's tip SHA) so it can be restored with `git-branch-keeper undo`.
+        """
         with self._git_operation():
             try:
                 repo = self._get_repo()
 
                 # Check if remote branch exists before deletion
                 has_remote = self.has_remote_branch(branch_name)
+                should_delete_remote = has_remote and delete_remote
+
+                # Capture the tip SHA before deletion so the branch is recoverable
+                deleted_sha = None
+                try:
+                    deleted_sha = repo.heads[branch_name].commit.hexsha
+                except Exception:
+                    logger.warning(f"Could not resolve tip SHA for {branch_name} before deletion")
 
                 # Delete local branch
+                local_deleted = False
                 if not dry_run:
                     console.print(f"Deleting local branch {branch_name}...")
                     repo.delete_head(branch_name, force=True)
+                    local_deleted = True
 
-                # Delete remote branch if it exists
-                if has_remote:
-                    if not dry_run:
-                        try:
-                            # Only get remote when we need to push
-                            remote = repo.remote(self.remote_name)
-                            console.print(f"Deleting remote branch {branch_name}...")
-                            remote.push(refspec=f":{branch_name}")
+                # Delete remote branch only when requested. Journal in `finally` so
+                # the entry is written even if the remote push fails after the local
+                # branch is already gone - that's when recovery info matters most.
+                remote_deleted = False
+                try:
+                    if should_delete_remote:
+                        if not dry_run:
+                            try:
+                                # Only get remote when we need to push
+                                remote = repo.remote(self.remote_name)
+                                console.print(f"Deleting remote branch {branch_name}...")
+                                remote.push(refspec=f":{branch_name}")
+                                remote_deleted = True
+                                console.print(
+                                    f"[green]Deleted branch {branch_name} (local and remote)[/green]"
+                                )
+                            except git.exc.GitCommandError as e:
+                                # Check if it's a protected branch error
+                                if "protected" in str(e).lower() or "prohibited" in str(e).lower():
+                                    console.print(
+                                        f"[yellow]Warning: Remote branch {branch_name} is protected and cannot be deleted remotely[/yellow]"
+                                    )
+                                    console.print(
+                                        f"[green]Deleted local branch {branch_name} only[/green]"
+                                    )
+                                else:
+                                    # Re-raise if it's a different error
+                                    raise
+                        else:
                             console.print(
-                                f"[green]Deleted branch {branch_name} (local and remote)[/green]"
+                                f"[yellow]Would delete branch {branch_name} (local and remote)[/yellow]"
                             )
-                        except git.exc.GitCommandError as e:
-                            # Check if it's a protected branch error
-                            if "protected" in str(e).lower() or "prohibited" in str(e).lower():
-                                console.print(
-                                    f"[yellow]Warning: Remote branch {branch_name} is protected and cannot be deleted remotely[/yellow]"
-                                )
-                                console.print(
-                                    f"[green]Deleted local branch {branch_name} only[/green]"
-                                )
-                            else:
-                                # Re-raise if it's a different error
-                                raise
-                    else:
-                        console.print(
-                            f"[yellow]Would delete branch {branch_name} (local and remote)[/yellow]"
+                    elif has_remote:
+                        # Remote exists but we're keeping it
+                        kept = (
+                            f"remote {self.remote_name}/{branch_name} kept; "
+                            "use --remote to also delete it"
                         )
-                else:
-                    if not dry_run:
-                        console.print(f"[green]Deleted branch {branch_name} (local only)[/green]")
+                        if not dry_run:
+                            console.print(
+                                f"[green]Deleted branch {branch_name} (local only - {kept})[/green]"
+                            )
+                        else:
+                            console.print(
+                                f"[yellow]Would delete branch {branch_name} (local only - {kept})[/yellow]"
+                            )
                     else:
-                        console.print(
-                            f"[yellow]Would delete branch {branch_name} (local only)[/yellow]"
+                        if not dry_run:
+                            console.print(
+                                f"[green]Deleted branch {branch_name} (local only)[/green]"
+                            )
+                        else:
+                            console.print(
+                                f"[yellow]Would delete branch {branch_name} (local only)[/yellow]"
+                            )
+                finally:
+                    if local_deleted and deleted_sha:
+                        self.deletion_journal.record_deletion(
+                            branch_name,
+                            deleted_sha,
+                            had_remote=has_remote,
+                            remote_deleted=remote_deleted,
+                            remote_name=self.remote_name,
                         )
 
                 return True

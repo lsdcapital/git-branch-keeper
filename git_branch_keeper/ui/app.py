@@ -500,7 +500,9 @@ class BranchKeeperApp(App):
         # Build confirmation message
         force_count = len(self.force_marked_branches)
         normal_count = len(self.marked_branches)
-        branches_list = format_deletion_confirmation_items(branches_to_delete)
+        branches_list = format_deletion_confirmation_items(
+            branches_to_delete, self.keeper.delete_remote
+        )
 
         if force_count > 0:
             message = (
@@ -514,7 +516,7 @@ class BranchKeeperApp(App):
         # Show confirmation screen
         self.push_screen(ConfirmScreen(message), self._handle_delete_confirmation)
 
-    def _handle_delete_confirmation(self, confirmed: bool | None) -> None:
+    def _handle_delete_confirmation(self, confirmed: Optional[bool]) -> None:
         """Handle delete confirmation result."""
         if not confirmed:
             self.notify("Deletion cancelled")
@@ -600,8 +602,11 @@ class BranchKeeperApp(App):
             total_failed = len(all_failed_branches) + len(all_failed_worktrees)
 
             if total_success > 0:
+                undo_hint = (
+                    " (restore with: git-branch-keeper undo)" if all_deleted_branches else ""
+                )
                 self.notify(
-                    f"✓ Removed {len(all_removed_worktrees)} worktrees and deleted {len(all_deleted_branches)} branches",
+                    f"✓ Removed {len(all_removed_worktrees)} worktrees and deleted {len(all_deleted_branches)} branches{undo_hint}",
                     severity="information",
                 )
 
