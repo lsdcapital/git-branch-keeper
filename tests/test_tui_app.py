@@ -5,6 +5,9 @@ these tests are deterministic - they verify the app composes, renders rows, and
 responds to key bindings without a real data-load worker.
 """
 
+from pathlib import Path
+
+import git
 import pytest
 from textual.widgets import DataTable
 
@@ -26,6 +29,15 @@ def _branch(name, status=BranchStatus.MERGED):
         has_remote=False,
         sync_status="local-only",
     )
+
+
+@pytest.fixture
+def isolated_home(temp_dir, monkeypatch):
+    """Redirect Path.home() so undo journals do not touch the real home dir."""
+    fake_home = temp_dir / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    return fake_home
 
 
 @pytest.fixture
@@ -66,6 +78,33 @@ async def test_mark_all_deletable_marks_merged_branch(make_app):
         await pilot.pause()
         assert "feature/a" in app.marked_branches
         assert "feature/b" in app.marked_branches
+
+
+async def test_undo_recent_deletion_binding_restores_branch(
+    make_app, git_repo, isolated_home, monkeypatch
+):
+    repo = git_repo
+    repo.git.checkout("-b", "feature/deleted")
+    sha = repo.head.commit.hexsha
+    repo.git.checkout("main")
+    repo.delete_head("feature/deleted", force=True)
+
+    app = make_app([_branch("main", BranchStatus.ACTIVE)])
+    monkeypatch.setattr(app, "refresh_data", lambda: None)
+    app.keeper.git_service.deletion_journal.record_deletion(
+        "feature/deleted", sha, had_remote=False, remote_deleted=False
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.press("u")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+    restored_repo = git.Repo(repo.working_dir)
+    restored = restored_repo.heads["feature/deleted"]
+    assert restored.commit.hexsha == sha
+    restored_repo.close()
 
 
 async def test_quit_binding_exits(make_app):

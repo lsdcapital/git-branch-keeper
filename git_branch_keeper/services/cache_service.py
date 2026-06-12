@@ -4,9 +4,11 @@ import json
 import hashlib
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from datetime import datetime
 from contextlib import contextmanager
+
+import git
 
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 
@@ -67,6 +69,24 @@ class CacheService:
                 logger.debug(f"Released {operation} lock on cache file")
             except Exception as e:
                 logger.debug(f"Error releasing lock: {e}")
+
+    def _get_current_local_branch_names(self) -> Optional[Set[str]]:
+        """Return the current local branch names for this repository.
+
+        Cache entries are keyed by branch name, so pruning must use the same namespace as
+        branch discovery: local heads only (``refs/heads/*``). If the repository cannot be
+        opened, return None so callers can preserve existing cache data instead of risking
+        accidental data loss.
+        """
+        try:
+            repo = git.Repo(self.repo_path)
+            try:
+                return {head.name for head in repo.heads}
+            finally:
+                repo.close()
+        except Exception as e:
+            logger.debug(f"Could not list local branches for cache pruning: {e}")
+            return None
 
     def _validate_cache_data(self, cache_data: Dict) -> bool:
         """Validate cache data structure and required fields.
@@ -154,11 +174,31 @@ class CacheService:
             main_branch: Name of the main branch
         """
         try:
-            # Load existing cache to preserve data
+            # Load existing cache to preserve data for branches that still exist locally.
             existing_cache = self.load_cache()
 
-            # Update with all branches
+            current_local_branches = self._get_current_local_branch_names()
+            if current_local_branches is not None:
+                before_count = len(existing_cache)
+                existing_cache = {
+                    branch_name: branch_data
+                    for branch_name, branch_data in existing_cache.items()
+                    if branch_name in current_local_branches
+                }
+                pruned_count = before_count - len(existing_cache)
+                if pruned_count:
+                    logger.debug(
+                        f"Pruned {pruned_count} cache entr{'y' if pruned_count == 1 else 'ies'} "
+                        "that no longer correspond to local branches"
+                    )
+
+            # Update with all current branch rows. Skip anything outside refs/heads/* so
+            # custom refs or detached/orphaned metadata can never be persisted as branches.
             for branch in branches:
+                if current_local_branches is not None and branch.name not in current_local_branches:
+                    logger.debug(f"Skipping cache for non-local branch ref '{branch.name}'")
+                    continue
+
                 serialized = self._serialize_branch(branch)
                 # Skip if branch has invalid data
                 if serialized.get("last_commit_date") == "unknown":

@@ -588,14 +588,15 @@ class BranchKeeper:
         return True
 
     def _get_filtered_branches(self) -> list:
-        """Get all branches excluding tags, stash, remote refs, and ignored patterns."""
-        branches = [
-            ref.name
-            for ref in self.repo.refs
-            if not ref.name.startswith(f"{self.remote_name}/")
-            and not ref.name.startswith("refs/stash")
-            and not self.git_service.is_tag(ref.name)
-        ]
+        """Get local branch heads excluding ignored patterns.
+
+        Branch rows must come only from ``refs/heads/*``. ``repo.refs`` also contains tags,
+        remote-tracking refs, stash refs, and arbitrary custom refs (for example
+        ``refs/conductor-checkpoints/*``), none of which are deletable local branches.
+        Worktrees are discovered separately from ``git worktree list --porcelain`` and then
+        attached to these local branch rows.
+        """
+        branches = [head.name for head in self.repo.heads]
 
         # Only filter out ignored branches, keep protected ones
         return [b for b in branches if not self.branch_status_service.should_ignore_branch(b)]

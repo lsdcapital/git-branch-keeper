@@ -4,6 +4,8 @@ import asyncio
 import os
 from typing import List, Set, Optional, TYPE_CHECKING
 
+import git
+
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -11,6 +13,7 @@ from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Footer, Static
 from rich.text import Text
 
+from git_branch_keeper.services.undo_service import pick_entry, restore_entry
 from git_branch_keeper.constants import (
     TUI_COLORS,
     SYMBOL_MARKED,
@@ -92,6 +95,7 @@ class BranchKeeperApp(App):
         Binding("l", "show_legend", "Legend"),
         Binding("s", "cycle_sort", "Change Sort"),
         Binding("r", "refresh", "Refresh"),
+        Binding("u", "undo_recent_deletion", "Undo Delete"),
     ]
 
     def __init__(
@@ -602,9 +606,7 @@ class BranchKeeperApp(App):
             total_failed = len(all_failed_branches) + len(all_failed_worktrees)
 
             if total_success > 0:
-                undo_hint = (
-                    " (restore with: git-branch-keeper undo)" if all_deleted_branches else ""
-                )
+                undo_hint = " (press u to undo)" if all_deleted_branches else ""
                 self.notify(
                     f"✓ Removed {len(all_removed_worktrees)} worktrees and deleted {len(all_deleted_branches)} branches{undo_hint}",
                     severity="information",
@@ -627,16 +629,90 @@ class BranchKeeperApp(App):
             error_msg = f"Error during deletion:\n\n{str(e)}"
             self.push_screen(InfoScreen(error_msg))
 
+    def _repo_path(self) -> str:
+        """Return the working repository path for undo/restore operations."""
+        return self.keeper.repo.working_dir or self.keeper.repo_path
+
+    def action_undo_recent_deletion(self) -> None:
+        """Restore the most recent deleted branch recorded in the journal."""
+        repo_path = self._repo_path()
+        journal = self.keeper.git_service.deletion_journal
+        deletions = journal.deletions()
+
+        if not deletions:
+            self.notify("No recorded deletions for this repository", severity="warning")
+            return
+
+        try:
+            repo = git.Repo(repo_path)
+        except Exception as e:
+            self.push_screen(InfoScreen(f"Could not open repository:\n\n{e}"))
+            return
+
+        entry = pick_entry(deletions, repo)
+        if entry is None:
+            self.notify("No deleted branches to restore", severity="warning")
+            return
+
+        branch_name = entry["branch"]
+        sha = entry["sha"]
+        message = (
+            f"Restore branch {branch_name} at {sha[:12]}?\n"
+            f"Deleted: {entry.get('timestamp', 'unknown time')}\n\n"
+            "This restores the local branch only."
+        )
+        if entry.get("remote_deleted"):
+            message += (
+                f"\n\nRemote branch was also deleted from {entry.get('remote', 'origin')}; "
+                "the TUI will not push it back."
+            )
+
+        self.push_screen(
+            ConfirmScreen(message),
+            lambda confirmed: self._handle_undo_confirmation(confirmed, entry),
+        )
+
+    def _handle_undo_confirmation(self, confirmed: Optional[bool], entry: dict) -> None:
+        """Handle confirmation for restoring a deleted branch."""
+        if not confirmed:
+            self.notify("Restore cancelled")
+            return
+
+        branch_name = entry["branch"]
+        sha = entry["sha"]
+        journal = self.keeper.git_service.deletion_journal
+
+        success, error = restore_entry(self._repo_path(), entry, journal, include_remote=False)
+        if not success:
+            self.push_screen(InfoScreen(error or "Could not restore branch"))
+            return
+
+        self.notify(f"✓ Restored branch {branch_name} at {sha[:12]}", severity="information")
+        if entry.get("remote_deleted"):
+            remote = entry.get("remote", "origin")
+            command = f"git push {remote} {sha}:refs/heads/{branch_name}"
+            self.notify(
+                f"Remote was deleted too; restore with: {command}",
+                severity="warning",
+            )
+
+        # Re-analyze so the restored branch appears in the table with fresh status/details.
+        self.refresh_data()
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Handle Enter key press in DataTable (triggers deletion of marked branches).
+        """Handle keyboard selection in DataTable (Enter deletes marked branches).
 
-        This event is fired when:
-        - User presses Enter on a table row
-        - DataTable's built-in select_cursor action is triggered
+        Textual's DataTable also emits RowSelected for a mouse click on the already
+        highlighted row. In this app mouse clicks should only move/highlight the cursor;
+        deletion is intentionally keyboard-driven via Enter.
 
-        By using the event handler instead of a binding, we avoid conflicts with
-        modal screens that also use Enter for confirmation.
+        By using this event handler instead of an app-level Enter binding, we avoid
+        conflicts with modal screens that also use Enter for confirmation.
         """
+        if getattr(event.data_table, "_show_hover_cursor", False):
+            logger.debug("Ignoring DataTable row selection from mouse click")
+            return
+
         self.action_delete_marked()
 
     def action_show_info(self) -> None:
