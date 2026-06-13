@@ -5,7 +5,8 @@ from pathlib import Path
 import git
 import pytest
 
-from git_branch_keeper.cli.undo import pick_entry, restore_entry
+from git_branch_keeper.cli.undo import pick_entry, restore_entry, run_undo
+from git_branch_keeper.services.undo_service import pick_latest_batch
 from git_branch_keeper.services.deletion_journal import DeletionJournal
 from git_branch_keeper.services.git import GitOperations
 
@@ -35,7 +36,9 @@ class TestDeletionJournal:
         assert [e["branch"] for e in deletions] == ["feature/one", "feature/two"]
         assert deletions[0]["sha"] == "a" * 40
         assert deletions[0]["remote_deleted"] is True
+        assert deletions[0]["batch_id"]
         assert deletions[1]["had_remote"] is False
+        assert deletions[1]["batch_id"]
 
     def test_entries_scoped_to_repo(self, journal_file):
         journal_a = DeletionJournal("/repo/a", journal_file=journal_file)
@@ -84,6 +87,7 @@ class TestDeleteBranchJournaling:
         assert deletions[0]["branch"] == "feature/to-merge"
         assert deletions[0]["sha"] == expected_sha
         assert deletions[0]["remote_deleted"] is False
+        assert deletions[0]["batch_id"]
 
     def test_dry_run_writes_no_journal_entry(
         self, git_repo_with_branches, mock_config, isolated_home
@@ -162,3 +166,41 @@ class TestUndo:
         assert entry is not None
         assert entry["branch"] == "feature/to-merge"
         assert pick_entry(journal.deletions(), repo, target="never-existed") is None
+
+    def test_pick_latest_batch_returns_all_missing_branches(
+        self, git_repo_with_branches, mock_config, isolated_home
+    ):
+        repo = git_repo_with_branches
+        ops = GitOperations(repo.working_dir, mock_config)
+        batch_id = ops.deletion_journal.new_batch_id()
+
+        assert ops.delete_branch("feature/to-merge", batch_id=batch_id) is True
+        assert ops.delete_branch("stale/old-branch", batch_id=batch_id) is True
+
+        entries = pick_latest_batch(ops.deletion_journal.deletions(), git.Repo(repo.working_dir))
+
+        assert {entry["branch"] for entry in entries} == {
+            "feature/to-merge",
+            "stale/old-branch",
+        }
+        assert {entry["batch_id"] for entry in entries} == {batch_id}
+
+    def test_run_undo_restores_latest_batch(
+        self, git_repo_with_branches, mock_config, isolated_home
+    ):
+        repo = git_repo_with_branches
+        ops = GitOperations(repo.working_dir, mock_config)
+        batch_id = ops.deletion_journal.new_batch_id()
+
+        assert ops.delete_branch("feature/to-merge", batch_id=batch_id) is True
+        assert ops.delete_branch("stale/old-branch", batch_id=batch_id) is True
+        assert "feature/to-merge" not in [head.name for head in repo.heads]
+        assert "stale/old-branch" not in [head.name for head in repo.heads]
+
+        assert run_undo(repo.working_dir, force=True) == 0
+
+        restored_repo = git.Repo(repo.working_dir)
+        restored_names = {head.name for head in restored_repo.heads}
+        assert "feature/to-merge" in restored_names
+        assert "stale/old-branch" in restored_names
+        restored_repo.close()

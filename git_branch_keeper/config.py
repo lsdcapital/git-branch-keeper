@@ -19,7 +19,7 @@ class Config:
 
     # Execution modes
     interactive: bool = True
-    dry_run: bool = False  # Default to cleanup mode (use --dry-run for preview)
+    dry_run: bool = False  # Only applies when a cleanup/delete action is requested
     force: bool = False
     delete_remote: bool = False  # Opt-in: also delete the remote branch (use --remote)
     verbose: bool = False
@@ -27,6 +27,7 @@ class Config:
     refresh: bool = False  # Force refresh, bypass cache
     sequential: bool = False  # Force sequential processing (disable parallelism)
     workers: Optional[int] = None  # Number of parallel workers (None = auto-detect)
+    squash_scan_limit: int = 500  # First-parent main commits to scan for squash patch-id
 
     # GitHub integration
     github_token: Optional[str] = None
@@ -45,6 +46,7 @@ class Config:
         self._validate_max_prs()
         self._validate_sort_by()
         self._validate_sort_order()
+        self._validate_squash_scan_limit()
 
     def _validate_stale_days(self):
         """Validate stale_days is positive."""
@@ -89,6 +91,13 @@ class Config:
         if self.sort_order not in allowed:
             raise ValueError(f"sort_order must be one of {allowed}, got '{self.sort_order}'")
 
+    def _validate_squash_scan_limit(self):
+        """Validate squash_scan_limit is positive."""
+        if self.squash_scan_limit <= 0:
+            raise ValueError(
+                f"squash_scan_limit must be positive, got {self.squash_scan_limit}"
+            )
+
     def to_dict(self) -> dict:
         """Convert config to dictionary for backward compatibility."""
         return {
@@ -106,6 +115,7 @@ class Config:
             "refresh": self.refresh,
             "sequential": self.sequential,
             "workers": self.workers,
+            "squash_scan_limit": self.squash_scan_limit,
             "github_token": self.github_token,
             "max_prs_to_fetch": self.max_prs_to_fetch,
             "sort_by": self.sort_by,
@@ -135,6 +145,7 @@ class Config:
             "refresh",
             "sequential",
             "workers",
+            "squash_scan_limit",
             "github_token",
             "max_prs_to_fetch",
             "sort_by",

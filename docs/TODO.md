@@ -158,40 +158,15 @@ finally:
 
 ### 🟠 4. Default Cleanup Mode (No Confirmation By Default)
 
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
+**Status**: [x] Complete
 
 **Severity**: High
 **Impact**: First-time users may accidentally delete branches without realizing
 
-**Code Location**: `git_branch_keeper/config.py:22` and `git_branch_keeper/cli.py:22-24`
+**Resolution**:
+CLI mode is now read-only by default. Cleanup requires explicit `--delete` (with deprecated `--cleanup` retained as an alias). `--dry-run` previews cleanup candidates without prompting or changing data. Legacy `--force` still implies cleanup for backwards compatibility, but remains documented as dangerous.
 
-**Problem Description**:
-The tool defaults to cleanup mode (`dry_run=False`), meaning it will delete branches by default. First-time users might expect a preview/dry-run by default:
-
-```python
-# config.py - Default is cleanup, NOT preview
-dry_run: bool = False  # Default to cleanup mode
-
-# cli.py - cleanup_enabled defaults to True
-keeper.process_branches(cleanup_enabled=not parsed_args.dry_run)
-```
-
-**Scenario**:
-1. User downloads and tries the tool: `git-branch-keeper --filter merged`
-2. Expects to see what would be deleted
-3. Instead, branches are immediately deleted (with --force skipping even confirmation)
-4. User realizes tool was more aggressive than expected
-
-**Current Safeguard**:
-Interactive confirmation (with user prompts) if not in force mode, but first-time users might not expect to be in cleanup mode.
-
-**Recommended Fix**:
-- First run detection: on first run, default to dry-run mode
-- Or: Require explicit `--cleanup` flag (conservative by default)
-- Or: Show prominent warning on first run about cleanup mode
-- Or: Implement "safe mode" for first-time users
-
-**Implementation Complexity**: Low-Medium (configuration and first-run detection)
+**Implementation Complexity**: Low-Medium (configuration and CLI semantics)
 
 ---
 

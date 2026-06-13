@@ -80,8 +80,8 @@ jobs:
         # Test help output
         uv run git-branch-keeper --help
 
-        # Test in current repo (non-interactive, dry-run)
-        uv run git-branch-keeper --no-interactive --dry-run --filter all
+        # Test in current repo (CLI dry-run)
+        uv run git-branch-keeper --cli --dry-run --filter all
 
     - name: Run pytest
       run: |

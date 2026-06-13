@@ -47,6 +47,73 @@ class TestMergeMethodDetection:
         assert status == BranchStatus.MERGED
         assert sync_status == SyncStatus.MERGED_PR.value
 
+    def test_merged_pr_head_sha_matching_local_tip_shows_merged_pr(self, git_repo, mock_config):
+        """A merged PR is authoritative when the local branch still matches the PR head."""
+        repo = git_repo
+        repo_path = Path(repo.working_dir)
+
+        repo.git.checkout("-b", "feature/pr-head-match")
+        test_file = repo_path / "pr_head_match.txt"
+        test_file.write_text("PR head match content\n")
+        repo.index.add(["pr_head_match.txt"])
+        repo.index.commit("Add PR head match feature")
+        local_tip = repo.head.commit.hexsha
+        repo.git.checkout("main")
+
+        keeper = BranchKeeper(str(repo_path), mock_config)
+        pr_data = {
+            "feature/pr-head-match": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "number": 42,
+                "head_sha": local_tip,
+            }
+        }
+
+        status, sync_status, _, notes = keeper._determine_branch_status(
+            "feature/pr-head-match", pr_data
+        )
+
+        assert status == BranchStatus.MERGED
+        assert sync_status == SyncStatus.MERGED_PR.value
+        assert notes is None
+        assert pr_data["feature/pr-head-match"]["head_matches_local"] is True
+
+    def test_merged_pr_head_sha_mismatch_does_not_force_merged_pr(self, git_repo, mock_config):
+        """A merged PR does not prove the current local branch tip is the merged PR head."""
+        repo = git_repo
+        repo_path = Path(repo.working_dir)
+
+        repo.git.checkout("-b", "feature/pr-head-mismatch")
+        test_file = repo_path / "pr_head_mismatch.txt"
+        test_file.write_text("PR head mismatch content\n")
+        repo.index.add(["pr_head_mismatch.txt"])
+        repo.index.commit("Add PR head mismatch feature")
+        local_tip = repo.head.commit.hexsha
+        repo.git.checkout("main")
+
+        keeper = BranchKeeper(str(repo_path), mock_config)
+        pr_data = {
+            "feature/pr-head-mismatch": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "number": 35,
+                "head_sha": "0" * 40,
+            }
+        }
+
+        status, sync_status, _, notes = keeper._determine_branch_status(
+            "feature/pr-head-mismatch", pr_data
+        )
+
+        assert status == BranchStatus.ACTIVE
+        assert sync_status != SyncStatus.MERGED_PR.value
+        assert "PR #35 merged but local tip differs from PR head" in notes
+        assert pr_data["feature/pr-head-mismatch"]["local_head_sha"] == local_tip
+        assert pr_data["feature/pr-head-mismatch"]["head_matches_local"] is False
+
     def test_branch_merged_via_git_shows_merged_git(self, git_repo, mock_config):
         """Test that a branch merged directly via git shows 'merged-git' status."""
         # Setup: Create a branch and merge it into main

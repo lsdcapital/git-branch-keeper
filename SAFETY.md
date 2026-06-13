@@ -15,7 +15,7 @@ Before using `git-branch-keeper` for the first time:
 - [ ] Configure `protected_branches` in your config file
 - [ ] Understand the difference between TUI and CLI modes
 - [ ] Never use `--force` unless you're absolutely certain
-- [ ] Set up GitHub token (optional, but adds PR protection for GitHub repos)
+- [ ] Set up GitHub auth (optional, but adds PR protection for GitHub repos; use a token or `gh auth login`)
 
 ## 🚦 Safety Levels by Mode
 
@@ -30,9 +30,17 @@ git-branch-keeper --filter merged
 - **Confirmations**: Yes, you choose what to delete
 - **Recommended for**: Day-to-day use, exploring branch status
 
-**2. Dry Run Mode**
+**2. Plain CLI Report**
 ```bash
-git-branch-keeper --no-interactive --filter merged --dry-run
+git-branch-keeper --cli --filter merged
+```
+- **Behavior**: Shows matching branches in plain CLI output, makes NO changes
+- **Confirmations**: N/A (read-only)
+- **Recommended for**: Scripting, quick checks, automation-safe reports
+
+**3. Dry Run Mode**
+```bash
+git-branch-keeper --cli --filter merged --dry-run
 ```
 - **Behavior**: Shows what WOULD be deleted, makes NO changes
 - **Confirmations**: N/A (read-only)
@@ -40,20 +48,20 @@ git-branch-keeper --no-interactive --filter merged --dry-run
 
 ### ⚠️ CAUTION Modes
 
-**3. CLI Mode (Non-Interactive)**
+**4. CLI Cleanup Mode**
 ```bash
-git-branch-keeper --no-interactive --filter merged
+git-branch-keeper --cli --filter merged --delete
 ```
 - **Behavior**: **DELETES branches** matching filter, with confirmation prompts
 - **Confirmations**: Yes, but requires attention
-- **Recommended for**: Scripting after testing with dry-run first
-- **Risk**: Easy to miss confirmation prompts in automated scripts
+- **Recommended for**: Manual cleanup after testing with dry-run first
+- **Risk**: Destructive if you confirm without reviewing
 
 ### 🔴 DANGEROUS Modes
 
-**4. Force Mode**
+**5. Force Mode**
 ```bash
-git-branch-keeper --no-interactive --filter merged --force
+git-branch-keeper --cli --filter merged --delete --force
 ```
 - **Behavior**: **IMMEDIATELY DELETES** branches without ANY confirmation
 - **Confirmations**: NONE
@@ -85,10 +93,10 @@ Based on the project's TODO.md, here are documented data loss risks:
 
 ### 🟠 High Risks
 
-4. **Default cleanup mode with no confirmation**
-   - **Risk**: CLI mode deletes by default (though with confirmation)
-   - **Mitigation**: Added prominent warnings in documentation
-   - **Your action**: Always use `--dry-run` on first run
+4. **Accidental cleanup request**
+   - **Risk**: Passing `--delete`, deprecated `--cleanup`, or legacy `--force` enables cleanup
+   - **Mitigation**: Plain CLI mode is read-only by default; dry-run never prompts or changes data
+   - **Your action**: Use `--cli` for reports and `--dry-run` before any cleanup
 
 5. **Force mode bypasses uncommitted changes check**
    - **Risk**: `--force` skips safety checks for speed
@@ -128,7 +136,7 @@ The tool automatically protects:
 
 1. **Protected branches**: Branches in `protected_branches` config (default: `main`, `master`)
 2. **Current branch**: The branch you're currently on
-3. **Branches with open PRs**: If GitHub token is configured (GitHub repos only)
+3. **Branches with open PRs**: If GitHub auth is available (GitHub repos only)
 4. **Active worktrees**: Branches checked out in git worktrees
 5. **Ignored patterns**: Branches matching `ignore_patterns` glob patterns
 6. **Remote branches**: Kept by default — deletion is local-only unless you pass `--remote`
@@ -142,14 +150,14 @@ The tool automatically protects:
 git-branch-keeper --filter all
 
 # Step 2: Preview what would be deleted
-git-branch-keeper --no-interactive --filter merged --dry-run
+git-branch-keeper --cli --filter merged --dry-run
 
 # Step 3: Review output carefully, then decide:
 #   Option A: Use interactive mode (safest)
 git-branch-keeper --filter merged
 
-#   Option B: Use CLI mode with confirmation
-git-branch-keeper --no-interactive --filter merged
+#   Option B: Use CLI cleanup mode with confirmation
+git-branch-keeper --cli --filter merged --delete
 
 #   Option C: Never use force mode on first run!
 ```
@@ -161,8 +169,8 @@ git-branch-keeper --no-interactive --filter merged
 git-branch-keeper
 
 # Monthly cleanup: Preview first, then clean
-git-branch-keeper --filter merged --dry-run
-git-branch-keeper --filter merged
+git-branch-keeper --cli --filter merged --dry-run
+git-branch-keeper --cli --filter merged --delete
 ```
 
 ### Automated Scripts
@@ -171,10 +179,10 @@ git-branch-keeper --filter merged
 #!/bin/bash
 # ALWAYS include dry-run in scripts for verification
 git fetch --all  # Update remote info
-git-branch-keeper --no-interactive --filter merged --dry-run
+git-branch-keeper --cli --filter merged --dry-run
 
 # Then manually review and run:
-# git-branch-keeper --no-interactive --filter merged
+# git-branch-keeper --cli --filter merged --delete
 ```
 
 **⚠️ NEVER use `--force` in automated scripts!**
@@ -203,7 +211,7 @@ Create `git-branch-keeper.json` in your project root:
 - **protected_branches**: Critical branches that should NEVER be deleted
 - **ignore_patterns**: Glob patterns for branches to skip (releases, automated PRs, etc.)
 - **stale_days**: Be generous with this value (30-90 days recommended)
-- **github_token**: Set via environment variable `GITHUB_TOKEN` (don't commit to git!)
+- **github_token**: Optional; set via `GITHUB_TOKEN`/`GH_TOKEN`, config, or use `gh auth login` (don't commit tokens to git!)
 
 ## 🚨 Emergency: Branch Deleted by Mistake
 
@@ -260,9 +268,10 @@ If the remote branch was also deleted, `undo` will offer to push it back. This w
 
 ### "GitHub token required" error
 
-- Tool now works without token (as of recent update)
+- Tool now works without GitHub auth (as of recent update)
 - If you see this error, you may be on an older version
 - GitHub integration is optional - the tool works without it
+- For PR-aware protection, set `GITHUB_TOKEN`/`GH_TOKEN`, configure `github_token`, or run `gh auth login`
 
 ### Branches marked as merged incorrectly
 

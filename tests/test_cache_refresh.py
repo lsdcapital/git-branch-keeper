@@ -139,6 +139,25 @@ class TestCacheRefreshPersistence:
             len(cache2) > 0
         ), "Cache should ALSO be saved when use_cache=False (this was the bug!)"
 
+    def test_fast_cached_analysis_can_return_provisional_rows(self, git_repo, mock_config):
+        """TUI startup can display cached rows even when refresh is still needed."""
+        repo_path = Path(git_repo.working_dir)
+        config = mock_config.copy()
+        config["refresh"] = False
+        keeper = BranchKeeper(str(repo_path), config)
+
+        keeper.cache_service.clear_cache()
+        keeper.get_branch_details(show_progress=False)
+
+        analysis = keeper.get_cached_analysis_fast(
+            finalize_partial=True, include_refresh_candidates=True
+        )
+        names = {branch.name for branch in analysis.branches}
+
+        assert "main" in names
+        assert "main" in analysis.branches_to_process
+        assert analysis.is_complete is False
+
     def test_file_status_preserved_across_cache_operations(self, git_repo, mock_config):
         """Test that file status (M/U/S) is preserved through cache save/load cycles."""
         repo = git_repo

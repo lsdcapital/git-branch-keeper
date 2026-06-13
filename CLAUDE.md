@@ -26,24 +26,27 @@ git-branch-keeper [options]
 # Interactive TUI (default, safest)
 git-branch-keeper --filter merged
 
+# Plain CLI report (read-only)
+git-branch-keeper --cli --filter merged
+
 # Preview what would be deleted (dry run)
-git-branch-keeper --no-interactive --filter merged --dry-run
+git-branch-keeper --cli --filter merged --dry-run
 
 # Delete merged branches with confirmation (CLI mode)
-git-branch-keeper --no-interactive --filter merged
+git-branch-keeper --cli --filter merged --delete
 
 # Delete with force (no confirmation - DANGEROUS!)
-git-branch-keeper --no-interactive --filter merged --force
+git-branch-keeper --cli --filter merged --delete --force
 
 # Debug mode for troubleshooting
 git-branch-keeper --debug
 ```
 
 **Important**:
-- CLI mode (`--no-interactive`) deletes branches by default (with confirmation)
+- CLI mode (`--cli` / `--no-interactive`) is read-only by default
+- Deletion requires explicit `--delete` (deprecated `--cleanup` remains an alias; legacy `--force` also implies delete)
 - Deletion is **local-only by default**; the remote branch is kept unless `--remote` is passed (`config.delete_remote`)
-- Always use `--dry-run` first to preview changes
-- The `--cleanup` flag is deprecated (cleanup is now the default behavior in CLI mode)
+- Use `--dry-run` to preview cleanup candidates without prompts or changes
 
 ## Architecture
 
@@ -91,19 +94,25 @@ checks, ordered cheapest-first. Each maps to a real merge style; see
    to the branch has a patch-identical commit already in main. Covers rebase-merges,
    cherry-picks, and single-commit squashes (work in main under different SHAs). This is
    what catches rebase-merges, which the older diff-only approach missed.
-3. **Combined-diff exact match** (`_check_squash_merge`, last resort) — branch's combined
-   diff equals a single commit on main. Covers multi-commit squash merges (N commits
-   collapsed into 1, so no per-commit patch-id match).
+3. **Combined patch-id exact match** (`_check_squash_merge`, last resort) — branch's
+   combined diff has the same stable patch-id as a first-parent commit on main since
+   the branch fork point (capped by `squash_scan_limit`, default 500). Covers
+   multi-commit squash merges (N commits collapsed into 1, so no per-commit patch-id
+   match).
 
-**Squash detection has two confidence levels.** An *exact* combined-diff match counts as
+**Squash detection has two confidence levels.** An *exact* combined patch-id match counts as
 merged/deletable. A *fuzzy* high-similarity substring match does NOT mark the branch
 merged — diff-text containment doesn't prove the work is in main (it may have been
 reverted). Instead it sets `MergeDetector._likely_squash_merged` (exposed via
 `is_likely_squash_merged()`), which surfaces a "possible squash-merge - verify before
 deleting" note. A heuristic guess must never make a branch auto-deletable.
 
-When a GitHub token is present, a merged PR (from the API) is authoritative and is used
-ahead of these git checks in `BranchStatusService`.
+When GitHub auth is available (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or
+authenticated `gh` CLI), PR metadata is fetched inside each branch processing worker
+rather than as a separate prefetch phase. Open PRs keep branches active/protected. A
+merged PR is authoritative only when the local branch tip still matches the PR head SHA;
+if the local tip differs, GBK adds a warning note and falls through to the git-native
+checks above.
 
 ### Error Handling
 - Services use exceptions for error propagation
@@ -121,9 +130,9 @@ Configuration follows a hierarchy:
 - The project uses type hints throughout for better code clarity
 - Rich library is used for all terminal output and formatting
 - GitPython is the primary interface for Git operations
-- **GitHub integration is OPTIONAL**: The tool works on any Git repo without a GitHub token
-  - Without token: Branch analysis, merge detection, and cleanup work normally
-  - With token (GitHub only): Adds PR detection and protection against deleting branches with open PRs
+- **GitHub integration is OPTIONAL**: The tool works on any Git repo without GitHub auth
+  - Without auth: Branch analysis, merge detection, and cleanup work normally
+  - With auth (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or authenticated `gh` CLI; GitHub only): Adds PR detection and protection against deleting branches with open PRs
 - Test framework: pytest (run with `make test`); CI runs the full suite on Python 3.9-3.13
 - TUI has tests too: pure marking/validation logic in `tests/test_tui_marking.py`, and
   Textual `run_test()` pilot harness tests in `tests/test_tui_app.py` (async, `asyncio_mode = "auto"`)

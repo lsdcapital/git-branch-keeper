@@ -69,8 +69,8 @@ uv run git-branch-keeper --debug
 # Run in interactive TUI mode
 uv run git-branch-keeper
 
-# Run in CLI mode
-uv run git-branch-keeper --no-interactive
+# Run in CLI mode (read-only by default)
+uv run git-branch-keeper --cli
 ```
 
 ## How to Contribute

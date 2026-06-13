@@ -11,7 +11,8 @@ class TestGitHubServiceInit:
     def test_init_without_token(self, mock_git_repo, mock_config):
         """Test initialization without GitHub token."""
         mock_config["github_token"] = None
-        service = GitHubService(mock_git_repo.working_dir, mock_config)
+        with patch("git_branch_keeper.services.git.github.get_gh_cli_token", return_value=None):
+            service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         assert service.github_token is None
 
@@ -29,6 +30,17 @@ class TestGitHubServiceInit:
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
         assert service.github_token == "env_token"
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_init_with_token_from_gh_cli(self, mock_git_repo, mock_config):
+        """Test initialization with token from authenticated GitHub CLI."""
+        mock_config["github_token"] = None
+        with patch(
+            "git_branch_keeper.services.git.github.get_gh_cli_token", return_value="gh_token"
+        ):
+            service = GitHubService(mock_git_repo.working_dir, mock_config)
+
+        assert service.github_token == "gh_token"
 
 
 class TestGitHubServiceSetup:
@@ -143,8 +155,13 @@ class TestGitHubServiceBulkOperations:
         pr2 = Mock()
         pr2.state = "closed"
         pr2.merged = True
+        pr2.number = 27
+        pr2.html_url = "https://github.com/test/repo/pull/27"
+        pr2.merge_commit_sha = "merge-sha-27"
+        pr2.merged_at = None
         pr2.head = Mock()
         pr2.head.ref = "feature/branch2"
+        pr2.head.sha = "head-sha-27"
         pr2.base = Mock()
         pr2.base.ref = "main"
 
@@ -169,6 +186,10 @@ class TestGitHubServiceBulkOperations:
         assert "feature/branch2" in result
         assert result["feature/branch2"]["count"] == 0
         assert result["feature/branch2"]["merged"] is True
+        assert result["feature/branch2"]["number"] == 27
+        assert result["feature/branch2"]["url"] == "https://github.com/test/repo/pull/27"
+        assert result["feature/branch2"]["head_sha"] == "head-sha-27"
+        assert result["feature/branch2"]["merge_commit_sha"] == "merge-sha-27"
 
         assert "feature/branch3" in result
         assert result["feature/branch3"]["count"] == 0

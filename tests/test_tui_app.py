@@ -14,7 +14,7 @@ from textual.widgets import DataTable
 
 from git_branch_keeper.config import Config
 from git_branch_keeper.core import BranchKeeper
-from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.models.branch import BranchAnalysisResult, BranchDetails, BranchStatus
 from git_branch_keeper.ui.app import BranchKeeperApp
 
 
@@ -81,6 +81,68 @@ async def test_mark_all_deletable_marks_merged_branch(make_app):
         assert "feature/b" in app.marked_branches
 
 
+async def test_refresh_binding_shows_immediate_feedback(make_app, monkeypatch):
+    app = make_app([_branch("feature/a")])
+    called = False
+
+    def fake_refresh_data():
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(app, "refresh_data", fake_refresh_data)
+
+    async with app.run_test() as pilot:
+        await pilot.press("r")
+        await pilot.pause()
+
+        table = app.query_one(DataTable)
+        assert called is True
+        assert app.is_refreshing is True
+        assert table.loading is False
+        status = app.query_one("#status-bar").render()
+        assert "Refreshing" in str(status)
+        assert "actions paused" in str(status)
+
+
+async def test_marking_is_paused_while_refreshing(make_app):
+    app = make_app([_branch("feature/a")])
+
+    async with app.run_test() as pilot:
+        app._set_refreshing(True, show_loading=False)
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert app.marked_branches == set()
+        status = app.query_one("#status-bar").render()
+        assert "marking paused" in str(status)
+
+
+async def test_apply_refresh_result_preserves_scroll_position(make_app):
+    branches = [_branch(f"feature/{index:02d}") for index in range(60)]
+    refreshed = [_branch(f"feature/{index:02d}", status=BranchStatus.STALE) for index in range(60)]
+    app = make_app(branches)
+
+    async with app.run_test(size=(120, 15)) as pilot:
+        table = app.query_one(DataTable)
+        table.focus()
+        await pilot.pause()
+
+        table.cursor_coordinate = Coordinate(25, 0)
+        table.scroll_to(y=20, animate=False, force=True, immediate=True)
+        await pilot.pause()
+        scroll_y = table.scroll_y
+
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=refreshed),
+            preserve_marks=True,
+            preserve_view=True,
+        )
+        await pilot.pause()
+
+        assert table.scroll_y == scroll_y
+        assert table.cursor_row == 25
+
+
 async def test_toggle_mark_does_not_reset_scroll_position(make_app):
     branches = [_branch(f"feature/{index:02d}") for index in range(60)]
     app = make_app(branches)
@@ -104,19 +166,36 @@ async def test_toggle_mark_does_not_reset_scroll_position(make_app):
         assert table.scroll_y == scroll_y
 
 
-async def test_undo_recent_deletion_binding_restores_branch(
+async def test_undo_recent_deletion_binding_restores_latest_batch(
     make_app, git_repo, isolated_home, monkeypatch
 ):
     repo = git_repo
-    repo.git.checkout("-b", "feature/deleted")
-    sha = repo.head.commit.hexsha
+
+    repo.git.checkout("-b", "feature/deleted-one")
+    sha_one = repo.head.commit.hexsha
     repo.git.checkout("main")
-    repo.delete_head("feature/deleted", force=True)
+    repo.git.checkout("-b", "feature/deleted-two")
+    sha_two = repo.head.commit.hexsha
+    repo.git.checkout("main")
+    repo.delete_head("feature/deleted-one", force=True)
+    repo.delete_head("feature/deleted-two", force=True)
 
     app = make_app([_branch("main", BranchStatus.ACTIVE)])
     monkeypatch.setattr(app, "refresh_data", lambda: None)
+    batch_id = app.keeper.git_service.deletion_journal.new_batch_id()
     app.keeper.git_service.deletion_journal.record_deletion(
-        "feature/deleted", sha, had_remote=False, remote_deleted=False
+        "feature/deleted-one",
+        sha_one,
+        had_remote=False,
+        remote_deleted=False,
+        batch_id=batch_id,
+    )
+    app.keeper.git_service.deletion_journal.record_deletion(
+        "feature/deleted-two",
+        sha_two,
+        had_remote=False,
+        remote_deleted=False,
+        batch_id=batch_id,
     )
 
     async with app.run_test() as pilot:
@@ -126,8 +205,8 @@ async def test_undo_recent_deletion_binding_restores_branch(
         await pilot.pause()
 
     restored_repo = git.Repo(repo.working_dir)
-    restored = restored_repo.heads["feature/deleted"]
-    assert restored.commit.hexsha == sha
+    assert restored_repo.heads["feature/deleted-one"].commit.hexsha == sha_one
+    assert restored_repo.heads["feature/deleted-two"].commit.hexsha == sha_two
     restored_repo.close()
 
 

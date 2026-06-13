@@ -1,7 +1,9 @@
 """Integration tests for BranchKeeper"""
 
-import pytest
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from git_branch_keeper.core import BranchKeeper
 
@@ -55,6 +57,26 @@ class TestBranchKeeperProcessing:
 
         # Console should have been called to display information (by DisplayService)
         assert mock_console.print.called
+
+    def test_branch_analysis_does_not_stash_user_changes(
+        self, git_repo_with_branches, mock_config, monkeypatch
+    ):
+        """Branch analysis must not mutate the user's stash or working tree."""
+        repo_path = Path(git_repo_with_branches.working_dir)
+        (repo_path / "untracked-user-work.txt").write_text("do not stash me\n")
+
+        keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("analysis should not call git stash")
+
+        monkeypatch.setattr(keeper.git_service, "stash_changes", fail_if_called)
+        monkeypatch.setattr(keeper.git_service, "restore_stashed_changes", fail_if_called)
+
+        branches = keeper.get_branch_details(show_progress=False)
+
+        assert branches
+        assert (repo_path / "untracked-user-work.txt").exists()
 
 
 class TestBranchKeeperCleanup:

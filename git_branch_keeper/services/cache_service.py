@@ -287,7 +287,9 @@ class CacheService:
             "has_remote": branch.has_remote,
             "sync_status": branch.sync_status,
             "pr_status": branch.pr_status,
+            "pr_details": branch.pr_details,
             "notes": branch.notes,
+            "merge_detection": branch.merge_detection,
             "stable": self.is_stable(branch),
             "cached_at": datetime.now().isoformat(),
         }
@@ -318,8 +320,10 @@ class CacheService:
                 has_remote=data["has_remote"],
                 sync_status=data["sync_status"],
                 pr_status=data.get("pr_status"),
+                pr_details=data.get("pr_details"),
                 notes=data.get("notes"),
                 in_worktree=False,  # Don't cache worktree status - it's dynamic
+                merge_detection=data.get("merge_detection"),
             )
         except Exception as e:
             logger.warning(f"Failed to deserialize branch {data.get('name', 'unknown')}: {e}")

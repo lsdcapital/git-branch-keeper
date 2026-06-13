@@ -7,11 +7,18 @@ from rich.console import Console
 from rich.table import Table
 
 from git_branch_keeper.services.deletion_journal import DeletionJournal
-from git_branch_keeper.services.undo_service import pick_entry, restore_entry
+from git_branch_keeper.services.undo_service import (
+    pick_entry,
+    pick_latest_batch,
+    restore_entries,
+    restore_entry,
+)
 from git_branch_keeper.utils.logging import get_logger
 
 console = Console()
 logger = get_logger(__name__)
+
+__all__ = ["run_undo", "pick_entry", "restore_entry"]
 
 
 def _print_deletion_list(deletions: List[Dict]) -> None:
@@ -19,12 +26,14 @@ def _print_deletion_list(deletions: List[Dict]) -> None:
     table.add_column("When")
     table.add_column("Branch")
     table.add_column("SHA")
+    table.add_column("Batch")
     table.add_column("Remote deleted")
     for entry in reversed(deletions[-20:]):
         table.add_row(
             entry.get("timestamp", "?"),
             entry["branch"],
             entry["sha"][:12],
+            str(entry.get("batch_id", "?"))[-12:],
             "yes" if entry.get("remote_deleted") else "no",
         )
     console.print(table)
@@ -61,24 +70,37 @@ def run_undo(
         console.print(f"[red]Could not open repository: {e}[/red]")
         return 1
 
-    entry = pick_entry(deletions, repo, target)
-    if entry is None:
-        if target:
+    if target:
+        entry = pick_entry(deletions, repo, target)
+        if entry is None:
             console.print(f"[yellow]No recorded deletion found for branch {target}.[/yellow]")
-        else:
+            console.print("[dim]Use 'git-branch-keeper undo --list' to see recent deletions.[/dim]")
+            return 1
+        entries = [entry]
+    else:
+        entries = pick_latest_batch(deletions, repo)
+        if not entries:
             console.print(
                 "[yellow]All recorded deletions already exist as local branches - "
                 "nothing to restore.[/yellow]"
             )
-        console.print("[dim]Use 'git-branch-keeper undo --list' to see recent deletions.[/dim]")
-        return 1
+            console.print("[dim]Use 'git-branch-keeper undo --list' to see recent deletions.[/dim]")
+            return 1
 
-    branch_name = entry["branch"]
-    sha = entry["sha"]
-    console.print(
-        f"Restore branch [bold]{branch_name}[/bold] at {sha[:12]} "
-        f"(deleted {entry.get('timestamp', 'unknown time')})"
-    )
+    batch_id = entries[0].get("batch_id")
+    if len(entries) == 1:
+        entry = entries[0]
+        console.print(
+            f"Restore branch [bold]{entry['branch']}[/bold] at {entry['sha'][:12]} "
+            f"(deleted {entry.get('timestamp', 'unknown time')})"
+        )
+    else:
+        console.print(
+            f"Restore [bold]{len(entries)} branches[/bold] from deletion batch "
+            f"[dim]{batch_id}[/dim]:"
+        )
+        for entry in entries:
+            console.print(f"  • {entry['branch']} at {entry['sha'][:12]}")
 
     if not force:
         response = console.input("Proceed? [y/N] ")
@@ -87,22 +109,29 @@ def run_undo(
             return 1
 
     include_remote = False
-    if entry.get("remote_deleted") and not force:
+    remote_deleted_entries = [entry for entry in entries if entry.get("remote_deleted")]
+    if remote_deleted_entries and not force:
         response = console.input(
-            f"The remote branch was also deleted. Push {branch_name} back to "
-            f"{entry.get('remote', 'origin')}? [y/N] "
+            "One or more remote branches were also deleted. Push restored remote "
+            "branches back too? [y/N] "
         )
         include_remote = response.lower() == "y"
 
-    success, error = restore_entry(repo_path, entry, journal, include_remote=include_remote)
-    if not success:
-        console.print(f"[red]{error}[/red]")
+    restored, failed = restore_entries(repo_path, entries, journal, include_remote=include_remote)
+    for branch_name in restored:
+        console.print(f"[green]✓ Restored branch {branch_name}[/green]")
+
+    if failed:
+        console.print(f"[red]Failed to restore {len(failed)} branch(es):[/red]")
+        for branch_name, error in failed:
+            console.print(f"[red]  • {branch_name}: {error}[/red]")
         return 1
 
-    console.print(f"[green]✓ Restored branch {branch_name} at {sha[:12]}[/green]")
-    if entry.get("remote_deleted") and not include_remote:
-        console.print(
-            f"[dim]To restore the remote branch: "
-            f"git push {entry.get('remote', 'origin')} {sha}:refs/heads/{branch_name}[/dim]"
-        )
+    if remote_deleted_entries and not include_remote:
+        console.print("[dim]To restore remote branches manually:[/dim]")
+        for entry in remote_deleted_entries:
+            console.print(
+                f"[dim]  git push {entry.get('remote', 'origin')} "
+                f"{entry['sha']}:refs/heads/{entry['branch']}[/dim]"
+            )
     return 0

@@ -7,15 +7,18 @@ Detection uses three principled, git-native checks, ordered cheapest-first:
 2. Patch-equivalence (`git cherry`): every commit unique to the branch has a
    patch-identical commit already in main. Covers rebase-merges, cherry-picks, and
    single-commit squashes - cases where the work lives in main under different SHAs.
-3. Combined-diff exact match (last resort): the branch's combined diff equals a
-   single commit on main. Covers multi-commit squash merges, which collapse N commits
-   into one and so have no per-commit patch-id match. A high-similarity (non-exact)
-   match is treated as advisory only (see `is_likely_squash_merged`), never as merged.
+3. Combined patch-id match (last resort): the branch's combined diff has the
+   same stable patch-id as a first-parent commit on main since the branch fork point.
+   Covers multi-commit squash merges, which collapse N commits into one and so have
+   no per-commit patch-id match. A high-similarity (non-exact) match is treated as
+   advisory only (see `is_likely_squash_merged`), never as merged.
 """
+
+import subprocess
 
 import git
 from threading import Lock
-from typing import Dict, Union, TYPE_CHECKING
+from typing import Any, Dict, Optional, Union, TYPE_CHECKING
 
 from git_branch_keeper.utils.logging import get_logger
 
@@ -48,11 +51,13 @@ class MergeDetector:
         # never treated as merged (a fuzzy guess must not trigger deletion).
         self._likely_squash_merged: set = set()
         self._squash_lock = Lock()
+        self._merge_detection_info: Dict[str, Dict[str, Any]] = {}
+        self._merge_info_lock = Lock()
         # Add counters for merge detection methods
         self.merge_detection_stats = {
             "reachable": 0,  # merge commit / fast-forward (tip reachable from main)
             "patch_equivalent": 0,  # rebase / cherry-pick / single-commit squash (git cherry)
-            "squash_diff": 0,  # multi-commit squash (combined-diff exact match)
+            "squash_diff": 0,  # multi-commit squash (combined patch-id exact match)
         }
         self._stats_lock = Lock()  # Thread safety for stats access
 
@@ -85,6 +90,67 @@ class MergeDetector:
         """Thread-safe stats increment."""
         with self._stats_lock:
             self.merge_detection_stats[method] += 1
+
+    def _default_merge_detection_info(self, method: str = "not_checked") -> Dict[str, Any]:
+        """Return a stable, JSON-friendly merge-detection info object."""
+        return {
+            "merged": False,
+            "method": method,
+            "confidence": "none",
+            "matched_commit": None,
+            "searched_commits": 0,
+            "scan_limit": None,
+            "truncated": False,
+        }
+
+    def _set_merge_detection_info(self, branch_name: str, info: Dict[str, Any]) -> None:
+        """Record structured merge-detection info for later display/JSON output."""
+        with self._merge_info_lock:
+            self._merge_detection_info[branch_name] = info
+
+    def get_merge_detection_info(self, branch_name: str) -> Dict[str, Any]:
+        """Return structured merge-detection info for a branch."""
+        with self._merge_info_lock:
+            return dict(
+                self._merge_detection_info.get(
+                    branch_name, self._default_merge_detection_info()
+                )
+            )
+
+    def _get_squash_scan_limit(self) -> int:
+        """Return the maximum number of first-parent main commits to scan for squash matches."""
+        try:
+            return max(1, int(self.config.get("squash_scan_limit", 500)))
+        except (TypeError, ValueError):
+            return 500
+
+    def _patch_id_for_diff(self, diff: str) -> Optional[str]:
+        """Return git's stable patch-id for a diff, or None if no patch-id exists."""
+        if not diff.strip():
+            return None
+
+        try:
+            result = subprocess.run(
+                ["git", "patch-id", "--stable"],
+                cwd=self.repo_path,
+                input=diff,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except Exception as e:
+            logger.debug(f"[patch-id] Error running git patch-id: {e}")
+            return None
+
+        if result.returncode != 0:
+            logger.debug(f"[patch-id] git patch-id failed: {result.stderr.strip()}")
+            return None
+
+        output = result.stdout.strip()
+        if not output:
+            return None
+        return output.split()[0]
 
     def _get_main_branch_sha(self, main_branch: str) -> str:
         """Get the current SHA of the main branch."""
@@ -133,7 +199,7 @@ class MergeDetector:
         method_names = {
             "reachable": "Reachable (merge/fast-forward)",
             "patch_equivalent": "Patch-equivalent (rebase/cherry-pick/squash)",
-            "squash_diff": "Squash (combined-diff)",
+            "squash_diff": "Squash (combined patch-id)",
         }
 
         for method, count in self.merge_detection_stats.items():
@@ -158,10 +224,17 @@ class MergeDetector:
         if found:
             return value
 
+        self._set_merge_detection_info(branch_name, self._default_merge_detection_info("none"))
+        with self._squash_lock:
+            self._likely_squash_merged.discard(branch_name)
+
         try:
             # Skip if it's a tag
             if self.is_tag(branch_name):
                 logger.debug(f"Skipping tag: {branch_name}")
+                self._set_merge_detection_info(
+                    branch_name, self._default_merge_detection_info("tag")
+                )
                 self._set_in_cache(cache_key, False)
                 return False
 
@@ -169,7 +242,7 @@ class MergeDetector:
             methods = [
                 self._check_reachable,  # merge commit / fast-forward (single is-ancestor)
                 self._check_patch_equivalent,  # rebase / cherry-pick / single squash (git cherry)
-                self._check_squash_merge,  # multi-commit squash via combined diff (last resort)
+                self._check_squash_merge,  # multi-commit squash via combined patch-id (last resort)
             ]
 
             for method in methods:
@@ -182,6 +255,9 @@ class MergeDetector:
             return False
         except Exception as e:
             logger.debug(f"Error checking if branch is merged: {e}")
+            info = self._default_merge_detection_info("error")
+            info["error"] = str(e)
+            self._set_merge_detection_info(branch_name, info)
             self._set_in_cache(cache_key, False)
             return False
 
@@ -199,6 +275,18 @@ class MergeDetector:
             main_tip = repo.refs[main_branch].commit
             if repo.is_ancestor(branch_tip, main_tip):
                 logger.debug(f"[reachable] {branch_name} tip is reachable from {main_branch}")
+                self._set_merge_detection_info(
+                    branch_name,
+                    {
+                        "merged": True,
+                        "method": "reachable",
+                        "confidence": "exact",
+                        "matched_commit": branch_tip.hexsha,
+                        "searched_commits": 0,
+                        "scan_limit": None,
+                        "truncated": False,
+                    },
+                )
                 self._increment_stat("reachable")
                 return True
         except Exception as e:
@@ -232,6 +320,18 @@ class MergeDetector:
                     f"[patch-equivalent] all {len(lines)} unique commit(s) of "
                     f"{branch_name} are applied to {main_branch}"
                 )
+                self._set_merge_detection_info(
+                    branch_name,
+                    {
+                        "merged": True,
+                        "method": "patch_equivalent",
+                        "confidence": "exact",
+                        "matched_commit": None,
+                        "searched_commits": len(lines),
+                        "scan_limit": None,
+                        "truncated": False,
+                    },
+                )
                 self._increment_stat("patch_equivalent")
                 return True
         except Exception as e:
@@ -240,78 +340,121 @@ class MergeDetector:
         return False
 
     def _check_squash_merge(self, branch_name: str, main_branch: str) -> bool:
-        """Last resort: detect a multi-commit squash merge by combined-diff comparison.
+        """Last resort: detect a multi-commit squash merge by combined patch-id.
 
         A squash merge collapses N branch commits into a single commit on main, so it
-        has no per-commit patch-id match (``git cherry`` misses it). Here the branch's
-        *combined* diff is compared against individual recent commits on main. An exact
-        match counts as merged; a high-similarity (non-exact) match is advisory only
-        (recorded in ``_likely_squash_merged``), never treated as merged.
+        has no per-commit patch-id match (``git cherry`` misses it). Compare the
+        branch's combined patch-id against first-parent commits on main since the
+        branch fork point, capped by ``squash_scan_limit`` (default: 500).
+
+        Fuzzy/high-similarity matches are advisory only, never treated as merged.
         """
-        logger.debug("[squash-diff] Checking for multi-commit squash merge...")
+        logger.debug("[squash-patch-id] Checking for multi-commit squash merge...")
+        scan_limit = self._get_squash_scan_limit()
         try:
             repo = self._get_repo()
-            # Get all commits on the branch that aren't on main
             branch_commits = list(repo.iter_commits(f"{main_branch}..{branch_name}"))
             if not branch_commits:
                 return False
 
-            # Get the combined diff of all branch commits (normalized)
-            branch_diff = repo.git.diff(
-                f"{main_branch}...{branch_name}",
-                "--no-color",
-                "--ignore-space-change",  # Normalize whitespace
-                "--ignore-blank-lines",  # Ignore blank line changes
-            )
+            merge_bases = repo.merge_base(main_branch, branch_name)
+            if not merge_bases:
+                return False
+            base_sha = merge_bases[0].hexsha
 
-            if not branch_diff or len(branch_diff) < 100:
-                # Skip if diff is empty or too small to be meaningful
+            branch_diff = repo.git.diff(
+                f"{base_sha}..{branch_name}",
+                "--no-color",
+                "--ignore-space-change",
+                "--ignore-blank-lines",
+            )
+            if not branch_diff:
                 return False
 
-            # Search recent commits in main for matching changes
-            # Only check recent commits (50 instead of 100 for performance)
-            for commit in repo.iter_commits(main_branch, max_count=50):
+            branch_patch_id = self._patch_id_for_diff(branch_diff)
+            if not branch_patch_id:
+                return False
+
+            rev_list = repo.git.rev_list(
+                "--first-parent",
+                f"--max-count={scan_limit + 1}",
+                f"{base_sha}..{main_branch}",
+            ).strip()
+            candidate_shas = [line for line in rev_list.splitlines() if line.strip()]
+            truncated = len(candidate_shas) > scan_limit
+            candidate_shas = candidate_shas[:scan_limit]
+
+            advisory_info: Optional[Dict[str, Any]] = None
+            for searched_count, commit_sha in enumerate(candidate_shas, start=1):
                 try:
                     commit_diff = repo.git.show(
-                        commit.hexsha,
+                        commit_sha,
                         "--no-color",
-                        "--format=",  # No commit message in output
+                        "--format=",
                         "--ignore-space-change",
                         "--ignore-blank-lines",
                     )
+                    commit_patch_id = self._patch_id_for_diff(commit_diff)
 
-                    # Check for exact match (not substring)
-                    # This is more reliable than substring matching
-                    if branch_diff == commit_diff:
+                    if commit_patch_id and branch_patch_id == commit_patch_id:
                         logger.debug(
-                            f"[squash-diff] Found squash merge (exact diff match) in commit {commit.hexsha[:7]}"
+                            f"[squash-patch-id] Found squash merge in commit {commit_sha[:7]}"
+                        )
+                        self._set_merge_detection_info(
+                            branch_name,
+                            {
+                                "merged": True,
+                                "method": "squash_patch_id",
+                                "confidence": "exact",
+                                "matched_commit": commit_sha,
+                                "searched_commits": searched_count,
+                                "scan_limit": scan_limit,
+                                "truncated": truncated,
+                            },
                         )
                         self._increment_stat("squash_diff")
                         return True
 
-                    # Fallback: branch diff is a high-similarity substring of the
-                    # commit diff (commit has some additional changes). This is a
-                    # GUESS, not proof - diff-text containment does not prove the
-                    # branch's work is actually in main (e.g. it may have been
-                    # reverted, or the text may coincide). Record it as an advisory
-                    # note instead of declaring the branch merged, so it is never
-                    # auto-deleted on a heuristic alone. Keep scanning in case a
-                    # later commit is an exact match.
                     if len(branch_diff) > 200 and branch_diff in commit_diff:
                         similarity = len(branch_diff) / len(commit_diff)
-                        if similarity > 0.9:  # 90% match
+                        if similarity > 0.9:
+                            advisory_info = {
+                                "merged": False,
+                                "method": "squash_similarity",
+                                "confidence": "advisory",
+                                "matched_commit": commit_sha,
+                                "searched_commits": searched_count,
+                                "scan_limit": scan_limit,
+                                "truncated": truncated,
+                                "similarity": round(similarity, 4),
+                            }
                             logger.debug(
-                                f"[squash-diff] Possible squash merge (high similarity, unconfirmed) "
-                                f"for {branch_name} in commit {commit.hexsha[:7]}"
+                                f"[squash-patch-id] Possible squash merge for {branch_name} "
+                                f"in commit {commit_sha[:7]} ({similarity:.1%} similarity)"
                             )
-                            with self._squash_lock:
-                                self._likely_squash_merged.add(branch_name)
-
                 except Exception as e:
-                    logger.debug(f"[squash-diff] Error processing commit {commit.hexsha[:7]}: {e}")
+                    logger.debug(f"[squash-patch-id] Error processing {commit_sha[:7]}: {e}")
                     continue
+
+            if advisory_info:
+                with self._squash_lock:
+                    self._likely_squash_merged.add(branch_name)
+                self._set_merge_detection_info(branch_name, advisory_info)
+            elif candidate_shas or truncated:
+                self._set_merge_detection_info(
+                    branch_name,
+                    {
+                        "merged": False,
+                        "method": "squash_patch_id",
+                        "confidence": "none",
+                        "matched_commit": None,
+                        "searched_commits": len(candidate_shas),
+                        "scan_limit": scan_limit,
+                        "truncated": truncated,
+                    },
+                )
         except git.exc.GitCommandError as e:
-            logger.debug(f"[squash-diff] Error checking squash merge: {e}")
+            logger.debug(f"[squash-patch-id] Error checking squash merge: {e}")
 
         return False
 

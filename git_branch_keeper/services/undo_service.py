@@ -30,6 +30,56 @@ def pick_entry(
     return None
 
 
+def pick_latest_batch(deletions: List[Dict], repo: git.Repo) -> List[Dict]:
+    """Pick the latest deletion batch with at least one missing local branch.
+
+    Returns entries in original deletion order so restored branch creation is
+    deterministic. Entries whose branches already exist locally are skipped.
+    """
+    existing = set(_local_branch_names(repo))
+
+    latest_batch_id = None
+    for entry in reversed(deletions):
+        if entry["branch"] in existing:
+            continue
+        latest_batch_id = entry.get("batch_id")
+        break
+
+    if latest_batch_id is None:
+        return []
+
+    return [
+        entry
+        for entry in deletions
+        if entry.get("batch_id") == latest_batch_id and entry["branch"] not in existing
+    ]
+
+
+def restore_entries(
+    repo_path: str,
+    entries: List[Dict],
+    journal: DeletionJournal,
+    include_remote: bool = False,
+) -> Tuple[List[str], List[Tuple[str, str]]]:
+    """Restore multiple deletion journal entries.
+
+    Returns:
+        Tuple of (restored_branch_names, failed_items). failed_items contains
+        tuples of (branch_name, error_message).
+    """
+    restored = []
+    failed = []
+
+    for entry in entries:
+        success, error = restore_entry(repo_path, entry, journal, include_remote=include_remote)
+        if success:
+            restored.append(entry["branch"])
+        else:
+            failed.append((entry["branch"], error or "Unknown error"))
+
+    return restored, failed
+
+
 def restore_entry(
     repo_path: str, entry: Dict, journal: DeletionJournal, include_remote: bool = False
 ) -> Tuple[bool, Optional[str]]:
@@ -72,5 +122,5 @@ def restore_entry(
             journal.record_restore(branch_name, sha)
             return False, f"Branch restored locally, but remote push failed: {e}"
 
-    journal.record_restore(branch_name, sha)
+    journal.record_restore(branch_name, sha, batch_id=entry.get("batch_id"))
     return True, None

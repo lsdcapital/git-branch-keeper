@@ -76,6 +76,8 @@ Changelog = "https://github.com/lsdcapital/git-branch-keeper/blob/main/CHANGELOG
 
 [project.scripts]
 git-branch-keeper = "git_branch_keeper.cli.main:main"
+gbk = "git_branch_keeper.cli.main:main"
+git-gbk = "git_branch_keeper.cli.main:main"
 
 [tool.hatch.version]
 source = "vcs"

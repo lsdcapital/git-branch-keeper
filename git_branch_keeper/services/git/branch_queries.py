@@ -55,6 +55,15 @@ class BranchQueries:
         """
         return git.Repo(self.repo_path)
 
+    def get_branch_tip_sha(self, branch_name: str) -> Optional[str]:
+        """Return the tip SHA for a local branch, or None if it cannot be resolved."""
+        try:
+            repo = self._get_repo()
+            return repo.refs[branch_name].commit.hexsha
+        except Exception as e:
+            logger.debug(f"Error getting branch tip SHA for {branch_name}: {e}")
+            return None
+
     def has_remote_branch(self, branch_name: str) -> bool:
         """Check if the branch has a remote tracking branch."""
         try:
@@ -158,6 +167,16 @@ class BranchQueries:
         except Exception as e:
             logger.debug(f"Error checking sync status for {branch_name}: {e}")
             return SyncStatus.LOCAL_ONLY.value  # Return local-only instead of unknown for better UX
+
+    def get_last_commit_at(self, branch_name: str) -> str:
+        """Get the full timestamp of the last commit on a branch."""
+        try:
+            repo = self._get_repo()
+            commit = repo.refs[branch_name].commit
+            return commit.committed_datetime.isoformat()
+        except Exception as e:
+            logger.debug(f"Error getting last commit timestamp for {branch_name}: {e}")
+            return "unknown"
 
     def get_last_commit_date(self, branch_name: str) -> str:
         """Get the date of the last commit on a branch."""
@@ -536,6 +555,48 @@ class BranchQueries:
         except Exception as e:
             logger.warning(f"Could not get merge details: {e}")
             return {"found": False, "message": f"Error: {e}"}
+
+    def get_comparison_to_main(self, branch_name: str, main_branch: str) -> dict:
+        """Get exact ahead/behind counts and reachability against main.
+
+        This is intentionally narrower than the full merge detector: it answers
+        graph questions that are useful to agents without implying that all GBK
+        merge styles (patch-equivalent rebases or squash merges) were detected
+        here.
+        """
+        try:
+            repo = self._get_repo()
+            ahead = sum(1 for _ in repo.iter_commits(f"{main_branch}..{branch_name}"))
+            behind = sum(1 for _ in repo.iter_commits(f"{branch_name}..{main_branch}"))
+
+            try:
+                repo.git.merge_base("--is-ancestor", branch_name, main_branch)
+                tip_reachable_from_main = True
+            except git.exc.GitCommandError as e:
+                if getattr(e, "status", None) == 1:
+                    tip_reachable_from_main = False
+                else:
+                    raise
+
+            comparison = {
+                "checked": True,
+                "ahead": ahead,
+                "behind": behind,
+                "tip_reachable_from_main": tip_reachable_from_main,
+            }
+
+            merge_base = repo.git.merge_base(branch_name, main_branch).strip()
+            if merge_base:
+                comparison["merge_base"] = merge_base
+
+            return comparison
+        except Exception as e:
+            logger.warning(f"Could not compare {branch_name} to {main_branch}: {e}")
+            return {
+                "checked": False,
+                "reason": "comparison_failed",
+                "message": str(e),
+            }
 
     def get_divergence_info(self, branch_name: str, main_branch: str) -> dict:
         """Get ahead/behind information for a branch vs main.

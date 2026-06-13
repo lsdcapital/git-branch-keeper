@@ -8,16 +8,18 @@ def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Git branch management tool for any Git repository (GitHub, GitLab, Bitbucket, or local)",
-        epilog="GitHub Integration (OPTIONAL): Set GITHUB_TOKEN to enable PR detection and protection. "
+        epilog="GitHub Integration (OPTIONAL): Set GITHUB_TOKEN/GH_TOKEN, configure github_token, "
+        "or run `gh auth login` to enable PR detection and protection. "
         "Get token at https://github.com/settings/tokens (scopes: repo or public_repo). "
-        "Tool works without token for basic branch management. "
-        "SAFETY: Use --dry-run first to preview changes!",
+        "Tool works without GitHub auth for basic branch management. "
+        "SAFETY: CLI mode is read-only unless --delete/--cleanup/--force is passed. "
+        "Use --dry-run to preview cleanup candidates.",
     )
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["undo"],
-        help="Optional subcommand: 'undo' restores recently deleted branches from the journal",
+        choices=["undo", "schema"],
+        help="Optional subcommand: 'undo' restores recently deleted branches; 'schema' prints machine-readable schemas",
     )
     parser.add_argument(
         "target",
@@ -33,19 +35,35 @@ def parse_args():
     parser.add_argument("-v", "--verbose", action="store_true", help="Show verbose output")
     parser.add_argument("--version", action="version", version=f"git-branch-keeper {__version__}")
     parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format. Use json for machine-readable, read-only scan results.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Shortcut for --output json (machine-readable, read-only scan results)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="[RECOMMENDED] Preview mode - show what would be deleted without making changes",
+        help="Preview cleanup candidates without making changes",
+    )
+    parser.add_argument(
+        "--delete",
+        action="store_true",
+        help="Delete/cleanup eligible branches in CLI mode (asks for confirmation unless --force is used)",
     )
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="(Deprecated: cleanup is now default in CLI mode) Ignored - kept for backwards compatibility",
+        help="Deprecated alias for --delete",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="[DANGEROUS] Skip all confirmations - use with extreme caution!",
+        help="[DANGEROUS] In CLI mode, delete without confirmation (legacy: implies --delete)",
     )
     parser.add_argument(
         "--remote",
@@ -57,9 +75,14 @@ def parse_args():
         "--interactive", action="store_true", help="Launch interactive TUI mode (default for TTY)"
     )
     parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Force plain CLI mode (read-only unless --delete, --cleanup, --force, or --dry-run is used)",
+    )
+    parser.add_argument(
         "--no-interactive",
         action="store_true",
-        help="Force CLI mode (DELETES branches with confirmation - use --dry-run first!)",
+        help="Alias for --cli",
     )
     parser.add_argument("--stale-days", type=int, default=30, help="Days until branch is stale")
     parser.add_argument(

@@ -53,10 +53,14 @@ class BranchStatusService:
             logger.debug(f"Branch {branch_name} is protected, marking as active")
             return BranchStatus.ACTIVE
 
-        # Check PR data if available (only use this during bulk processing)
+        # Check PR data if available. BranchKeeper fetches this as part of each
+        # branch processing work item when GitHub integration is enabled.
         if pr_data and branch_name in pr_data:
             pr_info = pr_data[branch_name]
-            if pr_info.get("merged", False):
+            if (
+                pr_info.get("merged", False)
+                and pr_info.get("head_matches_local", True) is not False
+            ):
                 logger.debug(f"Branch {branch_name} is merged (PR was merged)")
                 return BranchStatus.MERGED
             if pr_info.get("closed", False):

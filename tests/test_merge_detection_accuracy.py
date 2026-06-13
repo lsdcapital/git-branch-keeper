@@ -79,7 +79,28 @@ class TestMergeStyles:
         r.git.commit("-m", "squashed (#2)")
         md = _detector(path)
         assert md.is_branch_merged("feature/x", "main") is True
-        # N->1 squash has no per-commit patch match -> only combined-diff catches it.
+        # N->1 squash has no per-commit patch match -> combined patch-id catches it.
+        assert md.merge_detection_stats["squash_diff"] == 1
+
+    def test_squash_multi_commit_beyond_legacy_recent_window(self, repo):
+        """Squash detection scans from merge-base, not just the last 50 commits."""
+        r, path = repo
+        r.git.checkout("-b", "feature/x")
+        _commit(r, path, "f1.txt", "a\n" * 15, "a")
+        _commit(r, path, "f2.txt", "b\n" * 15, "b")
+        r.git.checkout("main")
+        r.git.merge("feature/x", "--squash")
+        r.git.commit("-m", "squashed (#2)")
+
+        for i in range(60):
+            _commit(r, path, f"main-{i}.txt", f"main {i}\n", f"main advances {i}")
+
+        md = _detector(path)
+        assert md.is_branch_merged("feature/x", "main") is True
+        info = md.get_merge_detection_info("feature/x")
+        assert info["method"] == "squash_patch_id"
+        assert info["confidence"] == "exact"
+        assert info["searched_commits"] > 50
         assert md.merge_detection_stats["squash_diff"] == 1
 
     def test_rebase_merge_multi_commit(self, repo):

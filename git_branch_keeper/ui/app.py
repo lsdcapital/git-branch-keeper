@@ -13,7 +13,7 @@ from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Footer, Static
 from rich.text import Text
 
-from git_branch_keeper.services.undo_service import pick_entry, restore_entry
+from git_branch_keeper.services.undo_service import pick_latest_batch, restore_entries
 from git_branch_keeper.constants import (
     TUI_COLORS,
     SYMBOL_MARKED,
@@ -52,6 +52,20 @@ class BranchKeeperApp(App):
     TITLE = "Git Branch Keeper"
     SUB_TITLE = ""  # Will be set dynamically to repo name
 
+    STATUS_MESSAGE_TIMEOUT = 4.0
+    STATUS_MESSAGE_PREFIXES = {
+        "information": "ℹ",
+        "success": "✓",
+        "warning": "⚠",
+        "error": "✖",
+    }
+    STATUS_MESSAGE_STYLES = {
+        "information": "cyan",
+        "success": "green",
+        "warning": "yellow",
+        "error": "bold red",
+    }
+
     CSS = """
     Screen {
         background: $surface;
@@ -80,9 +94,6 @@ class BranchKeeperApp(App):
         text-style: bold;
     }
 
-    ToastRack {
-        offset: 0 -3;
-    }
     """
 
     BINDINGS = [
@@ -113,6 +124,10 @@ class BranchKeeperApp(App):
         self.sort_column = "age"
         self.sort_reverse = False  # Newest first by default
         self.cleanup_mode = cleanup_mode
+        self.is_refreshing = False
+        self.status_message: Optional[str] = None
+        self.status_message_severity = "information"
+        self._status_message_timer = None
 
         # Set subtitle to show repository name (version displays on right via clock)
         repo_path = self.keeper.repo.working_dir
@@ -142,9 +157,14 @@ class BranchKeeperApp(App):
             self.force_marked_branches.discard(branch.name)
 
     def _apply_analysis_result(
-        self, analysis: BranchAnalysisResult, preserve_marks: bool = False
+        self,
+        analysis: BranchAnalysisResult,
+        preserve_marks: bool = False,
+        preserve_view: bool = False,
     ) -> None:
         """Apply shared branch analysis output to the TUI widgets."""
+        table_view = self._capture_table_view() if preserve_view else None
+
         self.analysis = analysis
         self.branches = analysis.branches
 
@@ -161,7 +181,106 @@ class BranchKeeperApp(App):
         if not preserve_marks:
             self._auto_mark_deletable(analysis.deletable_branches)
         self._populate_table()
+        if table_view is not None:
+            self._restore_table_view(table_view)
         self._update_status()
+
+    def _capture_table_view(self):
+        """Capture enough table state to avoid visible jumps after refresh."""
+        table = self.query_one(DataTable)
+        cursor_row = table.cursor_row
+        current_row_key = None
+
+        if cursor_row is not None and cursor_row < len(self.branches):
+            current_row_key = self._row_key_for_branch(self.branches[cursor_row])
+
+        return current_row_key, cursor_row, table.scroll_x, table.scroll_y
+
+    def _restore_table_view(self, table_view) -> None:
+        """Restore cursor and scroll position after rebuilding table rows."""
+        current_row_key, fallback_row, scroll_x, scroll_y = table_view
+        table = self.query_one(DataTable)
+
+        cursor_row = None
+        if current_row_key is not None:
+            for index, branch in enumerate(self.branches):
+                if self._row_key_for_branch(branch) == current_row_key:
+                    cursor_row = index
+                    break
+
+        if cursor_row is None:
+            cursor_row = fallback_row
+
+        if cursor_row is not None and table.row_count:
+            table.cursor_coordinate = Coordinate(min(cursor_row, table.row_count - 1), 0)
+
+        table.scroll_to(
+            x=scroll_x,
+            y=scroll_y,
+            animate=False,
+            force=True,
+            immediate=True,
+        )
+
+    def _cancel_status_message_timer(self) -> None:
+        """Cancel any pending status-message clear timer."""
+        if self._status_message_timer is not None:
+            self._status_message_timer.stop()
+            self._status_message_timer = None
+
+    def _clear_status_message(self, expected_message: Optional[str] = None) -> None:
+        """Clear the transient status-bar message."""
+        if expected_message is not None and self.status_message != expected_message:
+            return
+
+        self._cancel_status_message_timer()
+        self.status_message = None
+        self.status_message_severity = "information"
+        self._update_status()
+
+    def _set_status_message(
+        self,
+        message: Optional[str],
+        severity: str = "information",
+        timeout: Optional[float] = STATUS_MESSAGE_TIMEOUT,
+    ) -> None:
+        """Show short feedback in the status bar instead of a toast."""
+        self._cancel_status_message_timer()
+        self.status_message = message
+        self.status_message_severity = severity
+        self._update_status()
+
+        if message and timeout:
+            self._status_message_timer = self.set_timer(
+                timeout,
+                lambda: self._clear_status_message(message),
+            )
+
+    def _should_show_table_loading(self) -> bool:
+        """Use table loading only when there are no rows to keep visible."""
+        table = self.query_one(DataTable)
+        return table.row_count == 0
+
+    def _set_refreshing(self, refreshing: bool, show_loading: Optional[bool] = None) -> None:
+        """Update visible refresh state for the TUI."""
+        self.is_refreshing = refreshing
+        if refreshing:
+            self._set_status_message(None)
+        table = self.query_one(DataTable)
+        if show_loading is not None:
+            table.loading = show_loading
+        self._update_status()
+
+    def _block_if_refreshing(self, action_name: str) -> bool:
+        """Prevent branch-changing actions while refresh is reconciling data."""
+        if not self.is_refreshing:
+            return False
+
+        self._set_status_message(
+            f"Refresh in progress — {action_name} paused; navigation is OK",
+            severity="warning",
+        )
+        return True
 
     def on_mount(self) -> None:
         """Set up the table when app starts."""
@@ -179,19 +298,23 @@ class BranchKeeperApp(App):
             else:
                 table.add_column(col.label, width=None, key=col.key)
 
-        # If no branches loaded yet, use the shared analysis path.
+        # If no branches loaded yet, use the shared analysis path. Show any
+        # cached rows immediately, then refresh stale/unstable rows in the
+        # background. Since the main branch is intentionally refreshed on every
+        # run, a cache can be useful even when the snapshot is not complete.
         if not self.branches:
-            cached_analysis = self.keeper.get_cached_analysis_fast()
+            cached_analysis = self.keeper.get_cached_analysis_fast(
+                finalize_partial=True, include_refresh_candidates=True
+            )
 
-            if cached_analysis.branches and cached_analysis.is_complete:
-                # Stable cached data can be shown immediately; it was finalized by
-                # the same core data path used by full analysis.
+            if cached_analysis.branches:
                 self._apply_analysis_result(cached_analysis)
-            else:
-                # No complete cached snapshot, so process everything in the
-                # background with the shared analyzer.
-                table.loading = True
+
+            if not cached_analysis.is_complete:
+                self._set_refreshing(True, show_loading=not bool(cached_analysis.branches))
                 self.load_initial_data()  # @work decorator handles Worker creation
+            elif not cached_analysis.branches:
+                self._set_status_message("No branches found", severity="warning")
         else:
             # Initial population for tests/callers that inject rows directly.
             self.branches = self.keeper.sort_branches(self.branches)
@@ -410,7 +533,7 @@ class BranchKeeperApp(App):
         sort_order = "desc" if self.sort_reverse else "asc"
         force_marked = len(self.force_marked_branches)
 
-        status.update(
+        status_text = Text(
             f"Total: {total} | "
             f"Protected: {protected} | "
             f"Deletable: {deletable} | "
@@ -419,8 +542,24 @@ class BranchKeeperApp(App):
             f"Sort: {self.sort_column} ({sort_order})"
         )
 
+        if self.is_refreshing:
+            status_text.append(" | ")
+            status_text.append("⟳ Refreshing… navigation OK; actions paused", style="cyan")
+
+        if self.status_message:
+            severity = self.status_message_severity
+            prefix = self.STATUS_MESSAGE_PREFIXES.get(severity, "ℹ")
+            style = self.STATUS_MESSAGE_STYLES.get(severity, "cyan")
+            status_text.append(" | ")
+            status_text.append(f"{prefix} {self.status_message}", style=style)
+
+        status.update(status_text)
+
     def action_toggle_mark(self) -> None:
         """Toggle mark on current row."""
+        if self._block_if_refreshing("marking"):
+            return
+
         table = self.query_one(DataTable)
 
         if table.cursor_row is None:
@@ -447,7 +586,7 @@ class BranchKeeperApp(App):
 
             if not success:
                 if error:
-                    self.notify(error, severity="warning")
+                    self._set_status_message(error, severity="warning")
                 return
 
             # Remove from force-marked if it was there
@@ -466,6 +605,9 @@ class BranchKeeperApp(App):
 
     def action_mark_all_deletable(self) -> None:
         """Mark all deletable branches (normal mode only)."""
+        if self._block_if_refreshing("mark all"):
+            return
+
         # Use shared method from keeper (normal mode)
         deletable_branches = self.keeper.get_deletable_branches(self.branches, force_mode=False)
 
@@ -475,21 +617,26 @@ class BranchKeeperApp(App):
             self.force_marked_branches.discard(branch.name)
 
         self._refresh_branch_rows()
-        self._update_status()
-        self.notify(f"Marked {len(self.marked_branches)} deletable branches")
+        self._set_status_message(f"Marked {len(self.marked_branches)} deletable branches")
 
     def action_clear_marks(self) -> None:
         """Clear all marks."""
+        if self._block_if_refreshing("clearing marks"):
+            return
+
         count = len(self.marked_branches) + len(self.force_marked_branches)
         self.marked_branches.clear()
         self.force_marked_branches.clear()
         self._refresh_branch_rows()
         self._update_status()
         if count > 0:
-            self.notify(f"Cleared {count} marks")
+            self._set_status_message(f"Cleared {count} marks")
 
     def action_force_mark(self) -> None:
         """Force-mark current branch (ignores uncommitted changes)."""
+        if self._block_if_refreshing("force-marking"):
+            return
+
         table = self.query_one(DataTable)
         if table.cursor_row is None:
             return
@@ -502,7 +649,10 @@ class BranchKeeperApp(App):
 
         # Check basic force-mark eligibility (status)
         if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
-            self.notify("Can only force-mark stale/merged branches", severity="warning")
+            self._set_status_message(
+                "Can only force-mark stale/merged branches",
+                severity="warning",
+            )
             return
 
         # Toggle force-mark (with hierarchy - marks parent + worktrees together)
@@ -517,7 +667,7 @@ class BranchKeeperApp(App):
 
             if not success:
                 if error:
-                    self.notify(error, severity="warning")
+                    self._set_status_message(error, severity="warning")
                 return
 
             # Remove from normal marks if it was there
@@ -534,6 +684,9 @@ class BranchKeeperApp(App):
 
     def action_delete_marked(self) -> None:
         """Delete all marked branches."""
+        if self._block_if_refreshing("deletion"):
+            return
+
         total_marked = len(self.marked_branches) + len(self.force_marked_branches)
         logger.debug(
             f"[DELETE_MARKED] Called: marked={self.marked_branches}, "
@@ -541,7 +694,7 @@ class BranchKeeperApp(App):
         )
 
         if total_marked == 0:
-            self.notify("No branches marked for deletion", severity="warning")
+            self._set_status_message("No branches marked for deletion", severity="warning")
             return
 
         # Look up full BranchDetails objects for marked branches (both normal and force)
@@ -570,7 +723,7 @@ class BranchKeeperApp(App):
     def _handle_delete_confirmation(self, confirmed: Optional[bool]) -> None:
         """Handle delete confirmation result."""
         if not confirmed:
-            self.notify("Deletion cancelled")
+            self._set_status_message("Deletion cancelled")
             return
 
         # Separate into normal and force-marked branches
@@ -607,13 +760,17 @@ class BranchKeeperApp(App):
         all_failed_branches = []
         all_removed_worktrees = []
         all_failed_worktrees = []
+        deletion_batch_id = self.keeper.git_service.deletion_journal.new_batch_id()
 
         # Use shared deletion logic from keeper
         try:
             # Delete force-marked items with force mode
             if force_branches or force_worktrees:
                 deleted, failed_b, removed, failed_w = self.keeper.perform_deletion(
-                    force_branches, force_worktrees, force_mode=True
+                    force_branches,
+                    force_worktrees,
+                    force_mode=True,
+                    batch_id=deletion_batch_id,
                 )
                 all_deleted_branches.extend(deleted)
                 all_failed_branches.extend(failed_b)
@@ -623,7 +780,10 @@ class BranchKeeperApp(App):
             # Delete normal-marked items without force
             if normal_branches or normal_worktrees:
                 deleted, failed_b, removed, failed_w = self.keeper.perform_deletion(
-                    normal_branches, normal_worktrees, force_mode=False
+                    normal_branches,
+                    normal_worktrees,
+                    force_mode=False,
+                    batch_id=deletion_batch_id,
                 )
                 all_deleted_branches.extend(deleted)
                 all_failed_branches.extend(failed_b)
@@ -654,9 +814,12 @@ class BranchKeeperApp(App):
 
             if total_success > 0:
                 undo_hint = " (press u to undo)" if all_deleted_branches else ""
-                self.notify(
-                    f"✓ Removed {len(all_removed_worktrees)} worktrees and deleted {len(all_deleted_branches)} branches{undo_hint}",
-                    severity="information",
+                self._set_status_message(
+                    (
+                        f"Removed {len(all_removed_worktrees)} worktrees and "
+                        f"deleted {len(all_deleted_branches)} branches{undo_hint}"
+                    ),
+                    severity="success",
                 )
 
             if total_failed > 0:
@@ -682,12 +845,18 @@ class BranchKeeperApp(App):
 
     def action_undo_recent_deletion(self) -> None:
         """Restore the most recent deleted branch recorded in the journal."""
+        if self._block_if_refreshing("undo"):
+            return
+
         repo_path = self._repo_path()
         journal = self.keeper.git_service.deletion_journal
         deletions = journal.deletions()
 
         if not deletions:
-            self.notify("No recorded deletions for this repository", severity="warning")
+            self._set_status_message(
+                "No recorded deletions for this repository",
+                severity="warning",
+            )
             return
 
         try:
@@ -696,55 +865,74 @@ class BranchKeeperApp(App):
             self.push_screen(InfoScreen(f"Could not open repository:\n\n{e}"))
             return
 
-        entry = pick_entry(deletions, repo)
-        if entry is None:
-            self.notify("No deleted branches to restore", severity="warning")
+        entries = pick_latest_batch(deletions, repo)
+        if not entries:
+            self._set_status_message("No deleted branches to restore", severity="warning")
             return
 
-        branch_name = entry["branch"]
-        sha = entry["sha"]
-        message = (
-            f"Restore branch {branch_name} at {sha[:12]}?\n"
-            f"Deleted: {entry.get('timestamp', 'unknown time')}\n\n"
-            "This restores the local branch only."
-        )
-        if entry.get("remote_deleted"):
-            message += (
-                f"\n\nRemote branch was also deleted from {entry.get('remote', 'origin')}; "
-                "the TUI will not push it back."
+        if len(entries) == 1:
+            entry = entries[0]
+            message = (
+                f"Restore branch {entry['branch']} at {entry['sha'][:12]}?\n"
+                f"Deleted: {entry.get('timestamp', 'unknown time')}\n\n"
+                "This restores the local branch only."
             )
+        else:
+            branch_list = "\n".join(
+                f"  • {entry['branch']} at {entry['sha'][:12]}" for entry in entries
+            )
+            message = (
+                f"Restore {len(entries)} branches from the last deletion batch?\n\n"
+                f"{branch_list}\n\n"
+                "This restores local branches only."
+            )
+
+        remote_deleted_entries = [entry for entry in entries if entry.get("remote_deleted")]
+        if remote_deleted_entries:
+            message += "\n\nOne or more remote branches were also deleted; the TUI will not push them back."
 
         self.push_screen(
             ConfirmScreen(message),
-            lambda confirmed: self._handle_undo_confirmation(confirmed, entry),
+            lambda confirmed: self._handle_undo_confirmation(confirmed, entries),
         )
 
-    def _handle_undo_confirmation(self, confirmed: Optional[bool], entry: dict) -> None:
-        """Handle confirmation for restoring a deleted branch."""
+    def _handle_undo_confirmation(self, confirmed: Optional[bool], entries: list[dict]) -> None:
+        """Handle confirmation for restoring a deleted branch batch."""
         if not confirmed:
-            self.notify("Restore cancelled")
+            self._set_status_message("Restore cancelled")
             return
 
-        branch_name = entry["branch"]
-        sha = entry["sha"]
         journal = self.keeper.git_service.deletion_journal
+        restored, failed = restore_entries(
+            self._repo_path(), entries, journal, include_remote=False
+        )
 
-        success, error = restore_entry(self._repo_path(), entry, journal, include_remote=False)
-        if not success:
-            self.push_screen(InfoScreen(error or "Could not restore branch"))
-            return
+        if failed:
+            failed_list = "\n".join(f"  • {branch}: {error}" for branch, error in failed)
+            self.push_screen(InfoScreen(f"Could not restore all branches:\n\n{failed_list}"))
 
-        self.notify(f"✓ Restored branch {branch_name} at {sha[:12]}", severity="information")
-        if entry.get("remote_deleted"):
-            remote = entry.get("remote", "origin")
-            command = f"git push {remote} {sha}:refs/heads/{branch_name}"
-            self.notify(
-                f"Remote was deleted too; restore with: {command}",
-                severity="warning",
+        if restored:
+            self._set_status_message(
+                f"Restored {len(restored)} branch{'es' if len(restored) != 1 else ''}",
+                severity="success",
             )
 
-        # Re-analyze so the restored branch appears in the table with fresh status/details.
-        self.refresh_data()
+        remote_deleted_entries = [entry for entry in entries if entry.get("remote_deleted")]
+        if remote_deleted_entries:
+            commands = "\n".join(
+                f"git push {entry.get('remote', 'origin')} {entry['sha']}:refs/heads/{entry['branch']}"
+                for entry in remote_deleted_entries
+            )
+            self.push_screen(
+                InfoScreen(
+                    "Remote branches were deleted too. Restore them manually with:\n\n"
+                    f"{commands}"
+                )
+            )
+
+        if restored:
+            # Re-analyze so restored branches appear in the table with fresh status/details.
+            self.refresh_data()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle keyboard selection in DataTable (Enter deletes marked branches).
@@ -786,6 +974,9 @@ class BranchKeeperApp(App):
 
     def action_cycle_sort(self) -> None:
         """Cycle through sort options."""
+        if self._block_if_refreshing("sorting"):
+            return
+
         sort_options = ["age", "branch", "status"]
         try:
             current_idx = sort_options.index(self.sort_column)
@@ -814,32 +1005,39 @@ class BranchKeeperApp(App):
             "branch": "Branch Name",
             "status": "Status",
         }[self.sort_column]
-        self.notify(f"Sorted by {sort_name} ({'desc' if self.sort_reverse else 'asc'})")
+        self._set_status_message(
+            f"Sorted by {sort_name} ({'desc' if self.sort_reverse else 'asc'})"
+        )
 
     @work(exclusive=True, thread=False)
     async def load_initial_data(self) -> None:
         """Load branch data on initial TUI startup (runs in background).
 
-        Uses DataTable's built-in loading indicator, no modal is shown.
+        Keeps refresh feedback in the status bar; table loading is used only when empty.
         """
         try:
+            self._set_refreshing(True, show_loading=self._should_show_table_loading())
+
             # Use the shared analyzer with progress disabled for TUI.
             # keeper methods are sync, so run them off the event loop.
             analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
 
             if analysis.branches:
-                self._apply_analysis_result(analysis)
+                preserve_existing_rows = bool(self.branches)
+                self._apply_analysis_result(
+                    analysis,
+                    preserve_marks=preserve_existing_rows,
+                    preserve_view=preserve_existing_rows,
+                )
             else:
-                self.notify("No branches found", severity="warning")
+                self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
             logger.error(f"Error loading branches: {e}", exc_info=True)
             error_msg = f"Error loading branches:\n\n{str(e)}\n\nCheck the logs for more details."
             self.push_screen(InfoScreen(error_msg))
         finally:
-            # Clear table loading state
-            table = self.query_one(DataTable)
-            table.loading = False
+            self._set_refreshing(False, show_loading=False)
 
     @work(exclusive=True, thread=False)
     async def load_additional_data(
@@ -848,14 +1046,13 @@ class BranchKeeperApp(App):
         """Load branches with cached data as starting point, refresh unstable branches.
 
         This is called when we have cached data but some branches need refreshing.
-        Shows loading indicator and displays complete data once processing is done.
+        Keeps existing rows visible while the status bar reports refresh progress.
 
         Args:
             cached_branches: Previously cached branch details (can be None)
             branches_to_process: List of branch names that need processing
         """
-        table = self.query_one(DataTable)
-        table.loading = True
+        self._set_refreshing(True, show_loading=self._should_show_table_loading())
 
         try:
             logger.debug(
@@ -865,31 +1062,39 @@ class BranchKeeperApp(App):
             analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
 
             if analysis.branches:
-                self._apply_analysis_result(analysis)
+                preserve_existing_rows = bool(self.branches)
+                self._apply_analysis_result(
+                    analysis,
+                    preserve_marks=preserve_existing_rows,
+                    preserve_view=preserve_existing_rows,
+                )
             else:
-                self.notify("No branches found", severity="warning")
+                self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
             logger.error(f"Error loading additional branches: {e}", exc_info=True)
             error_msg = f"Error loading additional branches:\n\n{str(e)}\n\nCheck the logs for more details."
             self.push_screen(InfoScreen(error_msg))
         finally:
-            table.loading = False
+            self._set_refreshing(False, show_loading=False)
 
     def action_refresh(self) -> None:
         """Trigger refresh of branch data."""
+        if self.is_refreshing:
+            self._set_status_message("Refresh already in progress")
+            return
+
+        self._set_refreshing(True, show_loading=self._should_show_table_loading())
         self.refresh_data()  # @work decorator handles Worker creation
 
     @work(exclusive=True, thread=False)
     async def refresh_data(self) -> None:
         """Refresh branch data by re-analyzing with cache bypass (runs in background).
 
-        Uses DataTable's built-in loading indicator, no modal is shown.
+        Keeps existing rows visible while the status bar reports refresh progress.
         """
-        table = self.query_one(DataTable)
-
-        # Show table loading indicator
-        table.loading = True
+        # Show status-bar refresh state. Keep existing rows visible while refreshing.
+        self._set_refreshing(True, show_loading=self._should_show_table_loading())
 
         # Store original refresh flag value using safe .get() method
         original_refresh = self.keeper.config.get("refresh", False)
@@ -902,17 +1107,15 @@ class BranchKeeperApp(App):
             analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
 
             if analysis.branches:
-                saved_row = table.cursor_row
+                self._apply_analysis_result(
+                    analysis,
+                    preserve_marks=True,
+                    preserve_view=True,
+                )
 
-                self._apply_analysis_result(analysis, preserve_marks=True)
-
-                # Restore cursor position if possible
-                if saved_row is not None and saved_row < len(self.branches):
-                    table.cursor_coordinate = Coordinate(saved_row, 0)
-
-                self.notify("✓ Branch data refreshed", severity="information")
+                self._set_status_message("Branch data refreshed", severity="success")
             else:
-                self.notify("No branches found", severity="warning")
+                self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
             logger.error(f"Error refreshing: {e}", exc_info=True)
@@ -923,8 +1126,7 @@ class BranchKeeperApp(App):
         finally:
             # Restore original refresh flag
             self.keeper.config.refresh = original_refresh
-            # Clear table loading state
-            table.loading = False
+            self._set_refreshing(False, show_loading=False)
 
     async def action_quit(self) -> None:
         """Override quit action to clean up resources before exiting."""

@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from uuid import uuid4
 
 from git_branch_keeper.utils.logging import get_logger
 
@@ -37,6 +38,12 @@ class DeletionJournal:
         self.repo_path = str(Path(repo_path).resolve())
         self.journal_file = journal_file or (Path.home() / ".git-branch-keeper" / "deletions.jsonl")
 
+    @staticmethod
+    def new_batch_id() -> str:
+        """Return a new id shared by all deletions from one cleanup operation."""
+        timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
+        return f"{timestamp}-{uuid4().hex[:8]}"
+
     def record_deletion(
         self,
         branch_name: str,
@@ -44,6 +51,7 @@ class DeletionJournal:
         had_remote: bool,
         remote_deleted: bool,
         remote_name: str = "origin",
+        batch_id: Optional[str] = None,
     ) -> None:
         """Record a branch deletion. Never raises - journaling must not block deletion."""
         self._append(
@@ -51,6 +59,7 @@ class DeletionJournal:
                 "action": "deleted",
                 "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "repo": self.repo_path,
+                "batch_id": batch_id or self.new_batch_id(),
                 "branch": branch_name,
                 "sha": sha,
                 "had_remote": had_remote,
@@ -59,13 +68,14 @@ class DeletionJournal:
             }
         )
 
-    def record_restore(self, branch_name: str, sha: str) -> None:
+    def record_restore(self, branch_name: str, sha: str, batch_id: Optional[str] = None) -> None:
         """Record that a branch was restored from the journal."""
         self._append(
             {
                 "action": "restored",
                 "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "repo": self.repo_path,
+                "batch_id": batch_id,
                 "branch": branch_name,
                 "sha": sha,
             }

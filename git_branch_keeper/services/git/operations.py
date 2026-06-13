@@ -92,9 +92,17 @@ class GitOperations:
         """
         return self.merge_detector.is_likely_squash_merged(branch_name)
 
+    def get_merge_detection_info(self, branch_name: str) -> dict:
+        """Get structured merge-detection details for display/JSON output."""
+        return self.merge_detector.get_merge_detection_info(branch_name)
+
     # ============================================================================
     # Delegation methods to BranchQueries
     # ============================================================================
+
+    def get_branch_tip_sha(self, branch_name: str) -> Optional[str]:
+        """Return local branch tip SHA. Delegates to BranchQueries."""
+        return self.branch_queries.get_branch_tip_sha(branch_name)
 
     def has_remote_branch(self, branch_name: str) -> bool:
         """Check if branch has a remote. Delegates to BranchQueries."""
@@ -107,6 +115,10 @@ class GitOperations:
     def get_branch_sync_status(self, branch_name: str, main_branch: str) -> str:
         """Get branch sync status. Delegates to BranchQueries."""
         return self.branch_queries.get_branch_sync_status(branch_name, main_branch)
+
+    def get_last_commit_at(self, branch_name: str) -> str:
+        """Get last commit timestamp. Delegates to BranchQueries."""
+        return self.branch_queries.get_last_commit_at(branch_name)
 
     def get_last_commit_date(self, branch_name: str) -> str:
         """Get last commit date. Delegates to BranchQueries."""
@@ -138,6 +150,10 @@ class GitOperations:
     def get_merge_details(self, branch_name: str, main_branch: str) -> dict:
         """Get merge details. Delegates to BranchQueries."""
         return self.branch_queries.get_merge_details(branch_name, main_branch)
+
+    def get_comparison_to_main(self, branch_name: str, main_branch: str) -> dict:
+        """Get exact comparison info vs main. Delegates to BranchQueries."""
+        return self.branch_queries.get_comparison_to_main(branch_name, main_branch)
 
     def get_divergence_info(self, branch_name: str, main_branch: str) -> dict:
         """Get divergence info. Delegates to BranchQueries."""
@@ -193,7 +209,11 @@ class GitOperations:
             raise
 
     def delete_branch(
-        self, branch_name: str, dry_run: bool = False, delete_remote: bool = False
+        self,
+        branch_name: str,
+        dry_run: bool = False,
+        delete_remote: bool = False,
+        batch_id: Optional[str] = None,
     ) -> bool:
         """Delete a branch locally, and remotely only when explicitly requested.
 
@@ -289,6 +309,7 @@ class GitOperations:
                             had_remote=has_remote,
                             remote_deleted=remote_deleted,
                             remote_name=self.remote_name,
+                            batch_id=batch_id,
                         )
 
                 return True

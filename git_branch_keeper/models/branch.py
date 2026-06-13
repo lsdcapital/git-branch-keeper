@@ -2,7 +2,7 @@
 
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class BranchStatus(Enum):
@@ -56,8 +56,10 @@ class BranchDetails:
     has_remote: bool
     sync_status: str
     pr_status: Optional[str] = None
+    pr_details: Optional[Dict[str, Any]] = None  # Structured PR metadata from provider APIs
     notes: Optional[str] = None  # Added notes field
     in_worktree: bool = False  # True if branch is checked out in a worktree
     is_worktree: bool = False  # True if this entry represents a worktree (not a branch)
     worktree_path: Optional[str] = None  # Path to the worktree directory if is_worktree=True
     worktree_is_orphaned: bool = False  # True if branch's worktree directory is missing
+    merge_detection: Optional[Dict[str, Any]] = None  # Structured merge-detection details

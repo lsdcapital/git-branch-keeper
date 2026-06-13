@@ -10,7 +10,7 @@ A smart Git branch management tool that helps keep your repository clean and org
 
 - 🖥️ **Interactive TUI** - Beautiful terminal interface for managing branches with keyboard shortcuts
 - 📊 **Smart Detection** - Automatically identifies merged and stale branches
-- 🔍 **Optional GitHub Integration** - Protects branches with open pull requests (GitHub only, requires a token)
+- 🔍 **Optional GitHub Integration** - Protects branches with open pull requests (GitHub only; uses `github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or an authenticated `gh` CLI)
 - 🌍 **Host-agnostic core** - Branch analysis, merge detection, and cleanup work on any Git repo (GitHub, GitLab, Bitbucket, or local); PR detection is GitHub-only
 - 🌳 **Worktree Support** - Handles git worktrees intelligently
 - ⚡ **Fast & Efficient** - Caching and parallel processing for large repositories
@@ -58,6 +58,13 @@ uv sync --dev
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
+After installation, the canonical command is `git-branch-keeper`. Short aliases are also installed:
+
+```bash
+gbk        # same as git-branch-keeper
+git gbk    # Git subcommand alias, via git-gbk
+```
+
 ## 🎯 Quick Start
 
 ### Interactive Mode (Default)
@@ -81,23 +88,26 @@ Use keyboard shortcuts to navigate and manage branches:
 For scripting and automation, use the non-interactive CLI mode:
 
 ```bash
-# Preview what would be deleted (RECOMMENDED for first run)
-git-branch-keeper --no-interactive --filter merged --dry-run
-
 # View merged branches in interactive TUI (default, safest)
 git-branch-keeper --filter merged
 
+# Plain CLI report (read-only)
+git-branch-keeper --cli --filter merged
+
+# Preview what would be deleted (RECOMMENDED before cleanup)
+git-branch-keeper --cli --filter merged --dry-run
+
 # Delete merged branches with confirmation prompts (deletes local only, keeps remote)
-git-branch-keeper --no-interactive --filter merged
+git-branch-keeper --cli --filter merged --delete
 
 # Also delete the remote branch (affects collaborators)
-git-branch-keeper --no-interactive --filter merged --remote
+git-branch-keeper --cli --filter merged --delete --remote
 
 # Force delete without confirmation (DANGEROUS)
-git-branch-keeper --no-interactive --filter merged --force
+git-branch-keeper --cli --filter merged --delete --force
 ```
 
-> **⚠️ Safety Note**: The CLI mode (`--no-interactive`) performs cleanup by default. Always use `--dry-run` first to preview changes, especially on your first run!
+> **⚠️ Safety Note**: Plain CLI mode (`--cli` / `--no-interactive`) is read-only by default. Pass `--delete` to clean up branches, or `--dry-run` to preview cleanup candidates.
 
 > **🌐 Remote branches**: By default, deletion is **local-only** — the remote branch is kept. Add `--remote` to also delete it on `origin`. Remote deletions affect collaborators and are harder to undo, so they are opt-in.
 
@@ -116,10 +126,13 @@ git-branch-keeper [OPTIONS]
 - `--stale-days N` - Days before branch is stale (default: 30)
 
 **Mode Options:**
-- `--interactive` / `--no-interactive` - Enable/disable TUI mode
-- `--dry-run` - Preview changes without deleting
+- `--interactive` - Launch the TUI (default for TTY)
+- `--cli` / `--no-interactive` - Use plain CLI output (read-only unless cleanup is requested)
+- `--delete` - Cleanup/delete eligible branches in CLI mode (prompts unless `--force` is used)
+- `--cleanup` - Deprecated alias for `--delete`
+- `--dry-run` - Preview cleanup candidates without deleting or prompting
 - `--remote` - Also delete the remote branch (default: local-only, remote is kept)
-- `--force` - Delete without confirmation (use with caution!)
+- `--force` - Delete without confirmation (legacy behavior: also implies `--delete`; use with caution!)
 - `--refresh` - Bypass cache and refresh all data
 
 **Subcommands:**
@@ -166,38 +179,42 @@ git-branch-keeper [OPTIONS]
 | Mode | When It Activates | Default Behavior | Safety Level |
 |------|-------------------|------------------|--------------|
 | **Interactive TUI** | When connected to a terminal (default) | User selects branches, confirms before delete | ✅ **SAFE** |
-| **CLI Mode** | `--no-interactive` flag | **Deletes branches with confirmation prompts** | ⚠️ **CAUTION** |
-| **Force Mode** | `--force` flag | **Deletes immediately without confirmation** | 🔴 **DANGEROUS** |
-| **Dry Run** | `--dry-run` flag | Preview only, no deletion | ✅ **SAFE** |
+| **CLI Report** | `--cli` / `--no-interactive` | Plain branch report, no deletion prompt | ✅ **SAFE** |
+| **CLI Cleanup** | `--cli --delete` | Deletes eligible branches with confirmation prompts | ⚠️ **CAUTION** |
+| **Force Mode** | `--cli --delete --force` | Deletes immediately without confirmation | 🔴 **DANGEROUS** |
+| **Dry Run** | `--dry-run` flag | Preview only, no deletion or prompts | ✅ **SAFE** |
 | **Remote deletion** | `--remote` flag | Off by default — deletion is local-only unless opted in | ✅ **SAFE default** |
 
 ### ⚠️ Important Safety Warnings
 
-1. **CLI Mode Deletes by Default**: When using `--no-interactive`, the tool will delete branches (with confirmation). If you just want to preview, **always use `--dry-run`**.
+1. **CLI Mode Is Read-Only by Default**: `--cli` / `--no-interactive` prints a plain report and does not prompt for cleanup. Add `--delete` when you want cleanup.
 
-2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
+2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking when cleanup is enabled. For legacy compatibility, `--force` also implies `--delete`. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
 
    **Deletion is local-only by default**: the remote branch is preserved unless you pass `--remote`. This keeps the easily-recoverable case (local, restorable via reflog and `undo`) separate from the harder-to-undo case (remote, visible to collaborators).
 
 3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
    ```bash
-   git-branch-keeper --no-interactive --filter merged --dry-run
+   git-branch-keeper --cli --filter merged --dry-run
    ```
 
 4. **Protected Branches**: Always configure `protected_branches` in your config to prevent accidental deletion of important branches.
 
-5. **GitHub Token Not Required**: The tool works without a GitHub token, but won't protect branches with open PRs if the token is missing.
+5. **GitHub Auth Not Required**: The tool works without GitHub auth, but won't protect branches with open PRs if no token or authenticated `gh` CLI is available.
 
 ### Safe Workflow
 
 ```bash
-# Step 1: Preview changes (RECOMMENDED FIRST STEP)
-git-branch-keeper --no-interactive --filter merged --dry-run
+# Step 1: Review a read-only CLI report
+git-branch-keeper --cli --filter merged
 
-# Step 2: Review output carefully, then run actual cleanup
-git-branch-keeper --no-interactive --filter merged
+# Step 2: Preview cleanup candidates (RECOMMENDED BEFORE DELETE)
+git-branch-keeper --cli --filter merged --dry-run
 
-# Step 3: Or use interactive TUI for manual control (safest)
+# Step 3: Review output carefully, then run actual cleanup
+git-branch-keeper --cli --filter merged --delete
+
+# Step 4: Or use interactive TUI for manual control (safest)
 git-branch-keeper --filter merged
 ```
 
@@ -223,7 +240,7 @@ Running `undo` repeatedly walks back through the deletion history, restoring one
 The tool automatically protects:
 - ✅ Branches listed in `protected_branches` (default: `main`, `master`)
 - ✅ Branches matching `ignore_patterns`
-- ✅ Branches with open pull requests (if GitHub token configured)
+- ✅ Branches with open pull requests (if GitHub auth is available)
 - ✅ Current branch you're on
 - ✅ Branches in active worktrees
 
@@ -257,35 +274,46 @@ Create a configuration file to customize behavior. The tool looks for config fil
 | `protected_branches` | array | Branches never to delete | `["main", "master"]` |
 | `ignore_patterns` | array | Glob patterns to ignore | `[]` |
 | `stale_days` | integer | Days before branch is stale | `30` |
-| `github_token` | string | GitHub personal access token | `null` |
+| `github_token` | string | GitHub personal access token. If omitted, GBK also tries `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token` | `null` |
+| `squash_scan_limit` | integer | First-parent commits on main to scan for exact squash patch-id matches | `500` |
 
-### GitHub Token Setup (Optional)
+### GitHub Auth Setup (Optional)
 
-**This section is OPTIONAL** - `git-branch-keeper` works on any Git repository without a GitHub token. The token only enables extra GitHub-specific features.
+**This section is OPTIONAL** - `git-branch-keeper` works on any Git repository without GitHub auth. GitHub auth only enables extra GitHub-specific PR features.
 
-#### What works WITHOUT a GitHub token:
+#### What works WITHOUT GitHub auth:
 - ✅ Branch detection and analysis
 - ✅ Merge status detection (via Git)
 - ✅ Stale branch identification
 - ✅ Local branch cleanup
 - ✅ Works with GitHub, GitLab, Bitbucket, and local repos
 
-#### What REQUIRES a GitHub token (GitHub repos only):
+#### What REQUIRES GitHub auth (GitHub repos only):
 - 🔒 Pull request detection and protection
 - 🔒 PR status and metadata display
 - 🔒 Protection against deleting branches with open PRs
 
 #### Setup Instructions (for GitHub repos):
 
-1. **Create a token** at https://github.com/settings/tokens/new
+Choose one auth source. GBK tries them in this order: config `github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`.
+
+1. **Use the GitHub CLI**
+   ```bash
+   gh auth login
+   gh auth status
+   ```
+
+2. **Or create a token** at https://github.com/settings/tokens/new
    - Select scope: `repo` (for private repos) or `public_repo` (for public only)
    - Select scope: `read:org` (if using organization repos)
 
-2. **Configure the token** (choose one):
+3. **Configure the token** (choose one):
 
-   **Option A: Environment Variable (Recommended)**
+   **Option A: Environment Variable**
    ```bash
    export GITHUB_TOKEN="ghp_your_token_here"
+   # or
+   export GH_TOKEN="ghp_your_token_here"
    ```
 
    **Option B: Config File**
@@ -296,6 +324,23 @@ Create a configuration file to customize behavior. The tool looks for config fil
    ```
 
    ⚠️ **Security**: Never commit tokens to version control! Add config files to `.gitignore`.
+
+### How Branch Analysis Works
+
+CLI, TUI, and JSON output all use the same analysis path. Each branch is processed as one work item, so the single `Processing branches (...)` progress bar includes GitHub PR lookup (when enabled), local Git merge checks, dirty/worktree checks, and status calculation.
+
+For each branch, GBK uses this order:
+
+1. **GitHub PR metadata** (only when GitHub auth is available):
+   - open PRs keep the branch active/protected;
+   - a merged PR marks the branch `merged-pr` only when the local branch tip still matches the PR head SHA;
+   - if the PR is merged but the local tip differs, GBK shows a note and falls through to local Git checks.
+2. **Local Git merge detection**:
+   - reachability (`merge-base --is-ancestor`) for merge commits/fast-forwards;
+   - patch-equivalence (`git cherry`) for rebases/cherry-picks/single-commit squashes;
+   - exact combined patch-id scan for multi-commit squash merges, capped by `squash_scan_limit`.
+3. **Stale/active classification** based on branch age when no merge proof is found.
+4. **Safety checks** such as protected branches, current branch, worktrees, open PRs, and uncommitted file state determine whether a branch is deletable.
 
 ### Pattern Matching
 
@@ -318,13 +363,13 @@ git-branch-keeper --filter merged
 ### Example 2: Automated Cleanup in CI/CD
 ```bash
 # Delete all merged branches older than 60 days (no confirmation)
-git-branch-keeper --no-interactive --filter merged --stale-days 60 --force
+git-branch-keeper --cli --filter merged --stale-days 60 --delete --force
 ```
 
 ### Example 3: Safe Exploration
 ```bash
 # See what would be deleted without making changes
-git-branch-keeper --filter merged --dry-run
+git-branch-keeper --cli --filter merged --dry-run
 ```
 
 ### Example 4: Custom Main Branch

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added installed command aliases: `gbk` and `git gbk` (via `git-gbk`).
 - **Deletion journal & `undo`**: every deleted branch is recorded with its tip SHA in
   `~/.git-branch-keeper/deletions.jsonl`; `git-branch-keeper undo [BRANCH]` restores it
   (and `undo --list` shows recent deletions)
