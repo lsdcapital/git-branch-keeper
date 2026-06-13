@@ -199,88 +199,137 @@ class BranchKeeperApp(App):
             self._populate_table()
             self._update_status()
 
+    @staticmethod
+    def _row_key_for_branch(branch: BranchDetails) -> str:
+        """Return the stable DataTable row key for a branch/worktree entry."""
+        return f"{branch.name}:{branch.worktree_path}" if branch.is_worktree else branch.name
+
+    def _current_branch_name(self) -> Optional[str]:
+        """Return the current branch name, or None for detached HEAD/unavailable repos."""
+        try:
+            return self.keeper.repo.active_branch.name
+        except (TypeError, AttributeError):
+            return None
+
+    def _format_branch_row(
+        self,
+        branch: BranchDetails,
+        current_branch_name: Optional[str],
+        github_base_url: Optional[str],
+    ):
+        """Build DataTable cell values for a branch row."""
+        is_marked = branch.name in self.marked_branches
+        is_force_marked = branch.name in self.force_marked_branches
+
+        # Determine text color using unified styling logic
+        style_type = get_branch_style_type(branch, self.keeper.protected_branches)
+        # Override color for force-marked branches to show they will be deleted
+        if is_force_marked:
+            text_color = TUI_COLORS[BranchStyleType.DELETABLE]  # Use red color
+        else:
+            text_color = TUI_COLORS.get(style_type, TUI_COLORS["active"])
+
+        logger.debug(
+            f"[TUI DISPLAY] {branch.name}: status={branch.status.value}, in_worktree={branch.in_worktree}, style_type={style_type}, color={text_color}"
+        )
+
+        # Mark column - show different symbol for force-marked
+        if is_force_marked:
+            mark = Text("✓!", justify="center", style="bold red")
+        elif is_marked:
+            mark = Text(SYMBOL_MARKED, justify="center")
+        else:
+            mark = Text(SYMBOL_UNMARKED, justify="center")
+
+        # Format branch name with color and indent
+        is_current = branch.name == current_branch_name if current_branch_name else False
+        formatted_name = format_branch_name_with_indent(
+            branch.name, branch.is_worktree, is_current
+        )
+        branch_text = Text(formatted_name, style=text_color)
+
+        # Format status using shared formatter
+        status_str = format_status(branch.status)
+        status_text = Text(status_str, style=text_color)
+
+        # Format last commit date using shared formatter
+        last_commit = format_date(branch.last_commit_date)
+
+        # Format age using shared formatter
+        age_display = format_age(branch.age_days)
+
+        # Changes column - using shared formatter
+        changes_indicator = format_changes(branch, current_branch_name)
+        changes = Text(changes_indicator, justify="center")
+
+        # Remote column - using shared formatter
+        remote_symbol = format_remote_status(branch.has_remote)
+        remote = Text(remote_symbol, justify="center")
+
+        # PR column - using shared formatter
+        pr_display = format_pr_link(branch.pr_status, github_base_url)
+
+        # Match COLUMNS order: Branch, Status, Last Commit, Age, Changes, Sync, Remote, PRs, Notes
+        # (Plus Mark column at the beginning)
+        return (
+            mark,
+            branch_text,
+            status_text,
+            last_commit,
+            age_display,
+            changes,
+            branch.sync_status or "",
+            remote,
+            pr_display,
+            branch.notes or "",
+        )
+
     def _populate_table(self) -> None:
         """Add branch data to table."""
         table = self.query_one(DataTable)
         table.clear()
 
         # Get current branch name and GitHub URL once for all rows
-        try:
-            current_branch_name = self.keeper.repo.active_branch.name
-        except (TypeError, AttributeError):
-            current_branch_name = None  # Detached HEAD or repo not available
-
+        current_branch_name = self._current_branch_name()
         github_base_url = self.keeper._get_github_base_url()
 
         for branch in self.branches:
-            is_marked = branch.name in self.marked_branches
-            is_force_marked = branch.name in self.force_marked_branches
-
-            # Determine text color using unified styling logic
-            style_type = get_branch_style_type(branch, self.keeper.protected_branches)
-            # Override color for force-marked branches to show they will be deleted
-            if is_force_marked:
-                text_color = TUI_COLORS[BranchStyleType.DELETABLE]  # Use red color
-            else:
-                text_color = TUI_COLORS.get(style_type, TUI_COLORS["active"])
-
-            logger.debug(
-                f"[TUI DISPLAY] {branch.name}: status={branch.status.value}, in_worktree={branch.in_worktree}, style_type={style_type}, color={text_color}"
-            )
-
-            # Mark column - show different symbol for force-marked
-            if is_force_marked:
-                mark = Text("✓!", justify="center", style="bold red")
-            elif is_marked:
-                mark = Text(SYMBOL_MARKED, justify="center")
-            else:
-                mark = Text(SYMBOL_UNMARKED, justify="center")
-
-            # Format branch name with color and indent
-            is_current = branch.name == current_branch_name if current_branch_name else False
-            formatted_name = format_branch_name_with_indent(
-                branch.name, branch.is_worktree, is_current
-            )
-            branch_text = Text(formatted_name, style=text_color)
-
-            # Format status using shared formatter
-            status_str = format_status(branch.status)
-            status_text = Text(status_str, style=text_color)
-
-            # Format last commit date using shared formatter
-            last_commit = format_date(branch.last_commit_date)
-
-            # Format age using shared formatter
-            age_display = format_age(branch.age_days)
-
-            # Changes column - using shared formatter
-            changes_indicator = format_changes(branch, current_branch_name)
-            changes = Text(changes_indicator, justify="center")
-
-            # Remote column - using shared formatter
-            remote_symbol = format_remote_status(branch.has_remote)
-            remote = Text(remote_symbol, justify="center")
-
-            # PR column - using shared formatter
-            pr_display = format_pr_link(branch.pr_status, github_base_url)
-
-            # Match COLUMNS order: Branch, Status, Last Commit, Age, Changes, Sync, Remote, PRs, Notes
-            # (Plus Mark column at the beginning)
-            # Make row key unique for worktrees by including path
-            row_key = f"{branch.name}:{branch.worktree_path}" if branch.is_worktree else branch.name
+            row_key = self._row_key_for_branch(branch)
             table.add_row(
-                mark,
-                branch_text,
-                status_text,
-                last_commit,
-                age_display,
-                changes,
-                branch.sync_status or "",
-                remote,
-                pr_display,
-                branch.notes or "",
+                *self._format_branch_row(branch, current_branch_name, github_base_url),
                 key=row_key,
             )
+
+    def _refresh_branch_rows(self, branch_names: Optional[Set[str]] = None) -> None:
+        """Refresh existing table rows without clearing the table.
+
+        Clearing and rebuilding the DataTable resets its scroll offset. Mark/unmark
+        actions only change row presentation, so update cells in place to keep long
+        lists from jumping while the user works through them.
+        """
+        table = self.query_one(DataTable)
+
+        # If the table shape no longer matches the model, fall back to a full rebuild.
+        if table.row_count != len(self.branches):
+            self._populate_table()
+            return
+
+        current_branch_name = self._current_branch_name()
+        github_base_url = self.keeper._get_github_base_url()
+        column_keys = ["mark"] + [col.key for col in COLUMNS]
+
+        for branch in self.branches:
+            if branch_names is not None and branch.name not in branch_names:
+                continue
+
+            row_key = self._row_key_for_branch(branch)
+            for column_key, value in zip(
+                column_keys,
+                self._format_branch_row(branch, current_branch_name, github_base_url),
+            ):
+                # The force-mark indicator is wider ("✓!"), so allow only that
+                # compact mark column to resize; other cells keep existing widths.
+                table.update_cell(row_key, column_key, value, update_width=column_key == "mark")
 
     def _mark_with_hierarchy(
         self, branch_name: str, mark_set: Set[str], is_force: bool = False
@@ -406,10 +455,10 @@ class BranchKeeperApp(App):
             # Remove from force-marked if it was there
             self.force_marked_branches.discard(branch.name)
 
-        # Save cursor position before repopulating
+        # Save cursor position before refreshing the row display
         saved_row = table.cursor_row
 
-        self._populate_table()
+        self._refresh_branch_rows({branch.name})
         self._update_status()
 
         # Restore cursor and move down one row
@@ -427,7 +476,7 @@ class BranchKeeperApp(App):
             # Remove from force-marked if it was there
             self.force_marked_branches.discard(branch.name)
 
-        self._populate_table()
+        self._refresh_branch_rows()
         self._update_status()
         self.notify(f"Marked {len(self.marked_branches)} deletable branches")
 
@@ -436,7 +485,7 @@ class BranchKeeperApp(App):
         count = len(self.marked_branches) + len(self.force_marked_branches)
         self.marked_branches.clear()
         self.force_marked_branches.clear()
-        self._populate_table()
+        self._refresh_branch_rows()
         self._update_status()
         if count > 0:
             self.notify(f"Cleared {count} marks")
@@ -477,7 +526,7 @@ class BranchKeeperApp(App):
             self.marked_branches.discard(branch.name)
 
         saved_row = table.cursor_row
-        self._populate_table()
+        self._refresh_branch_rows({branch.name})
         self._update_status()
 
         # Restore cursor and move down

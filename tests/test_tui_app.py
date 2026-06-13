@@ -9,6 +9,7 @@ from pathlib import Path
 
 import git
 import pytest
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 
 from git_branch_keeper.config import Config
@@ -78,6 +79,29 @@ async def test_mark_all_deletable_marks_merged_branch(make_app):
         await pilot.pause()
         assert "feature/a" in app.marked_branches
         assert "feature/b" in app.marked_branches
+
+
+async def test_toggle_mark_does_not_reset_scroll_position(make_app):
+    branches = [_branch(f"feature/{index:02d}") for index in range(60)]
+    app = make_app(branches)
+
+    async with app.run_test(size=(120, 15)) as pilot:
+        table = app.query_one(DataTable)
+        table.focus()
+        await pilot.pause()
+
+        table.cursor_coordinate = Coordinate(25, 0)
+        table.scroll_to(y=20, animate=False, force=True, immediate=True)
+        await pilot.pause()
+        scroll_y = table.scroll_y
+        assert scroll_y > 0
+
+        marked_branch = app.branches[25].name
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert marked_branch in app.marked_branches
+        assert table.scroll_y == scroll_y
 
 
 async def test_undo_recent_deletion_binding_restores_branch(
