@@ -1,8 +1,9 @@
-.PHONY: help build check fix format lint type-check test clean
+.PHONY: help build update check fix format lint type-check test clean
 
 help:
 	@echo "Available targets:"
 	@echo "  make build        - Set up development environment"
+	@echo "  make update       - Update all dependencies to latest allowed versions"
 	@echo "  make check        - Run all quality checks (lint, type-check, test, format)"
 	@echo "  make fix          - Auto-fix issues (ruff, black)"
 	@echo "  make format       - Format code with black"
@@ -14,6 +15,9 @@ help:
 
 build:
 	uv sync --dev
+
+update:
+	uv sync --dev --upgrade
 
 check:
 	@echo "\n========================================================"
