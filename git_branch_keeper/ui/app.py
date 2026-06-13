@@ -33,7 +33,7 @@ from git_branch_keeper.formatters import (
     format_pr_link,
     get_branch_style_type,
 )
-from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.models.branch import BranchAnalysisResult, BranchDetails, BranchStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.ui.screens import ConfirmScreen, InfoScreen, TabbedInfoScreen
 from git_branch_keeper.ui.widgets import NonExpandingHeader
@@ -107,6 +107,7 @@ class BranchKeeperApp(App):
         super().__init__()
         self.keeper = keeper
         self.branches = branches or []
+        self.analysis: Optional[BranchAnalysisResult] = None
         self.marked_branches: Set[str] = set()  # Normal marked branches
         self.force_marked_branches: Set[str] = set()  # Force-marked branches
         self.sort_column = "age"
@@ -125,6 +126,43 @@ class BranchKeeperApp(App):
         yield Static(id="status-bar")
         yield Footer()
 
+    def _auto_mark_deletable(
+        self, deletable_branches: Optional[List[BranchDetails]] = None
+    ) -> None:
+        """Auto-mark deletable branches when cleanup mode is active."""
+        if not self.cleanup_mode:
+            return
+
+        branches = deletable_branches
+        if branches is None:
+            branches = self.keeper.get_deletable_branches(self.branches, force_mode=False)
+
+        for branch in branches:
+            self.marked_branches.add(branch.name)
+            self.force_marked_branches.discard(branch.name)
+
+    def _apply_analysis_result(
+        self, analysis: BranchAnalysisResult, preserve_marks: bool = False
+    ) -> None:
+        """Apply shared branch analysis output to the TUI widgets."""
+        self.analysis = analysis
+        self.branches = analysis.branches
+
+        if preserve_marks:
+            existing_names = {branch.name for branch in self.branches}
+            self.marked_branches = {name for name in self.marked_branches if name in existing_names}
+            self.force_marked_branches = {
+                name for name in self.force_marked_branches if name in existing_names
+            }
+        else:
+            self.marked_branches.clear()
+            self.force_marked_branches.clear()
+
+        if not preserve_marks:
+            self._auto_mark_deletable(analysis.deletable_branches)
+        self._populate_table()
+        self._update_status()
+
     def on_mount(self) -> None:
         """Set up the table when app starts."""
         table = self.query_one(DataTable)
@@ -141,61 +179,23 @@ class BranchKeeperApp(App):
             else:
                 table.add_column(col.label, width=None, key=col.key)
 
-        # If no branches loaded yet, check cache first
+        # If no branches loaded yet, use the shared analysis path.
         if not self.branches:
-            # Try to load cached branches synchronously
-            cached_branches, branches_to_process = self.keeper.get_cached_branches_fast()
+            cached_analysis = self.keeper.get_cached_analysis_fast()
 
-            if cached_branches and branches_to_process:
-                # We have cached data but some branches need refresh
-                # Show loading indicator and process everything together
-                table.loading = True
-                self.load_additional_data(cached_branches, branches_to_process)
-            elif cached_branches:
-                # All branches are cached and stable - display immediately
-                self.branches = cached_branches
-
-                # Update in_worktree status for cached branches
-                worktree_branches = self.keeper.git_service.worktree_service.get_worktree_branches()
-                try:
-                    current_branch = self.keeper.repo.active_branch.name
-                except TypeError:
-                    current_branch = None
-
-                for branch in self.branches:
-                    is_current = (branch.name == current_branch) if current_branch else False
-                    if branch.name in worktree_branches and not is_current:
-                        branch.in_worktree = True
-                    else:
-                        branch.in_worktree = False
-
-                # Insert worktree entries after their parent branches
-                self.branches = self.keeper._insert_worktree_entries(self.branches)
-
-                # Auto-mark deletable branches if cleanup mode is enabled
-                if self.cleanup_mode:
-                    for branch in self.branches:
-                        if BranchValidationService.is_deletable(
-                            branch, self.keeper.protected_branches
-                        ):
-                            self.marked_branches.add(branch.name)
-
-                self._populate_table()
-                self._update_status()
+            if cached_analysis.branches and cached_analysis.is_complete:
+                # Stable cached data can be shown immediately; it was finalized by
+                # the same core data path used by full analysis.
+                self._apply_analysis_result(cached_analysis)
             else:
-                # No cache, show loading indicator and process everything
+                # No complete cached snapshot, so process everything in the
+                # background with the shared analyzer.
                 table.loading = True
                 self.load_initial_data()  # @work decorator handles Worker creation
         else:
-            # Initial population and sort if data already provided
+            # Initial population for tests/callers that inject rows directly.
             self.branches = self.keeper.sort_branches(self.branches)
-
-            # Auto-mark deletable branches if cleanup mode is enabled
-            if self.cleanup_mode:
-                for branch in self.branches:
-                    if BranchValidationService.is_deletable(branch, self.keeper.protected_branches):
-                        self.marked_branches.add(branch.name)
-
+            self._auto_mark_deletable()
             self._populate_table()
             self._update_status()
 
@@ -243,9 +243,7 @@ class BranchKeeperApp(App):
 
         # Format branch name with color and indent
         is_current = branch.name == current_branch_name if current_branch_name else False
-        formatted_name = format_branch_name_with_indent(
-            branch.name, branch.is_worktree, is_current
-        )
+        formatted_name = format_branch_name_with_indent(branch.name, branch.is_worktree, is_current)
         branch_text = Text(formatted_name, style=text_color)
 
         # Format status using shared formatter
@@ -680,7 +678,7 @@ class BranchKeeperApp(App):
 
     def _repo_path(self) -> str:
         """Return the working repository path for undo/restore operations."""
-        return self.keeper.repo.working_dir or self.keeper.repo_path
+        return str(self.keeper.repo.working_dir or self.keeper.repo_path)
 
     def action_undo_recent_deletion(self) -> None:
         """Restore the most recent deleted branch recorded in the journal."""
@@ -825,24 +823,12 @@ class BranchKeeperApp(App):
         Uses DataTable's built-in loading indicator, no modal is shown.
         """
         try:
-            # Load branch details (with progress disabled for TUI)
-            # Use asyncio.to_thread since keeper methods are sync but we're in async worker
-            new_branches = await asyncio.to_thread(self.keeper.get_branch_details, False)
+            # Use the shared analyzer with progress disabled for TUI.
+            # keeper methods are sync, so run them off the event loop.
+            analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
 
-            if new_branches:
-                # Update branches (already sorted with worktrees from get_branch_details)
-                self.branches = new_branches
-
-                # Auto-mark deletable branches if cleanup mode is enabled
-                if self.cleanup_mode:
-                    for branch in self.branches:
-                        if BranchValidationService.is_deletable(
-                            branch, self.keeper.protected_branches
-                        ):
-                            self.marked_branches.add(branch.name)
-
-                self._populate_table()
-                self._update_status()
+            if analysis.branches:
+                self._apply_analysis_result(analysis)
             else:
                 self.notify("No branches found", severity="warning")
 
@@ -868,99 +854,26 @@ class BranchKeeperApp(App):
             cached_branches: Previously cached branch details (can be None)
             branches_to_process: List of branch names that need processing
         """
-        if not branches_to_process:
-            return
-
         table = self.query_one(DataTable)
+        table.loading = True
 
         try:
-            logger.debug(f"Processing {len(branches_to_process)} branches with cache base")
+            logger.debug(
+                f"Refreshing cached TUI data via shared analyzer; "
+                f"{len(branches_to_process)} branches need processing"
+            )
+            analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
 
-            # Start with cached branches if provided
-            if cached_branches:
-                existing_branches = {b.name: b for b in cached_branches}
+            if analysis.branches:
+                self._apply_analysis_result(analysis)
             else:
-                existing_branches = {b.name: b for b in self.branches}
-
-            # Process the branches that need refreshing
-            new_branch_details = []
-
-            # Get PR data for all branches to process
-            pr_data = {}
-            try:
-                pr_data = await asyncio.to_thread(
-                    self.keeper.github_service.get_bulk_pr_data, branches_to_process
-                )
-            except Exception as e:
-                logger.debug(f"Failed to fetch PR data: {e}")
-
-            # Process each branch
-            for branch_name in branches_to_process:
-                try:
-                    details = await asyncio.to_thread(
-                        self.keeper._process_single_branch,
-                        branch_name,
-                        self.keeper.config.get("status_filter", "all"),
-                        pr_data,
-                        None,
-                    )
-                    if details:
-                        new_branch_details.append(details)
-                except Exception as e:
-                    logger.error(f"Error processing branch {branch_name}: {e}")
-
-            # Merge refreshed branches with cached branches
-            for branch in new_branch_details:
-                existing_branches[branch.name] = branch
-
-            # Update branches list
-            self.branches = list(existing_branches.values())
-
-            # Update in_worktree status for ALL branches (including cached)
-            # Worktree status is dynamic and not cached
-            worktree_branches = self.keeper.git_service.worktree_service.get_worktree_branches()
-            try:
-                current_branch = self.keeper.repo.active_branch.name
-            except TypeError:
-                current_branch = None
-
-            for branch in self.branches:
-                is_current = (branch.name == current_branch) if current_branch else False
-                if branch.name in worktree_branches and not is_current:
-                    branch.in_worktree = True
-                    logger.debug(f"[TUI] Setting in_worktree=True for {branch.name}")
-                else:
-                    branch.in_worktree = False
-
-            # Sort all branches
-            self.branches = self.keeper.sort_branches(self.branches)
-
-            # Insert worktree entries after their parent branches
-            self.branches = self.keeper._insert_worktree_entries(self.branches)
-
-            # Auto-mark deletable branches if in cleanup mode
-            if self.cleanup_mode:
-                for branch in self.branches:
-                    if BranchValidationService.is_deletable(branch, self.keeper.protected_branches):
-                        self.marked_branches.add(branch.name)
-
-            # Display the complete table once
-            self._populate_table()
-            self._update_status()
-
-            # Save updated cache
-            use_cache = not self.keeper.config.get("refresh", False)
-            if use_cache:
-                await asyncio.to_thread(
-                    self.keeper.cache_service.save_cache, self.branches, self.keeper.main_branch
-                )
+                self.notify("No branches found", severity="warning")
 
         except Exception as e:
             logger.error(f"Error loading additional branches: {e}", exc_info=True)
             error_msg = f"Error loading additional branches:\n\n{str(e)}\n\nCheck the logs for more details."
             self.push_screen(InfoScreen(error_msg))
         finally:
-            # Clear loading indicator
             table.loading = False
 
     def action_refresh(self) -> None:
@@ -985,26 +898,13 @@ class BranchKeeperApp(App):
             # Temporarily enable refresh to bypass cache
             self.keeper.config.refresh = True
 
-            # Re-fetch branch details (with progress disabled for TUI)
-            # Use asyncio.to_thread since keeper methods are sync but we're in async worker
-            new_branches = await asyncio.to_thread(self.keeper.get_branch_details, False)
+            # Re-run the shared analyzer with progress disabled for TUI.
+            analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
 
-            if new_branches:
-                # Save cursor position
+            if analysis.branches:
                 saved_row = table.cursor_row
 
-                # Update branches
-                self.branches = new_branches
-
-                # Clear marks that no longer exist
-                existing_names = {b.name for b in self.branches}
-                self.marked_branches = {
-                    name for name in self.marked_branches if name in existing_names
-                }
-
-                # Repopulate table (branches already sorted and have worktrees from get_branch_details)
-                self._populate_table()
-                self._update_status()
+                self._apply_analysis_result(analysis, preserve_marks=True)
 
                 # Restore cursor position if possible
                 if saved_row is not None and saved_row < len(self.branches):

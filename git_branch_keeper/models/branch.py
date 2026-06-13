@@ -1,8 +1,8 @@
 """Branch model and related enums"""
 
 from enum import Enum
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 
 class BranchStatus(Enum):
@@ -24,6 +24,22 @@ class SyncStatus(Enum):
     MERGED_GIT = "merged-git"
     MERGED_PR = "merged-pr"
     CLOSED_UNMERGED = "closed-unmerged"  # New status for branches with closed but unmerged PRs
+
+
+@dataclass
+class BranchAnalysisResult:
+    """Shared branch analysis output consumed by CLI and TUI views."""
+
+    branches: List["BranchDetails"] = field(default_factory=list)
+    local_branch_names: List[str] = field(default_factory=list)
+    branches_to_process: List[str] = field(default_factory=list)
+    deletable_branches: List["BranchDetails"] = field(default_factory=list)
+    removable_worktrees: List["BranchDetails"] = field(default_factory=list)
+    current_branch: Optional[str] = None
+    github_base_url: Optional[str] = None
+    cached_count: int = 0
+    refreshed_count: int = 0
+    is_complete: bool = True
 
 
 @dataclass

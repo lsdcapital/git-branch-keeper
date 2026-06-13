@@ -10,7 +10,12 @@ import git
 from rich.console import Console
 from rich.progress import Progress
 
-from git_branch_keeper.models.branch import BranchStatus, SyncStatus, BranchDetails
+from git_branch_keeper.models.branch import (
+    BranchStatus,
+    SyncStatus,
+    BranchDetails,
+    BranchAnalysisResult,
+)
 from git_branch_keeper.services.git import GitHubService, GitOperations
 from git_branch_keeper.services.display_service import DisplayService
 from git_branch_keeper.services.branch_status_service import BranchStatusService
@@ -369,206 +374,224 @@ class BranchKeeper:
         return result
 
     def process_branches(self, cleanup_enabled: bool = False) -> None:
-        """Process all branches according to configuration."""
+        """Analyze branches, render the CLI view, and optionally clean up."""
         try:
-            # Check main branch status first
-            if not self._check_main_branch_status():
-                return
-
-            # Get and filter branches
-            branches = self._get_filtered_branches()
-            if not branches:
+            analysis = self.analyze_branches(show_progress=True)
+            if not analysis.local_branch_names:
                 self._console_print("No branches to process")
                 return
 
-            # Check if we should use cache
-            use_cache = not self.config.get("refresh", False)
-
-            # Get cached branches and determine which need refresh
-            cached_branches = {}
-            branches_to_process = branches
-
-            if use_cache:
-                # Load all cached branches
-                cached_branches = self.cache_service.get_cached_branches(branches)
-                logger.debug(f"Loaded {len(cached_branches)} cached branches")
-
-                # Determine which branches need refresh (unstable or not cached)
-                branches_to_process = self.cache_service.get_stale_branches(
-                    branches, self.main_branch
-                )
-
-                stable_count = len(branches) - len(branches_to_process)
-                if self.verbose or self.debug_mode:
-                    if stable_count > 0:
-                        self._console_print(
-                            f"[dim]Using {stable_count} stable cached branches, refreshing {len(branches_to_process)} branches[/dim]"
-                        )
-            else:
-                # With --refresh, process all branches
-                if self.verbose or self.debug_mode:
-                    self._console_print(
-                        f"[dim]Refreshing all {len(branches)} branches (--refresh mode)[/dim]"
-                    )
-
-            # Process branches that need refresh
-            refreshed_details = self._collect_branch_details(
-                branches_to_process, show_progress=True
-            )
-
-            # Merge cached stable branches with refreshed data
-            branch_details = []
-            refreshed_names = {b.name for b in refreshed_details}
-
-            # Add refreshed branches
-            branch_details.extend(refreshed_details)
-
-            # Add stable cached branches that weren't refreshed
-            for branch_name, cached_branch in cached_branches.items():
-                if branch_name not in refreshed_names:
-                    branch_details.append(cached_branch)
-
-            # Sort all branches (both cached and newly processed)
-            branch_details = self.sort_branches(branch_details)
-
-            # Insert worktree entries after their parent branches
-            branch_details = self._insert_worktree_entries(branch_details)
-
-            # Save cache with new data (always save, regardless of whether we used cache to load)
-            self.cache_service.save_cache(branch_details, self.main_branch)
-
-            # Display and optionally cleanup
-            self._display_and_cleanup(branch_details, cleanup_enabled)
+            self._display_and_cleanup(analysis, cleanup_enabled)
 
         except Exception as e:
             self._console_print(f"[red]Error processing branches: {e}[/red]")
 
-    def get_cached_branches_fast(self) -> tuple[list, list]:
-        """Quickly load cached branch data without processing.
+    def analyze_branches(self, show_progress: bool = True) -> BranchAnalysisResult:
+        """Analyze branch state using the shared CLI/TUI data path.
 
-        This method is optimized for fast initial loading in TUI mode.
-        It returns all cached branches immediately and identifies which need refresh.
+        This is the single source of truth for branch discovery, cache refresh
+        decisions, status calculation, sorting, dynamic worktree state, and
+        deletion eligibility. CLI and TUI code should consume this result rather
+        than reimplementing branch-data assembly.
+
+        Args:
+            show_progress: Whether to show Rich progress while processing branches.
 
         Returns:
-            Tuple of (cached_branch_details, branches_to_process):
-            - cached_branch_details: List of all BranchDetails objects from cache
-            - branches_to_process: List of branch names that need refresh (unstable/not cached)
+            BranchAnalysisResult with display rows and shared metadata.
+        """
+        if not self._check_main_branch_status():
+            return BranchAnalysisResult(is_complete=False)
+
+        branches = self._get_filtered_branches()
+        if not branches:
+            return BranchAnalysisResult(local_branch_names=[])
+
+        use_cache = not self.config.get("refresh", False)
+        cached_branches: Dict[str, BranchDetails] = {}
+        branches_to_process = branches
+
+        if use_cache:
+            cached_branches = self.cache_service.get_cached_branches(branches)
+            logger.debug(f"Loaded {len(cached_branches)} cached branches")
+
+            branches_to_process = self.cache_service.get_stale_branches(branches, self.main_branch)
+
+            stable_count = len(branches) - len(branches_to_process)
+            if (self.verbose or self.debug_mode) and stable_count > 0:
+                self._console_print(
+                    f"[dim]Using {stable_count} stable cached branches, refreshing {len(branches_to_process)} branches[/dim]"
+                )
+        else:
+            if self.verbose or self.debug_mode:
+                self._console_print(
+                    f"[dim]Refreshing all {len(branches)} branches (--refresh mode)[/dim]"
+                )
+
+        refreshed_details = self._collect_branch_details(
+            branches_to_process, show_progress=show_progress
+        )
+
+        branch_rows = list(refreshed_details)
+        scheduled_for_refresh = set(branches_to_process)
+
+        # Only reuse cached branches that were deliberately skipped as stable.
+        # If a branch was scheduled for refresh but now no longer matches the
+        # filter, do not re-add its stale cached row.
+        for branch_name, cached_branch in cached_branches.items():
+            if branch_name in scheduled_for_refresh:
+                continue
+            if self._branch_matches_status_filter(cached_branch):
+                branch_rows.append(cached_branch)
+
+        return self._finalize_branch_analysis(
+            branch_rows,
+            local_branch_names=branches,
+            branches_to_process=branches_to_process,
+            cached_count=len(cached_branches),
+            refreshed_count=len(refreshed_details),
+            is_complete=True,
+            save_cache=True,
+        )
+
+    def get_cached_analysis_fast(self) -> BranchAnalysisResult:
+        """Load cached analysis rows without processing branches.
+
+        This supports fast TUI startup while still using the same finalization
+        logic as full analysis for sorting, worktree decoration, and deletion
+        eligibility. If ``branches_to_process`` is non-empty, the result is a
+        partial snapshot and callers should schedule ``analyze_branches``.
         """
         try:
-            # Check if we should use cache
-            use_cache = not self.config.get("refresh", False)
-            if not use_cache:
-                # If refresh is requested, return empty cache and all branches
-                branches = self._get_filtered_branches()
-                return [], branches
-
-            # Get filtered branches
             branches = self._get_filtered_branches()
             if not branches:
-                return [], []
+                return BranchAnalysisResult(local_branch_names=[])
 
-            # Get all cached branches
+            use_cache = not self.config.get("refresh", False)
+            if not use_cache:
+                return BranchAnalysisResult(
+                    local_branch_names=branches,
+                    branches_to_process=branches,
+                    is_complete=False,
+                )
+
             cached_branches = self.cache_service.get_cached_branches(branches)
             logger.debug(f"Fast-loaded {len(cached_branches)} cached branches")
 
-            # Determine which branches need refresh
             branches_to_process = self.cache_service.get_stale_branches(branches, self.main_branch)
+            scheduled_for_refresh = set(branches_to_process)
 
-            # Convert cached branches dict to list and sort
-            cached_branch_details = list(cached_branches.values())
-            cached_branch_details = self.sort_branches(cached_branch_details)
+            cached_branch_rows = [
+                cached_branch
+                for branch_name, cached_branch in cached_branches.items()
+                if branch_name not in scheduled_for_refresh
+                and self._branch_matches_status_filter(cached_branch)
+            ]
 
-            return cached_branch_details, branches_to_process
+            return self._finalize_branch_analysis(
+                cached_branch_rows,
+                local_branch_names=branches,
+                branches_to_process=branches_to_process,
+                cached_count=len(cached_branches),
+                refreshed_count=0,
+                is_complete=not bool(branches_to_process),
+                save_cache=False,
+            )
 
         except Exception as e:
-            logger.debug(f"Error fast-loading cached branches: {e}")
-            # On error, return empty cache and all branches for processing
+            logger.debug(f"Error fast-loading cached analysis: {e}")
             try:
                 branches = self._get_filtered_branches()
-                return [], branches
+                return BranchAnalysisResult(
+                    local_branch_names=branches,
+                    branches_to_process=branches,
+                    is_complete=False,
+                )
             except Exception:
-                return [], []
+                return BranchAnalysisResult(is_complete=False)
+
+    def get_cached_branches_fast(self) -> tuple[list, list]:
+        """Backward-compatible wrapper around get_cached_analysis_fast()."""
+        analysis = self.get_cached_analysis_fast()
+        return analysis.branches, analysis.branches_to_process
 
     def get_branch_details(self, show_progress: bool = True) -> list:
-        """Get branch details for interactive TUI mode.
+        """Return analyzed branch display rows for callers that need only rows.
 
         Args:
             show_progress: Whether to show Rich Progress bars (default True for CLI, False for TUI)
 
         Returns:
-            List of BranchDetails objects
+            List of BranchDetails objects, including worktree rows.
         """
         try:
-            # Check main branch status first
-            if not self._check_main_branch_status():
-                return []
-
-            # Get and filter branches
-            branches = self._get_filtered_branches()
-            if not branches:
-                return []
-
-            # Check if we should use cache
-            use_cache = not self.config.get("refresh", False)
-
-            # Get cached branches (only immutable ones)
-            cached_branches = {}
-            if use_cache:
-                cached_branches = self.cache_service.get_cached_branches(branches)
-                logger.debug(f"Using {len(cached_branches)} cached branches")
-
-            # Separate branches into cached vs needs processing
-            branches_to_process = [b for b in branches if b not in cached_branches]
-
-            if self.verbose or self.debug_mode:
-                if cached_branches:
-                    self._console_print(
-                        f"[dim]Using {len(cached_branches)} cached branches, checking {len(branches_to_process)} branches[/dim]"
-                    )
-
-            # Process non-cached branches
-            branch_details = self._collect_branch_details(
-                branches_to_process, show_progress=show_progress
-            )
-
-            # Add cached branches to results
-            branch_details.extend(cached_branches.values())
-
-            # Update in_worktree status for ALL branches (including cached)
-            # Worktree status is dynamic and not cached
-            worktree_branches = self.git_service.worktree_service.get_worktree_branches()
-            logger.debug(f"Worktree branches detected: {worktree_branches}")
-
-            try:
-                current_branch = self.repo.active_branch.name
-            except TypeError:
-                current_branch = None
-
-            for branch in branch_details:
-                # Check if this is the current branch
-                is_current = (branch.name == current_branch) if current_branch else False
-
-                # Set in_worktree flag (but not for current branch)
-                if branch.name in worktree_branches and not is_current:
-                    branch.in_worktree = True
-                    logger.debug(f"Setting in_worktree=True for {branch.name}")
-                else:
-                    branch.in_worktree = False
-
-            # Sort all branches (both cached and newly processed)
-            branch_details = self.sort_branches(branch_details)
-
-            # Insert worktree entries after their parent branches
-            branch_details = self._insert_worktree_entries(branch_details)
-
-            # Save cache with new data (always save, regardless of whether we used cache to load)
-            self.cache_service.save_cache(branch_details, self.main_branch)
-
-            return branch_details
-
+            return self.analyze_branches(show_progress=show_progress).branches
         except Exception as e:
             self._console_print(f"[red]Error getting branch details: {e}[/red]")
             return []
+
+    def _branch_matches_status_filter(self, branch: BranchDetails) -> bool:
+        """Return True if a branch row matches the active status filter."""
+        status_filter = self.config.get("status_filter", "all")
+        return status_filter == "all" or branch.status.value == status_filter
+
+    def _current_branch_name(self) -> Optional[str]:
+        """Return the current branch name, or None for detached HEAD."""
+        try:
+            return self.repo.active_branch.name
+        except (TypeError, AttributeError):
+            return None
+
+    def _apply_dynamic_worktree_status(self, branch_rows: list) -> None:
+        """Refresh dynamic worktree flags for local branch rows.
+
+        Worktree membership is intentionally not trusted from cache; it can
+        change independently of branch commits or status.
+        """
+        worktree_branches = self.git_service.worktree_service.get_worktree_branches()
+        logger.debug(f"Worktree branches detected: {worktree_branches}")
+
+        current_branch = self._current_branch_name()
+        for branch in branch_rows:
+            is_current = branch.name == current_branch if current_branch else False
+            branch.in_worktree = branch.name in worktree_branches and not is_current
+            logger.debug(f"Setting in_worktree={branch.in_worktree} for {branch.name}")
+
+    def _finalize_branch_analysis(
+        self,
+        branch_rows: list,
+        local_branch_names: list,
+        branches_to_process: list,
+        cached_count: int,
+        refreshed_count: int,
+        is_complete: bool,
+        save_cache: bool,
+    ) -> BranchAnalysisResult:
+        """Finalize shared branch analysis rows and metadata."""
+        self._apply_dynamic_worktree_status(branch_rows)
+        branch_rows = self.sort_branches(branch_rows)
+
+        if save_cache:
+            # Cache only local branch rows. Worktree rows are view-specific and
+            # are re-derived from Git worktree metadata each analysis run.
+            self.cache_service.save_cache(branch_rows, self.main_branch)
+
+        display_rows = self._insert_worktree_entries(branch_rows)
+
+        return BranchAnalysisResult(
+            branches=display_rows,
+            local_branch_names=list(local_branch_names),
+            branches_to_process=list(branches_to_process),
+            deletable_branches=self.get_deletable_branches(
+                display_rows, force_mode=self.force_mode
+            ),
+            removable_worktrees=self.get_removable_worktrees(display_rows),
+            current_branch=self._current_branch_name(),
+            github_base_url=self._get_github_base_url(),
+            cached_count=cached_count,
+            refreshed_count=refreshed_count,
+            is_complete=is_complete,
+        )
 
     def _check_main_branch_status(self) -> bool:
         """Check if main branch is up to date. Returns False if behind."""
@@ -901,27 +924,28 @@ class BranchKeeper:
         except Exception:
             return None
 
-    def _display_and_cleanup(self, branch_details: list, cleanup_enabled: bool) -> None:
-        """Display branch details and optionally perform cleanup."""
-        if not branch_details:
+    def _display_and_cleanup(self, analysis: BranchAnalysisResult, cleanup_enabled: bool) -> None:
+        """Display branch analysis and optionally perform cleanup."""
+        if not analysis.branches:
             self._console_print("No branches match the filter criteria")
             return
 
-        # Display results
-        github_base_url = self._get_github_base_url()
         self.display_service.display_branch_table(
-            branch_details,
+            analysis.branches,
             self.repo,
-            github_base_url,
+            analysis.github_base_url,
             self.branch_status_service,
             self.protected_branches,
             show_summary=self.verbose,
             delete_remote=self.delete_remote,
         )
 
-        # Handle cleanup if enabled
         if cleanup_enabled:
-            self._perform_cleanup(branch_details)
+            self._perform_cleanup(
+                analysis.branches,
+                branches_to_delete=analysis.deletable_branches,
+                worktrees_to_remove=analysis.removable_worktrees,
+            )
 
     def get_deletable_branches(self, branches: list, force_mode: bool = False) -> list:
         """Filter branches to get only those that can be deleted.
@@ -1024,11 +1048,21 @@ class BranchKeeper:
 
         return (deleted_branches, failed_branches, removed_worktrees, failed_worktrees)
 
-    def _perform_cleanup(self, branch_details: list) -> None:
+    def _perform_cleanup(
+        self,
+        branch_details: list,
+        branches_to_delete: Optional[list] = None,
+        worktrees_to_remove: Optional[list] = None,
+    ) -> None:
         """Delete stale and merged branches and remove worktrees after confirmation."""
-        # Use shared methods to filter deletable items
-        branches_to_delete = self.get_deletable_branches(branch_details, force_mode=self.force_mode)
-        worktrees_to_remove = self.get_removable_worktrees(branch_details)
+        # Use precomputed analysis data when available; otherwise keep the
+        # historical behavior for direct/internal callers.
+        if branches_to_delete is None:
+            branches_to_delete = self.get_deletable_branches(
+                branch_details, force_mode=self.force_mode
+            )
+        if worktrees_to_remove is None:
+            worktrees_to_remove = self.get_removable_worktrees(branch_details)
 
         if not branches_to_delete and not worktrees_to_remove:
             self._console_print("\n[green]No branches or worktrees to clean up![/green]")
