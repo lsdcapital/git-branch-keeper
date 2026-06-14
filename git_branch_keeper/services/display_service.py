@@ -9,7 +9,7 @@ from git_branch_keeper.constants import COLUMNS, CLI_COLORS
 from git_branch_keeper.formatters import (
     format_date,
     format_remote_status,
-    format_status,
+    format_display_status,
     format_changes,
     format_pr_link,
     format_branch_link_with_indent,
@@ -71,7 +71,7 @@ class DisplayService:
             )
             last_commit_date = format_date(branch.last_commit_date)
             remote_status = format_remote_status(branch.has_remote)
-            status_text = format_status(branch.status)
+            status_text = format_display_status(branch, protected_branches)
             changes_indicator = format_changes(branch, current_branch_name)
             pr_display = format_pr_link(branch.pr_status, github_base_url)
 

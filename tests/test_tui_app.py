@@ -14,7 +14,12 @@ from textual.widgets import DataTable
 
 from git_branch_keeper.config import Config
 from git_branch_keeper.core import BranchKeeper
-from git_branch_keeper.models.branch import BranchAnalysisResult, BranchDetails, BranchStatus
+from git_branch_keeper.models.branch import (
+    BranchAnalysisProgress,
+    BranchAnalysisResult,
+    BranchDetails,
+    BranchStatus,
+)
 from git_branch_keeper.ui.app import BranchKeeperApp
 
 
@@ -81,6 +86,35 @@ async def test_mark_all_deletable_marks_merged_branch(make_app):
         assert "feature/b" in app.marked_branches
 
 
+async def test_initial_load_uses_table_loader_when_no_cached_rows(make_app, monkeypatch):
+    app = make_app(None)
+    called = False
+
+    def fake_cached_analysis(*args, **kwargs):
+        return BranchAnalysisResult(
+            local_branch_names=["main"],
+            branches_to_process=["main"],
+            is_complete=False,
+        )
+
+    def fake_load_initial_data():
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(app.keeper, "get_cached_analysis_fast", fake_cached_analysis)
+    monkeypatch.setattr(app, "load_initial_data", fake_load_initial_data)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        table = app.query_one(DataTable)
+        assert called is True
+        assert app.is_refreshing is True
+        assert table.loading is True
+        status = app.query_one("#status-bar").render()
+        assert "Refreshing" in str(status)
+
+
 async def test_refresh_binding_shows_immediate_feedback(make_app, monkeypatch):
     app = make_app([_branch("feature/a")])
     called = False
@@ -101,6 +135,7 @@ async def test_refresh_binding_shows_immediate_feedback(make_app, monkeypatch):
         assert table.loading is False
         status = app.query_one("#status-bar").render()
         assert "Refreshing" in str(status)
+        assert "Starting" in str(status)
         assert "actions paused" in str(status)
 
 
@@ -108,13 +143,51 @@ async def test_marking_is_paused_while_refreshing(make_app):
     app = make_app([_branch("feature/a")])
 
     async with app.run_test() as pilot:
-        app._set_refreshing(True, show_loading=False)
+        app._set_refreshing(True)
         await pilot.press("space")
         await pilot.pause()
 
         assert app.marked_branches == set()
         status = app.query_one("#status-bar").render()
         assert "marking paused" in str(status)
+
+
+async def test_refresh_progress_shows_counts_and_percent(make_app):
+    app = make_app([_branch("feature/a")])
+
+    async with app.run_test() as pilot:
+        app._set_refreshing(True)
+        app._set_analysis_progress(
+            BranchAnalysisProgress(
+                phase="Processing branches",
+                current=3,
+                total=10,
+            )
+        )
+        await pilot.pause()
+
+        status = app.query_one("#status-bar").render()
+        assert "Processing branches 3/10 (30%)" in str(status)
+
+
+async def test_deletion_progress_uses_delete_label(make_app):
+    app = make_app([_branch("feature/a")])
+
+    async with app.run_test() as pilot:
+        app._set_refreshing(True, operation_label="Deleting")
+        app._set_analysis_progress(
+            BranchAnalysisProgress(
+                phase="Cleaning up",
+                current=1,
+                total=2,
+                message="Deleted feature/a",
+            )
+        )
+        await pilot.pause()
+
+        status = app.query_one("#status-bar").render()
+        assert "Deleting" in str(status)
+        assert "Deleted feature/a 1/2 (50%)" in str(status)
 
 
 async def test_apply_refresh_result_preserves_scroll_position(make_app):

@@ -22,6 +22,7 @@ from .branch import (
 # Status formatters
 from .status import (
     format_status,
+    format_display_status,
     format_deletion_reason,
     format_deletion_confirmation_items,
     get_branch_style_type,
@@ -45,6 +46,7 @@ __all__ = [
     "format_changes",
     # Status
     "format_status",
+    "format_display_status",
     "format_deletion_reason",
     "format_deletion_confirmation_items",
     "get_branch_style_type",

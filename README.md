@@ -327,7 +327,7 @@ Choose one auth source. GBK tries them in this order: config `github_token`, `GI
 
 ### How Branch Analysis Works
 
-CLI, TUI, and JSON output all use the same analysis path. Each branch is processed as one work item, so the single `Processing branches (...)` progress bar includes GitHub PR lookup (when enabled), local Git merge checks, dirty/worktree checks, and status calculation.
+CLI, TUI, and JSON output all use the same analysis path. Each branch is processed as one work item, so the single `Processing branches (...)` progress bar includes GitHub PR lookup (when enabled), local Git merge checks, dirty/worktree checks, and status calculation. When GitHub integration is enabled, GBK caps branch workers below PyGithub's default API connection pool size to avoid urllib3 connection-pool warnings.
 
 For each branch, GBK uses this order:
 

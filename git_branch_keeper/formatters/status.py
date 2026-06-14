@@ -17,6 +17,33 @@ def format_status(status: BranchStatus) -> str:
     return STATUS_DISPLAY.get(status.value, status.value)
 
 
+def has_cleanup_blockers(branch: BranchDetails, protected_branches: list[str]) -> bool:
+    """Return True when a stale/merged row is blocked from cleanup.
+
+    The underlying merge/stale status remains true, but displaying a plain
+    ``merged`` label for dirty/protected cleanup candidates is misleading: from
+    the user's perspective those rows still need attention before safe cleanup.
+    """
+    if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
+        return False
+
+    if branch.name in protected_branches:
+        return True
+
+    return (
+        branch.modified_files is True
+        or branch.untracked_files is True
+        or branch.staged_files is True
+    )
+
+
+def format_display_status(branch: BranchDetails, protected_branches: list[str]) -> str:
+    """Format status for cleanup-focused CLI/TUI display."""
+    if has_cleanup_blockers(branch, protected_branches):
+        return "blocked"
+    return format_status(branch.status)
+
+
 def format_deletion_reason(status: BranchStatus) -> str:
     """
     Format deletion reason based on branch status.
@@ -98,8 +125,12 @@ def get_branch_style_type(branch: BranchDetails, protected_branches: list[str]) 
             f"Branch {branch.name}: status={branch.status.value}, in_worktree={is_in_worktree}, has_uncommitted={has_uncommitted}"
         )
 
-        if has_uncommitted or is_in_worktree:
-            return BranchStyleType.WARNING  # Can't delete - has issues
+        if has_uncommitted:
+            return BranchStyleType.WARNING  # Can't delete - has uncommitted changes
+        if is_in_worktree:
+            # Clean merged/stale worktree checkouts are cleanup candidates: GBK
+            # removes the worktree first, then deletes the now-unblocked branch.
+            return BranchStyleType.DELETABLE
         return BranchStyleType.DELETABLE  # Will be deleted
 
     return BranchStyleType.ACTIVE

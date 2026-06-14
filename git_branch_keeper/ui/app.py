@@ -8,6 +8,7 @@ import git
 
 from textual import work
 from textual.app import App, ComposeResult
+from textual.timer import Timer
 from textual.binding import Binding
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Footer, Static
@@ -25,7 +26,7 @@ from git_branch_keeper.constants import (
 from git_branch_keeper.formatters import (
     format_date,
     format_remote_status,
-    format_status,
+    format_display_status,
     format_age,
     format_changes,
     format_deletion_confirmation_items,
@@ -33,7 +34,12 @@ from git_branch_keeper.formatters import (
     format_pr_link,
     get_branch_style_type,
 )
-from git_branch_keeper.models.branch import BranchAnalysisResult, BranchDetails, BranchStatus
+from git_branch_keeper.models.branch import (
+    BranchAnalysisProgress,
+    BranchAnalysisResult,
+    BranchDetails,
+    BranchStatus,
+)
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.ui.screens import ConfirmScreen, InfoScreen, TabbedInfoScreen
 from git_branch_keeper.ui.widgets import NonExpandingHeader
@@ -125,9 +131,11 @@ class BranchKeeperApp(App):
         self.sort_reverse = False  # Newest first by default
         self.cleanup_mode = cleanup_mode
         self.is_refreshing = False
+        self.operation_label = "Refreshing"
+        self.analysis_progress: Optional[BranchAnalysisProgress] = None
         self.status_message: Optional[str] = None
         self.status_message_severity = "information"
-        self._status_message_timer = None
+        self._status_message_timer: Optional[Timer] = None
 
         # Set subtitle to show repository name (version displays on right via clock)
         repo_path = self.keeper.repo.working_dir
@@ -256,19 +264,64 @@ class BranchKeeperApp(App):
                 lambda: self._clear_status_message(message),
             )
 
-    def _should_show_table_loading(self) -> bool:
-        """Use table loading only when there are no rows to keep visible."""
-        table = self.query_one(DataTable)
-        return table.row_count == 0
+    def _set_analysis_progress(self, progress: BranchAnalysisProgress) -> None:
+        """Update TUI-native branch-analysis progress."""
+        self.analysis_progress = progress
+        self._update_status()
 
-    def _set_refreshing(self, refreshing: bool, show_loading: Optional[bool] = None) -> None:
-        """Update visible refresh state for the TUI."""
+    def _analysis_progress_callback(self, progress: BranchAnalysisProgress) -> None:
+        """Thread-safe progress callback passed into the shared analyzer."""
+        try:
+            self.call_from_thread(self._set_analysis_progress, progress)
+        except RuntimeError:
+            logger.debug("Unable to update TUI analysis progress", exc_info=True)
+
+    def _format_operation_progress(self) -> str:
+        """Format the current operation phase/count for the status bar."""
+        progress = self.analysis_progress
+        if progress is None:
+            return f"⟳ {self.operation_label}: Starting… — actions paused"
+
+        label = progress.message or progress.phase
+        if progress.total is None:
+            detail = f"{label}…"
+        elif progress.total <= 0:
+            detail = f"{label} (100%)"
+        else:
+            current = max(0, min(progress.current, progress.total))
+            detail = f"{label} {current}/{progress.total} ({progress.percent}%)"
+
+        suffix = "navigation OK; actions paused" if self.operation_label == "Refreshing" else "actions paused"
+        return f"⟳ {self.operation_label}: {detail} — {suffix}"
+
+    def _set_refreshing(
+        self,
+        refreshing: bool,
+        show_initial_loader: bool = False,
+        operation_label: str = "Refreshing",
+    ) -> None:
+        """Update visible refresh state for the TUI.
+
+        The full-table loader is reserved for cold/forced startup loads where
+        there are no rows to keep on screen. In-place refreshes keep the table
+        visible and report progress only in the status bar.
+        """
         self.is_refreshing = refreshing
+        self.operation_label = operation_label
+        table = self.query_one(DataTable)
+
         if refreshing:
             self._set_status_message(None)
-        table = self.query_one(DataTable)
-        if show_loading is not None:
-            table.loading = show_loading
+            table.loading = show_initial_loader
+            if self.analysis_progress is None:
+                self.analysis_progress = BranchAnalysisProgress(
+                    phase="Starting",
+                    message="Starting",
+                )
+        else:
+            table.loading = False
+            self.analysis_progress = None
+            self.operation_label = "Refreshing"
         self._update_status()
 
     def _block_if_refreshing(self, action_name: str) -> bool:
@@ -277,7 +330,7 @@ class BranchKeeperApp(App):
             return False
 
         self._set_status_message(
-            f"Refresh in progress — {action_name} paused; navigation is OK",
+            f"{self.operation_label} in progress — {action_name} paused; navigation is OK",
             severity="warning",
         )
         return True
@@ -311,7 +364,10 @@ class BranchKeeperApp(App):
                 self._apply_analysis_result(cached_analysis)
 
             if not cached_analysis.is_complete:
-                self._set_refreshing(True, show_loading=not bool(cached_analysis.branches))
+                self._set_refreshing(
+                    True,
+                    show_initial_loader=not bool(cached_analysis.branches),
+                )
                 self.load_initial_data()  # @work decorator handles Worker creation
             elif not cached_analysis.branches:
                 self._set_status_message("No branches found", severity="warning")
@@ -369,8 +425,8 @@ class BranchKeeperApp(App):
         formatted_name = format_branch_name_with_indent(branch.name, branch.is_worktree, is_current)
         branch_text = Text(formatted_name, style=text_color)
 
-        # Format status using shared formatter
-        status_str = format_status(branch.status)
+        # Format cleanup-focused status using shared formatter
+        status_str = format_display_status(branch, self.keeper.protected_branches)
         status_text = Text(status_str, style=text_color)
 
         # Format last commit date using shared formatter
@@ -544,7 +600,7 @@ class BranchKeeperApp(App):
 
         if self.is_refreshing:
             status_text.append(" | ")
-            status_text.append("⟳ Refreshing… navigation OK; actions paused", style="cyan")
+            status_text.append(self._format_operation_progress(), style="cyan")
 
         if self.status_message:
             severity = self.status_message_severity
@@ -608,8 +664,19 @@ class BranchKeeperApp(App):
         if self._block_if_refreshing("mark all"):
             return
 
-        # Use shared method from keeper (normal mode)
+        # Use shared cleanup planning from keeper (normal mode). This includes
+        # merged/stale branches that become deletable after a clean worktree is
+        # removed in the same operation.
+        removable_worktrees = self.keeper.get_removable_worktrees(self.branches)
         deletable_branches = self.keeper.get_deletable_branches(self.branches, force_mode=False)
+        deletable_branches.extend(
+            self.keeper.get_branches_unblocked_by_worktree_removal(
+                self.branches,
+                branches_to_delete=deletable_branches,
+                worktrees_to_remove=removable_worktrees,
+                force_mode=False,
+            )
+        )
 
         for branch in deletable_branches:
             self.marked_branches.add(branch.name)
@@ -744,6 +811,15 @@ class BranchKeeperApp(App):
                     ):
                         branches.append(branch)
 
+            branches.extend(
+                self.keeper.get_branches_unblocked_by_worktree_removal(
+                    self.branches,
+                    branches_to_delete=branches,
+                    worktrees_to_remove=worktrees,
+                    force_mode=is_force,
+                )
+            )
+
             return branches, worktrees
 
         # Process force-marked branches first
@@ -756,21 +832,41 @@ class BranchKeeperApp(App):
             self.marked_branches, is_force=False
         )
 
+        deletion_batch_id = self.keeper.git_service.deletion_journal.new_batch_id()
+        self._set_refreshing(True, operation_label="Deleting")
+        self.delete_marked_items(
+            force_branches,
+            force_worktrees,
+            normal_branches,
+            normal_worktrees,
+            deletion_batch_id,
+        )
+
+    @work(exclusive=True, thread=False)
+    async def delete_marked_items(
+        self,
+        force_branches: list,
+        force_worktrees: list,
+        normal_branches: list,
+        normal_worktrees: list,
+        deletion_batch_id: str,
+    ) -> None:
+        """Delete marked branches/worktrees in the background with progress."""
         all_deleted_branches = []
         all_failed_branches = []
         all_removed_worktrees = []
         all_failed_worktrees = []
-        deletion_batch_id = self.keeper.git_service.deletion_journal.new_batch_id()
 
-        # Use shared deletion logic from keeper
         try:
             # Delete force-marked items with force mode
             if force_branches or force_worktrees:
-                deleted, failed_b, removed, failed_w = self.keeper.perform_deletion(
+                deleted, failed_b, removed, failed_w = await asyncio.to_thread(
+                    self.keeper.perform_deletion,
                     force_branches,
                     force_worktrees,
                     force_mode=True,
                     batch_id=deletion_batch_id,
+                    progress_callback=self._analysis_progress_callback,
                 )
                 all_deleted_branches.extend(deleted)
                 all_failed_branches.extend(failed_b)
@@ -779,11 +875,13 @@ class BranchKeeperApp(App):
 
             # Delete normal-marked items without force
             if normal_branches or normal_worktrees:
-                deleted, failed_b, removed, failed_w = self.keeper.perform_deletion(
+                deleted, failed_b, removed, failed_w = await asyncio.to_thread(
+                    self.keeper.perform_deletion,
                     normal_branches,
                     normal_worktrees,
                     force_mode=False,
                     batch_id=deletion_batch_id,
+                    progress_callback=self._analysis_progress_callback,
                 )
                 all_deleted_branches.extend(deleted)
                 all_failed_branches.extend(failed_b)
@@ -838,6 +936,8 @@ class BranchKeeperApp(App):
         except Exception as e:
             error_msg = f"Error during deletion:\n\n{str(e)}"
             self.push_screen(InfoScreen(error_msg))
+        finally:
+            self._set_refreshing(False)
 
     def _repo_path(self) -> str:
         """Return the working repository path for undo/restore operations."""
@@ -1013,14 +1113,19 @@ class BranchKeeperApp(App):
     async def load_initial_data(self) -> None:
         """Load branch data on initial TUI startup (runs in background).
 
-        Keeps refresh feedback in the status bar; table loading is used only when empty.
+        Keeps refresh feedback in the status bar with shared analyzer progress.
+        Uses the full-table loading screen only when there are no rows yet.
         """
         try:
-            self._set_refreshing(True, show_loading=self._should_show_table_loading())
+            self._set_refreshing(True, show_initial_loader=not bool(self.branches))
 
-            # Use the shared analyzer with progress disabled for TUI.
+            # Use the shared analyzer with Rich progress disabled for TUI.
             # keeper methods are sync, so run them off the event loop.
-            analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
+            analysis = await asyncio.to_thread(
+                self.keeper.analyze_branches,
+                show_progress=False,
+                progress_callback=self._analysis_progress_callback,
+            )
 
             if analysis.branches:
                 preserve_existing_rows = bool(self.branches)
@@ -1037,7 +1142,7 @@ class BranchKeeperApp(App):
             error_msg = f"Error loading branches:\n\n{str(e)}\n\nCheck the logs for more details."
             self.push_screen(InfoScreen(error_msg))
         finally:
-            self._set_refreshing(False, show_loading=False)
+            self._set_refreshing(False)
 
     @work(exclusive=True, thread=False)
     async def load_additional_data(
@@ -1052,14 +1157,18 @@ class BranchKeeperApp(App):
             cached_branches: Previously cached branch details (can be None)
             branches_to_process: List of branch names that need processing
         """
-        self._set_refreshing(True, show_loading=self._should_show_table_loading())
+        self._set_refreshing(True)
 
         try:
             logger.debug(
                 f"Refreshing cached TUI data via shared analyzer; "
                 f"{len(branches_to_process)} branches need processing"
             )
-            analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
+            analysis = await asyncio.to_thread(
+                self.keeper.analyze_branches,
+                show_progress=False,
+                progress_callback=self._analysis_progress_callback,
+            )
 
             if analysis.branches:
                 preserve_existing_rows = bool(self.branches)
@@ -1076,7 +1185,7 @@ class BranchKeeperApp(App):
             error_msg = f"Error loading additional branches:\n\n{str(e)}\n\nCheck the logs for more details."
             self.push_screen(InfoScreen(error_msg))
         finally:
-            self._set_refreshing(False, show_loading=False)
+            self._set_refreshing(False)
 
     def action_refresh(self) -> None:
         """Trigger refresh of branch data."""
@@ -1084,7 +1193,7 @@ class BranchKeeperApp(App):
             self._set_status_message("Refresh already in progress")
             return
 
-        self._set_refreshing(True, show_loading=self._should_show_table_loading())
+        self._set_refreshing(True)
         self.refresh_data()  # @work decorator handles Worker creation
 
     @work(exclusive=True, thread=False)
@@ -1094,7 +1203,7 @@ class BranchKeeperApp(App):
         Keeps existing rows visible while the status bar reports refresh progress.
         """
         # Show status-bar refresh state. Keep existing rows visible while refreshing.
-        self._set_refreshing(True, show_loading=self._should_show_table_loading())
+        self._set_refreshing(True)
 
         # Store original refresh flag value using safe .get() method
         original_refresh = self.keeper.config.get("refresh", False)
@@ -1103,8 +1212,12 @@ class BranchKeeperApp(App):
             # Temporarily enable refresh to bypass cache
             self.keeper.config.refresh = True
 
-            # Re-run the shared analyzer with progress disabled for TUI.
-            analysis = await asyncio.to_thread(self.keeper.analyze_branches, False)
+            # Re-run the shared analyzer with Rich progress disabled for TUI.
+            analysis = await asyncio.to_thread(
+                self.keeper.analyze_branches,
+                show_progress=False,
+                progress_callback=self._analysis_progress_callback,
+            )
 
             if analysis.branches:
                 self._apply_analysis_result(
@@ -1126,7 +1239,7 @@ class BranchKeeperApp(App):
         finally:
             # Restore original refresh flag
             self.keeper.config.refresh = original_refresh
-            self._set_refreshing(False, show_loading=False)
+            self._set_refreshing(False)
 
     async def action_quit(self) -> None:
         """Override quit action to clean up resources before exiting."""

@@ -146,7 +146,7 @@ def main():
         # Check if interactive mode should be used
         if use_interactive:
             # Launch interactive TUI mode immediately
-            # TUI will load data in background with loading indicator
+            # TUI will load data in background with status-bar progress
             from git_branch_keeper.ui import BranchKeeperApp
 
             # TUI keeps its historical behavior: auto-mark recommended cleanup

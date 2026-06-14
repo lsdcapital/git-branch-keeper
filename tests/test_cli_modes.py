@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+from typing import ClassVar
 
 cli_main = importlib.import_module("git_branch_keeper.cli.main")
 ui_module = importlib.import_module("git_branch_keeper.ui")
@@ -10,13 +11,13 @@ ui_module = importlib.import_module("git_branch_keeper.ui")
 class FakeBranchKeeper:
     """Minimal BranchKeeper test double for CLI wiring tests."""
 
-    instances = []
+    instances: ClassVar[list["FakeBranchKeeper"]] = []
 
     def __init__(self, repo_path, config, tui_mode=False):
         self.repo_path = repo_path
         self.config = config
         self.tui_mode = tui_mode
-        self.process_calls = []
+        self.process_calls: list[bool] = []
         FakeBranchKeeper.instances.append(self)
 
     def process_branches(self, cleanup_enabled=False):
@@ -26,7 +27,7 @@ class FakeBranchKeeper:
 class FakeBranchKeeperApp:
     """Minimal TUI test double for cleanup mode wiring tests."""
 
-    instances = []
+    instances: ClassVar[list["FakeBranchKeeperApp"]] = []
 
     def __init__(self, keeper, cleanup_mode=False):
         self.keeper = keeper

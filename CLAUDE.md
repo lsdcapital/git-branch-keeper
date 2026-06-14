@@ -109,10 +109,11 @@ deleting" note. A heuristic guess must never make a branch auto-deletable.
 
 When GitHub auth is available (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or
 authenticated `gh` CLI), PR metadata is fetched inside each branch processing worker
-rather than as a separate prefetch phase. Open PRs keep branches active/protected. A
-merged PR is authoritative only when the local branch tip still matches the PR head SHA;
-if the local tip differs, GBK adds a warning note and falls through to the git-native
-checks above.
+rather than as a separate prefetch phase. GitHub-enabled branch workers are capped below
+PyGithub/urllib3's default API connection pool size to avoid connection-pool warning
+spam. Open PRs keep branches active/protected. A merged PR is authoritative only when
+the local branch tip still matches the PR head SHA; if the local tip differs, GBK adds
+a warning note and falls through to the git-native checks above.
 
 ### Error Handling
 - Services use exceptions for error propagation

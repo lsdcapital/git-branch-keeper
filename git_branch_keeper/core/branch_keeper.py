@@ -4,7 +4,7 @@ import signal
 import sys
 from contextlib import nullcontext
 from typing import Dict, Optional, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 import git
 from rich.console import Console
@@ -14,7 +14,10 @@ from git_branch_keeper.models.branch import (
     BranchStatus,
     SyncStatus,
     BranchDetails,
+    BranchAnalysisProgress,
+    BranchAnalysisProgressCallback,
     BranchAnalysisResult,
+    OperationProgressCallback,
 )
 from git_branch_keeper.services.git import GitHubService, GitOperations
 from git_branch_keeper.services.git.github import resolve_github_token
@@ -30,6 +33,11 @@ from git_branch_keeper.formatters import format_deletion_confirmation_items, for
 
 console = Console()
 logger = get_logger(__name__)
+
+# PyGithub/urllib3 defaults to a 10-connection pool for api.github.com. Keep
+# GitHub-enabled branch processing under that so the unified progress loop does
+# not flood the pool with concurrent PR lookups.
+GITHUB_ENABLED_WORKER_CAP = 8
 
 # Module-level reference to the active BranchKeeper instance for signal handling
 _active_keeper: Optional["BranchKeeper"] = None
@@ -322,10 +330,14 @@ class BranchKeeper:
             worktree_info.path
         )
 
-        # If empty dict (orphaned or error), set to None
+        # If status is unavailable, leave flags as None and surface the reason in notes.
         modified_files = status_details.get("modified") if status_details else None
         untracked_files = status_details.get("untracked") if status_details else None
         staged_files = status_details.get("staged") if status_details else None
+        status_error = status_details.get("error") if status_details else None
+        notes = f"{'[ORPHANED] ' if worktree_info.is_orphaned else ''}{worktree_info.path}"
+        if status_error:
+            notes = f"{notes}\n[ERROR] {status_error}"
 
         # Reuse parent branch data but mark as worktree
         return BranchDetails(
@@ -340,7 +352,7 @@ class BranchKeeper:
             sync_status=parent_branch.sync_status,
             pr_status=parent_branch.pr_status,
             pr_details=parent_branch.pr_details,
-            notes=f"{'[ORPHANED] ' if worktree_info.is_orphaned else ''}{worktree_info.path}",
+            notes=notes,
             in_worktree=False,  # This IS the worktree, not "in" a worktree
             is_worktree=True,
             worktree_path=worktree_info.path,
@@ -397,7 +409,46 @@ class BranchKeeper:
         except Exception as e:
             self._console_print(f"[red]Error processing branches: {e}[/red]")
 
-    def analyze_branches(self, show_progress: bool = True) -> BranchAnalysisResult:
+    def _emit_operation_progress(
+        self,
+        progress_callback: Optional[OperationProgressCallback],
+        phase: str,
+        current: int = 0,
+        total: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        """Emit a shared operation progress update if a callback was supplied."""
+        if progress_callback is None:
+            return
+
+        try:
+            progress_callback(
+                BranchAnalysisProgress(
+                    phase=phase,
+                    current=current,
+                    total=total,
+                    message=message,
+                )
+            )
+        except Exception:
+            logger.debug("Operation progress callback failed", exc_info=True)
+
+    def _emit_analysis_progress(
+        self,
+        progress_callback: Optional[BranchAnalysisProgressCallback],
+        phase: str,
+        current: int = 0,
+        total: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        """Emit a branch-analysis progress update if a callback was supplied."""
+        self._emit_operation_progress(progress_callback, phase, current, total, message)
+
+    def analyze_branches(
+        self,
+        show_progress: bool = True,
+        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
+    ) -> BranchAnalysisResult:
         """Analyze branch state using the shared CLI/TUI data path.
 
         This is the single source of truth for branch discovery, cache refresh
@@ -407,15 +458,26 @@ class BranchKeeper:
 
         Args:
             show_progress: Whether to show Rich progress while processing branches.
+            progress_callback: Optional callback for UI-native progress updates.
 
         Returns:
             BranchAnalysisResult with display rows and shared metadata.
         """
+        self._emit_analysis_progress(progress_callback, "Checking main branch")
         if not self._check_main_branch_status():
+            self._emit_analysis_progress(progress_callback, "Complete", 0, 0)
             return BranchAnalysisResult(is_complete=False)
 
+        self._emit_analysis_progress(progress_callback, "Discovering branches")
         branches = self._get_filtered_branches()
         if not branches:
+            self._emit_analysis_progress(
+                progress_callback,
+                "Complete",
+                0,
+                0,
+                "No branches found",
+            )
             return BranchAnalysisResult(local_branch_names=[])
 
         use_cache = not self.config.get("refresh", False)
@@ -423,6 +485,7 @@ class BranchKeeper:
         branches_to_process = branches
 
         if use_cache:
+            self._emit_analysis_progress(progress_callback, "Loading cache")
             cached_branches = self.cache_service.get_cached_branches(branches)
             logger.debug(f"Loaded {len(cached_branches)} cached branches")
 
@@ -434,13 +497,20 @@ class BranchKeeper:
                     f"[dim]Using {stable_count} stable cached branches, refreshing {len(branches_to_process)} branches[/dim]"
                 )
         else:
+            self._emit_analysis_progress(
+                progress_callback,
+                "Preparing refresh",
+                message=f"Refreshing all {len(branches)} branches",
+            )
             if self.verbose or self.debug_mode:
                 self._console_print(
                     f"[dim]Refreshing all {len(branches)} branches (--refresh mode)[/dim]"
                 )
 
         refreshed_details = self._collect_branch_details(
-            branches_to_process, show_progress=show_progress
+            branches_to_process,
+            show_progress=show_progress,
+            progress_callback=progress_callback,
         )
 
         branch_rows = list(refreshed_details)
@@ -455,7 +525,8 @@ class BranchKeeper:
             if self._branch_matches_status_filter(cached_branch):
                 branch_rows.append(cached_branch)
 
-        return self._finalize_branch_analysis(
+        self._emit_analysis_progress(progress_callback, "Finalizing", len(branches), len(branches))
+        analysis = self._finalize_branch_analysis(
             branch_rows,
             local_branch_names=branches,
             branches_to_process=branches_to_process,
@@ -464,6 +535,14 @@ class BranchKeeper:
             is_complete=True,
             save_cache=True,
         )
+        self._emit_analysis_progress(
+            progress_callback,
+            "Complete",
+            len(branches_to_process),
+            len(branches_to_process),
+            "Branch data ready",
+        )
+        return analysis
 
     def get_cached_analysis_fast(
         self, finalize_partial: bool = False, include_refresh_candidates: bool = False
@@ -580,13 +659,19 @@ class BranchKeeper:
         Worktree membership is intentionally not trusted from cache; it can
         change independently of branch commits or status.
         """
-        worktree_branches = self.git_service.worktree_service.get_worktree_branches()
+        worktree_infos = self.git_service.worktree_service.get_worktree_info()
+        worktree_by_branch = {
+            wt.branch_name: wt for wt in worktree_infos if wt.branch_name and not wt.is_main
+        }
+        worktree_branches = set(worktree_by_branch)
         logger.debug(f"Worktree branches detected: {worktree_branches}")
 
         current_branch = self._current_branch_name()
         for branch in branch_rows:
             is_current = branch.name == current_branch if current_branch else False
             branch.in_worktree = branch.name in worktree_branches and not is_current
+            if branch.in_worktree and branch.worktree_path is None:
+                branch.worktree_path = worktree_by_branch[branch.name].path
             logger.debug(f"Setting in_worktree={branch.in_worktree} for {branch.name}")
 
     def _finalize_branch_analysis(
@@ -610,14 +695,23 @@ class BranchKeeper:
 
         display_rows = self._insert_worktree_entries(branch_rows)
 
+        removable_worktrees = self.get_removable_worktrees(display_rows)
+        deletable_branches = self.get_deletable_branches(display_rows, force_mode=self.force_mode)
+        deletable_branches.extend(
+            self.get_branches_unblocked_by_worktree_removal(
+                display_rows,
+                branches_to_delete=deletable_branches,
+                worktrees_to_remove=removable_worktrees,
+                force_mode=self.force_mode,
+            )
+        )
+
         return BranchAnalysisResult(
             branches=display_rows,
             local_branch_names=list(local_branch_names),
             branches_to_process=list(branches_to_process),
-            deletable_branches=self.get_deletable_branches(
-                display_rows, force_mode=self.force_mode
-            ),
-            removable_worktrees=self.get_removable_worktrees(display_rows),
+            deletable_branches=deletable_branches,
+            removable_worktrees=removable_worktrees,
             current_branch=self._current_branch_name(),
             github_base_url=self._get_github_base_url(),
             cached_count=cached_count,
@@ -715,7 +809,12 @@ class BranchKeeper:
 
         return branch_details
 
-    def _collect_branch_details(self, branches: list, show_progress: bool = True) -> list:
+    def _collect_branch_details(
+        self,
+        branches: list,
+        show_progress: bool = True,
+        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
+    ) -> list:
         """Process branches and collect their details with unified progress tracking.
 
         Branch analysis must not modify the user's working tree or stash. The
@@ -725,8 +824,10 @@ class BranchKeeper:
         Args:
             branches: List of branch names to process
             show_progress: Whether to show Rich Progress bars (default True for CLI, False for TUI)
+            progress_callback: Optional callback for UI-native progress updates.
         """
         if not branches:
+            self._emit_analysis_progress(progress_callback, "Processing branches", 0, 0)
             return []
 
         branch_details = []
@@ -754,8 +855,16 @@ class BranchKeeper:
         # branch work item so there is one processing path/progress state.
         if self.verbose or self.debug_mode:
             self._console_print("Processing branches...")
+            self._emit_analysis_progress(
+                progress_callback,
+                "Processing branches",
+                0,
+                len(branches),
+                "Processing branches sequentially",
+            )
 
             # Process branches sequentially in verbose mode for readable logs
+            completed = 0
             for branch_name in branches:
                 details = self._process_single_branch(
                     branch_name,
@@ -767,6 +876,14 @@ class BranchKeeper:
                 )
                 if details:
                     branch_details.append(details)
+                completed += 1
+                self._emit_analysis_progress(
+                    progress_callback,
+                    "Processing branches",
+                    completed,
+                    len(branches),
+                    "Processing branches sequentially",
+                )
         else:
             # PR metadata fetches happen inside the branch workers and are covered
             # by this single progress bar.
@@ -780,6 +897,14 @@ class BranchKeeper:
                     max_workers = self._get_worker_count_for_branches(len(branches))
                     worker_label = "worker" if max_workers == 1 else "workers"
                     task_desc = f"Processing branches ({max_workers} {worker_label})..."
+
+                self._emit_analysis_progress(
+                    progress_callback,
+                    "Processing branches",
+                    0,
+                    len(branches),
+                    task_desc.rstrip("."),
+                )
 
                 # Only create task if we have a real Progress object
                 task = (
@@ -798,6 +923,7 @@ class BranchKeeper:
                         task,
                         current_branch,
                         current_branch_status,
+                        progress_callback,
                     )
                 else:
                     # Parallel processing
@@ -809,6 +935,7 @@ class BranchKeeper:
                         task,
                         current_branch,
                         current_branch_status,
+                        progress_callback,
                     )
 
         # Sort branches according to configuration
@@ -825,10 +952,11 @@ class BranchKeeper:
         task,
         current_branch_name: Optional[str] = None,
         current_branch_status: Optional[dict] = None,
+        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
     ) -> list:
         """Process branches sequentially."""
         branch_details = []
-        for branch_name in branches:
+        for completed, branch_name in enumerate(branches, start=1):
             details = self._process_single_branch(
                 branch_name,
                 status_filter,
@@ -841,13 +969,23 @@ class BranchKeeper:
                 branch_details.append(details)
             if progress:  # Only update if progress bar exists
                 progress.update(task, advance=1)
+            self._emit_analysis_progress(
+                progress_callback,
+                "Processing branches",
+                completed,
+                len(branches),
+            )
         return branch_details
 
     def _get_worker_count_for_branches(self, branch_count: int) -> int:
-        """Return the effective worker count, capped by the number of branches."""
+        """Return the effective worker count, capped by branch count and GitHub limits."""
         configured_workers = get_optimal_worker_count(self.config.get("workers"))
         if branch_count <= 0:
             return 1
+
+        if self.github_service.is_enabled():
+            configured_workers = min(configured_workers, GITHUB_ENABLED_WORKER_CAP)
+
         return max(1, min(configured_workers, branch_count))
 
     def _process_branches_parallel(
@@ -859,9 +997,10 @@ class BranchKeeper:
         task,
         current_branch_name: Optional[str] = None,
         current_branch_status: Optional[dict] = None,
+        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
     ) -> list:
         """Process branches in parallel using ThreadPoolExecutor."""
-        branch_details = []
+        branch_details: list[BranchDetails] = []
 
         if not branches:
             return branch_details
@@ -872,8 +1011,11 @@ class BranchKeeper:
             f"Using {max_workers} workers for parallel processing of {len(branches)} branches"
         )
 
-        # Submit all branch processing tasks
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all branch processing tasks. Manage shutdown explicitly so Ctrl-C
+        # can cancel queued work instead of waiting for every pending future.
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        future_to_branch: Dict[Future[Optional[BranchDetails]], str] = {}
+        try:
             future_to_branch = {
                 executor.submit(
                     self._process_single_branch,
@@ -888,6 +1030,7 @@ class BranchKeeper:
             }
 
             # Collect results as they complete
+            completed = 0
             for future in as_completed(future_to_branch):
                 branch_name = future_to_branch[future]
                 try:
@@ -901,6 +1044,20 @@ class BranchKeeper:
                 finally:
                     if progress:  # Only update if progress bar exists
                         progress.update(task, advance=1)
+                    completed += 1
+                    self._emit_analysis_progress(
+                        progress_callback,
+                        "Processing branches",
+                        completed,
+                        len(branches),
+                    )
+        except (KeyboardInterrupt, SystemExit):
+            for future in future_to_branch:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
         return branch_details
 
@@ -991,12 +1148,59 @@ class BranchKeeper:
             if branch.is_worktree and BranchValidationService.is_worktree_removable(branch)
         ]
 
+    def get_branches_unblocked_by_worktree_removal(
+        self,
+        branches: list,
+        branches_to_delete: list,
+        worktrees_to_remove: list,
+        force_mode: bool = False,
+    ) -> list:
+        """Return parent branches that become deletable after removing worktrees.
+
+        A branch checked out in a worktree cannot be deleted directly. If GBK is
+        already going to remove that branch's worktree, include the clean
+        merged/stale parent branch in the same cleanup plan so deletion happens
+        immediately after the worktree is removed.
+        """
+        planned_branch_names = {
+            branch.name for branch in branches_to_delete if not branch.is_worktree
+        }
+        removable_worktree_names = {wt.name for wt in worktrees_to_remove if wt.is_worktree}
+
+        unblocked = []
+        for branch in branches:
+            if branch.is_worktree:
+                continue
+            if branch.name in planned_branch_names:
+                continue
+            if branch.name not in removable_worktree_names:
+                continue
+            if branch.name in self.protected_branches:
+                continue
+            if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
+                continue
+
+            has_uncommitted = (
+                branch.modified_files is True
+                or branch.untracked_files is True
+                or branch.staged_files is True
+            )
+            if has_uncommitted and not force_mode:
+                continue
+
+            unblocked.append(branch)
+            planned_branch_names.add(branch.name)
+
+        return unblocked
+
     def perform_deletion(
         self,
         branches_to_delete: list,
         worktrees_to_remove: list,
         force_mode: bool = False,
         batch_id: Optional[str] = None,
+        progress_callback: Optional[OperationProgressCallback] = None,
+        show_progress: bool = False,
     ) -> tuple:
         """Perform deletion of branches and removal of worktrees.
 
@@ -1007,6 +1211,8 @@ class BranchKeeper:
             branches_to_delete: List of BranchDetails to delete
             worktrees_to_remove: List of BranchDetails (worktree entries) to remove
             force_mode: If True, skip uncommitted changes checks (but not PR or worktree checks)
+            progress_callback: Optional callback for UI-native progress updates.
+            show_progress: Whether to show a Rich progress bar for CLI cleanup.
 
         Returns:
             Tuple of (deleted_branches, failed_branches, removed_worktrees, failed_worktrees)
@@ -1017,44 +1223,93 @@ class BranchKeeper:
         removed_worktrees = []
         failed_worktrees = []
 
+        total_steps = len(worktrees_to_remove) + len(branches_to_delete)
+        completed = 0
+        progress_context = Progress() if show_progress and total_steps else nullcontext()
+
+        def update_progress(message: str) -> None:
+            nonlocal completed
+            completed += 1
+            if progress is not None and task is not None:
+                progress.update(task, advance=1, description=message)
+            self._emit_operation_progress(
+                progress_callback,
+                "Cleaning up",
+                completed,
+                total_steps,
+                message.rstrip("."),
+            )
+
+        self._emit_operation_progress(
+            progress_callback,
+            "Cleaning up",
+            0,
+            total_steps,
+            "Starting cleanup",
+        )
+
         if branches_to_delete and batch_id is None and not self.dry_run:
             batch_id = self.git_service.deletion_journal.new_batch_id()
 
-        # Remove worktrees first. In dry-run mode, report what would happen
-        # without touching worktree directories or Git metadata.
-        for wt in worktrees_to_remove:
-            if self.dry_run:
-                self._console_print(f"Would remove worktree at {wt.worktree_path}")
-                removed_worktrees.append(wt.worktree_path)
-                continue
-
-            is_orphaned = wt.notes and "[ORPHANED]" in wt.notes
-            force = is_orphaned or force_mode
-
-            success, error_message = self.git_service.worktree_service.remove_worktree(
-                wt.worktree_path, force=force
+        with progress_context as progress:
+            task = (
+                progress.add_task("Cleaning up...", total=total_steps)
+                if progress is not None and total_steps
+                else None
             )
 
-            if success:
-                removed_worktrees.append(wt.worktree_path)
-            else:
-                failed_worktrees.append((wt.worktree_path, error_message or "Unknown error"))
+            # Remove worktrees first. In dry-run mode, report what would happen
+            # without touching worktree directories or Git metadata.
+            for wt in worktrees_to_remove:
+                message = "Removing worktree..."
+                if self.dry_run:
+                    self._console_print(f"Would remove worktree at {wt.worktree_path}")
+                    removed_worktrees.append(wt.worktree_path)
+                    update_progress("Would remove worktree")
+                    continue
 
-        # Prune worktree metadata to update Git's internal state
-        if worktrees_to_remove and not self.dry_run:
-            self.git_service.worktree_service.prune_worktrees()
+                is_orphaned = wt.notes and "[ORPHANED]" in wt.notes
+                force = is_orphaned or force_mode
 
-        # Delete branches
-        for branch in branches_to_delete:
-            reason = format_deletion_reason(branch.status)
-            success, error_message = self.delete_branch(
-                branch.name, reason, force_mode=force_mode, batch_id=batch_id
-            )
+                success, error_message = self.git_service.worktree_service.remove_worktree(
+                    wt.worktree_path, force=force
+                )
 
-            if success:
-                deleted_branches.append(branch.name)
-            else:
-                failed_branches.append((branch.name, error_message or "Unknown error"))
+                if success:
+                    removed_worktrees.append(wt.worktree_path)
+                    message = "Removed worktree"
+                else:
+                    failed_worktrees.append((wt.worktree_path, error_message or "Unknown error"))
+                    message = "Failed to remove worktree"
+                update_progress(message)
+
+            # Prune worktree metadata to update Git's internal state
+            if worktrees_to_remove and not self.dry_run:
+                self.git_service.worktree_service.prune_worktrees()
+
+            # Delete branches
+            for branch in branches_to_delete:
+                message = f"Deleting {branch.name}..."
+                reason = format_deletion_reason(branch.status)
+                success, error_message = self.delete_branch(
+                    branch.name, reason, force_mode=force_mode, batch_id=batch_id
+                )
+
+                if success:
+                    deleted_branches.append(branch.name)
+                    message = f"Deleted {branch.name}"
+                else:
+                    failed_branches.append((branch.name, error_message or "Unknown error"))
+                    message = f"Failed to delete {branch.name}"
+                update_progress(message)
+
+        self._emit_operation_progress(
+            progress_callback,
+            "Complete",
+            total_steps,
+            total_steps,
+            "Cleanup complete",
+        )
 
         return (deleted_branches, failed_branches, removed_worktrees, failed_worktrees)
 
@@ -1073,6 +1328,17 @@ class BranchKeeper:
             )
         if worktrees_to_remove is None:
             worktrees_to_remove = self.get_removable_worktrees(branch_details)
+
+        branches_to_delete = list(branches_to_delete)
+        worktrees_to_remove = list(worktrees_to_remove)
+        branches_to_delete.extend(
+            self.get_branches_unblocked_by_worktree_removal(
+                branch_details,
+                branches_to_delete=branches_to_delete,
+                worktrees_to_remove=worktrees_to_remove,
+                force_mode=self.force_mode,
+            )
+        )
 
         if not branches_to_delete and not worktrees_to_remove:
             self._console_print("\n[green]No branches or worktrees to clean up![/green]")
@@ -1098,7 +1364,10 @@ class BranchKeeper:
         self._console_print("")
         deleted_branches, failed_branches, removed_worktrees, failed_worktrees = (
             self.perform_deletion(
-                branches_to_delete, worktrees_to_remove, force_mode=self.force_mode
+                branches_to_delete,
+                worktrees_to_remove,
+                force_mode=self.force_mode,
+                show_progress=not self.dry_run and not self.verbose and not self.debug_mode,
             )
         )
 
@@ -1350,10 +1619,16 @@ class BranchKeeper:
                 modified_files = None
                 untracked_files = None
                 staged_files = None
-            else:
+            elif all(key in status_details for key in ("modified", "untracked", "staged")):
                 modified_files = status_details["modified"]
                 untracked_files = status_details["untracked"]
                 staged_files = status_details["staged"]
+            else:
+                status_error = "Status check returned incomplete data"
+                logger.debug(f"[CORE] Incomplete status data for {branch}: {status_details}")
+                modified_files = None
+                untracked_files = None
+                staged_files = None
         except Exception as e:
             error_msg = str(e)
             logger.warning(f"Could not check branch status for {branch}: {error_msg}")

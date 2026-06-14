@@ -2,7 +2,7 @@
 
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class BranchStatus(Enum):
@@ -24,6 +24,33 @@ class SyncStatus(Enum):
     MERGED_GIT = "merged-git"
     MERGED_PR = "merged-pr"
     CLOSED_UNMERGED = "closed-unmerged"  # New status for branches with closed but unmerged PRs
+
+
+@dataclass(frozen=True)
+class BranchAnalysisProgress:
+    """Progress update emitted while analyzing branches."""
+
+    phase: str
+    current: int = 0
+    total: Optional[int] = None
+    message: Optional[str] = None
+
+    @property
+    def percent(self) -> Optional[int]:
+        """Return whole-number completion percentage when a total is known."""
+        if self.total is None:
+            return None
+        if self.total <= 0:
+            return 100
+        return max(0, min(100, round((self.current / self.total) * 100)))
+
+
+BranchAnalysisProgressCallback = Callable[[BranchAnalysisProgress], None]
+
+# Generic aliases for any long-running GBK operation that wants to reuse the
+# same CLI/TUI progress plumbing as branch analysis.
+OperationProgress = BranchAnalysisProgress
+OperationProgressCallback = Callable[[OperationProgress], None]
 
 
 @dataclass

@@ -10,8 +10,10 @@ import pytest
 
 from git_branch_keeper.config import Config
 from git_branch_keeper.core import BranchKeeper
+from git_branch_keeper.formatters import format_display_status
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.ui.app import BranchKeeperApp
+from git_branch_keeper.ui.screens import TabbedInfoScreen
 
 
 def _branch(
@@ -22,6 +24,7 @@ def _branch(
     untracked=False,
     staged=False,
     is_worktree=False,
+    in_worktree=False,
     worktree_path=None,
 ):
     return BranchDetails(
@@ -35,6 +38,7 @@ def _branch(
         has_remote=False,
         sync_status="local-only",
         is_worktree=is_worktree,
+        in_worktree=in_worktree,
         worktree_path=worktree_path,
     )
 
@@ -106,6 +110,81 @@ class TestMarkWithHierarchy:
         assert ok is False
         assert "worktree" in err.lower()
         assert app.marked_branches == set()
+
+
+class TestWorktreeCleanupPlanning:
+    def test_clean_worktree_removal_unblocks_parent_branch_deletion(self, app):
+        parent = _branch("feature/wt", in_worktree=True, worktree_path="/tmp/wt")
+        worktree = _branch("feature/wt", is_worktree=True, worktree_path="/tmp/wt")
+
+        unblocked = app.keeper.get_branches_unblocked_by_worktree_removal(
+            [parent, worktree],
+            branches_to_delete=[],
+            worktrees_to_remove=[worktree],
+            force_mode=False,
+        )
+
+        assert unblocked == [parent]
+
+    def test_dirty_worktree_parent_requires_force_to_delete_after_removal(self, app):
+        parent = _branch(
+            "feature/wt",
+            modified=True,
+            in_worktree=True,
+            worktree_path="/tmp/wt",
+        )
+        worktree = _branch(
+            "feature/wt",
+            modified=True,
+            is_worktree=True,
+            worktree_path="/tmp/wt",
+        )
+
+        normal = app.keeper.get_branches_unblocked_by_worktree_removal(
+            [parent, worktree],
+            branches_to_delete=[],
+            worktrees_to_remove=[worktree],
+            force_mode=False,
+        )
+        forced = app.keeper.get_branches_unblocked_by_worktree_removal(
+            [parent, worktree],
+            branches_to_delete=[],
+            worktrees_to_remove=[worktree],
+            force_mode=True,
+        )
+
+        assert normal == []
+        assert forced == [parent]
+
+
+class TestDisplayStatus:
+    def test_dirty_merged_branch_displays_as_blocked(self, app):
+        branch = _branch("feature/dirty", modified=True)
+
+        assert format_display_status(branch, app.keeper.protected_branches) == "blocked"
+
+    def test_clean_worktree_parent_stays_merged_when_cleanup_can_remove_worktree(self, app):
+        branch = _branch("feature/wt", in_worktree=True, worktree_path="/tmp/wt")
+
+        assert format_display_status(branch, app.keeper.protected_branches) == "merged"
+
+
+class TestInfoDeletionBlockers:
+    def test_info_screen_lists_worktree_and_dirty_blockers(self, app):
+        branch = _branch(
+            "feature/wt",
+            modified=True,
+            untracked=True,
+            in_worktree=True,
+            worktree_path="/tmp/feature-wt",
+        )
+        screen = TabbedInfoScreen(branch, app.keeper, "main")
+
+        blockers = screen._build_deletion_blockers()
+
+        assert "Branch is checked out in worktree: /tmp/feature-wt" in blockers
+        assert "Worktree/branch has modified files" in blockers
+        assert "Worktree/branch has untracked files" in blockers
 
 
 class TestUnmark:

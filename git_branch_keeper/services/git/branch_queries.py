@@ -221,7 +221,12 @@ class BranchQueries:
                 logger.debug(
                     f"Branch {branch_name} is in another worktree, using existing worktree"
                 )
-                return self.worktree_service.get_worktree_status_details(worktree_info.path)
+                status_details = self.worktree_service.get_worktree_status_details(
+                    worktree_info.path
+                )
+                status_details["in_worktree"] = True
+                status_details["worktree_path"] = worktree_info.path
+                return status_details
 
             # For current branch, check status directly without checkout
             if is_current:

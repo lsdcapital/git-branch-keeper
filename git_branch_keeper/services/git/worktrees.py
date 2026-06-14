@@ -27,6 +27,7 @@ class WorktreeService:
         self.repo_path = repo_path
         self._worktree_info: Optional[list[WorktreeInfo]] = None  # Cache for worktree information
         self._cache_lock = Lock()  # Thread safety for cache access
+        self._cleanup_lock = Lock()  # Avoid concurrent self-healing prune attempts
 
     def _get_repo(self):
         """Get a thread-safe git.Repo instance.
@@ -53,6 +54,121 @@ class WorktreeService:
         worktree_infos = self.get_worktree_info()
         return {wt.branch_name for wt in worktree_infos if wt.branch_name}
 
+    def _worktree_info_from_entry(self, entry: Dict[str, Any]) -> Optional[WorktreeInfo]:
+        """Build a WorktreeInfo object from parsed porcelain fields."""
+        path = entry.get("path", "")
+        if not path:
+            return None
+
+        branch_name = entry.get("branch", "")
+        commit_sha = entry.get("HEAD", "")
+        is_main = entry.get("is_main", False)
+        is_orphaned = not os.path.exists(path)
+
+        return WorktreeInfo(
+            path=path,
+            branch_name=branch_name,
+            commit_sha=commit_sha,
+            is_main=is_main,
+            is_orphaned=is_orphaned,
+        )
+
+    def _parse_worktree_info(self, output: str) -> list[WorktreeInfo]:
+        """Parse ``git worktree list --porcelain`` output."""
+        worktree_list: list[WorktreeInfo] = []
+        current_worktree: Dict[str, Any] = {}
+
+        for line in output.split("\n"):
+            line = line.strip()
+
+            if not line:
+                # Empty line marks end of worktree entry
+                if current_worktree:
+                    worktree_info = self._worktree_info_from_entry(current_worktree)
+                    if worktree_info is not None:
+                        worktree_list.append(worktree_info)
+                    current_worktree = {}
+                continue
+
+            if line.startswith("worktree "):
+                current_worktree["path"] = line.split(" ", 1)[1]
+                # First worktree in list is always the main one
+                current_worktree["is_main"] = not bool(worktree_list)
+            elif line.startswith("HEAD "):
+                current_worktree["HEAD"] = line.split(" ", 1)[1]
+            elif line.startswith("branch "):
+                # Extract branch name from "branch refs/heads/branch-name"
+                branch_ref = line.split(" ", 1)[1]
+                if branch_ref.startswith("refs/heads/"):
+                    current_worktree["branch"] = branch_ref[len("refs/heads/") :]
+                else:
+                    current_worktree["branch"] = ""  # Detached HEAD
+            elif line.startswith("detached"):
+                current_worktree["branch"] = ""  # Detached HEAD
+
+        # Handle last entry if no trailing blank line
+        if current_worktree:
+            worktree_info = self._worktree_info_from_entry(current_worktree)
+            if worktree_info is not None:
+                worktree_list.append(worktree_info)
+
+        return worktree_list
+
+    def _is_gbk_temp_worktree_path(self, path: str) -> bool:
+        """Return True for GBK-owned temp worktree paths."""
+        try:
+            real_path = os.path.realpath(path)
+            temp_root = os.path.realpath(tempfile.gettempdir())
+            return (
+                os.path.basename(real_path).startswith("gbk-")
+                and real_path.startswith(temp_root + os.sep)
+            )
+        except Exception:
+            return False
+
+    def _is_valid_git_worktree(self, path: str) -> bool:
+        """Return True when path is an existing, usable Git worktree."""
+        if not os.path.isdir(path):
+            return False
+
+        try:
+            repo = self._get_repo()
+            result = repo.git.execute(
+                ["git", "-C", path, "rev-parse", "--is-inside-work-tree"]
+            )
+            return result.strip() == "true"
+        except Exception:
+            return False
+
+    def _cleanup_stale_gbk_temp_worktree(self, path: str) -> bool:
+        """Remove stale GBK temp worktree files/metadata if safe to do so."""
+        if not self._is_gbk_temp_worktree_path(path):
+            return False
+
+        with self._cleanup_lock:
+            try:
+                if os.path.exists(path):
+                    shutil.rmtree(path, ignore_errors=True)
+
+                repo = self._get_repo()
+                repo.git.worktree("prune", "--expire=now")
+                logger.info(f"Pruned stale GBK temporary worktree metadata at {path}")
+                self.clear_cache()
+                return True
+            except Exception as e:
+                logger.debug(f"Could not prune stale GBK temporary worktree {path}: {e}")
+                return False
+
+    def _cleanup_stale_gbk_temp_worktrees(self, worktree_list: list[WorktreeInfo]) -> bool:
+        """Self-heal stale GBK temporary worktrees left by interrupted runs."""
+        cleaned = False
+        for worktree in worktree_list:
+            if not self._is_gbk_temp_worktree_path(worktree.path):
+                continue
+            if worktree.is_orphaned or not self._is_valid_git_worktree(worktree.path):
+                cleaned = self._cleanup_stale_gbk_temp_worktree(worktree.path) or cleaned
+        return cleaned
+
     def get_worktree_info(self) -> list[WorktreeInfo]:
         """Get detailed information about all worktrees.
 
@@ -64,85 +180,26 @@ class WorktreeService:
             if self._worktree_info is not None:
                 return self._worktree_info
 
-        worktree_list = []
+        worktree_list: list[WorktreeInfo] = []
         try:
             repo = self._get_repo()
             # Use --porcelain for machine-readable output
             output = repo.git.worktree("list", "--porcelain")
+            worktree_list = self._parse_worktree_info(output)
 
-            # Parse porcelain output
-            # Format:
-            # worktree /path/to/worktree
-            # HEAD commit_sha
-            # branch refs/heads/branch-name
-            # (blank line between worktrees)
+            if self._cleanup_stale_gbk_temp_worktrees(worktree_list):
+                # Re-read after self-healing so callers don't see stale entries.
+                output = repo.git.worktree("list", "--porcelain")
+                worktree_list = self._parse_worktree_info(output)
 
-            current_worktree: Dict[str, Any] = {}
-            for line in output.split("\n"):
-                line = line.strip()
-
-                if not line:
-                    # Empty line marks end of worktree entry
-                    if current_worktree:
-                        # Create WorktreeInfo from collected data
-                        path = current_worktree.get("path", "")
-                        branch_name = current_worktree.get("branch", "")
-                        commit_sha = current_worktree.get("HEAD", "")
-                        is_main = current_worktree.get("is_main", False)
-
-                        # Check if directory exists
-                        is_orphaned = not os.path.exists(path) if path else True
-
-                        if path:  # Only add if we have a path
-                            worktree_list.append(
-                                WorktreeInfo(
-                                    path=path,
-                                    branch_name=branch_name,
-                                    commit_sha=commit_sha,
-                                    is_main=is_main,
-                                    is_orphaned=is_orphaned,
-                                )
-                            )
-                        current_worktree = {}
-                    continue
-
-                # Parse each line
-                if line.startswith("worktree "):
-                    current_worktree["path"] = line.split(" ", 1)[1]
-                    # First worktree in list is always the main one
-                    if not worktree_list:
-                        current_worktree["is_main"] = True
-                    else:
-                        current_worktree["is_main"] = False
-                elif line.startswith("HEAD "):
-                    current_worktree["HEAD"] = line.split(" ", 1)[1]
-                elif line.startswith("branch "):
-                    # Extract branch name from "branch refs/heads/branch-name"
-                    branch_ref = line.split(" ", 1)[1]
-                    if branch_ref.startswith("refs/heads/"):
-                        current_worktree["branch"] = branch_ref[len("refs/heads/") :]
-                    else:
-                        current_worktree["branch"] = ""  # Detached HEAD
-                elif line.startswith("detached"):
-                    current_worktree["branch"] = ""  # Detached HEAD
-
-            # Handle last entry if no trailing blank line
-            if current_worktree and current_worktree.get("path"):
-                path = current_worktree.get("path", "")
-                branch_name = current_worktree.get("branch", "")
-                commit_sha = current_worktree.get("HEAD", "")
-                is_main = current_worktree.get("is_main", False)
-                is_orphaned = not os.path.exists(path) if path else True
-
-                worktree_list.append(
-                    WorktreeInfo(
-                        path=path,
-                        branch_name=branch_name,
-                        commit_sha=commit_sha,
-                        is_main=is_main,
-                        is_orphaned=is_orphaned,
-                    )
-                )
+            # GBK-created temp worktrees are implementation details. Never cache
+            # or expose them as user worktrees; otherwise parallel analysis can
+            # observe another worker's temporary checkout after it has vanished.
+            worktree_list = [
+                worktree
+                for worktree in worktree_list
+                if not self._is_gbk_temp_worktree_path(worktree.path)
+            ]
 
             logger.debug(f"Found {len(worktree_list)} worktrees")
             for wt in worktree_list:
@@ -235,14 +292,19 @@ class WorktreeService:
             worktree_path: Path to the worktree directory
 
         Returns:
-            Dict with 'modified', 'untracked', 'staged' boolean flags,
-            or empty dict if worktree path doesn't exist (orphaned)
+            Dict with 'modified', 'untracked', 'staged' boolean flags.
+            On error, returns 'error' and optionally 'orphaned'.
         """
         try:
             # Check if worktree directory exists
             if not os.path.exists(worktree_path):
                 logger.debug(f"Worktree path {worktree_path} doesn't exist (orphaned)")
-                return {}
+                if self._cleanup_stale_gbk_temp_worktree(worktree_path):
+                    return {
+                        "error": "Stale GBK temporary worktree metadata was pruned",
+                        "orphaned": True,
+                    }
+                return {"error": "Worktree path does not exist", "orphaned": True}
 
             # Run git status in the worktree directory
             # Use git -C <path> to run command in that directory
@@ -294,11 +356,22 @@ class WorktreeService:
             else:
                 error_msg = f"git status in worktree failed with exit code {status_code}"
 
+            if (
+                self._is_gbk_temp_worktree_path(worktree_path)
+                and not self._is_valid_git_worktree(worktree_path)
+                and self._cleanup_stale_gbk_temp_worktree(worktree_path)
+            ):
+                return {
+                    "error": "Stale GBK temporary worktree metadata was pruned",
+                    "orphaned": True,
+                }
+
             logger.warning(f"Could not check worktree status for {worktree_path}: {error_msg}")
-            return {}
+            return {"error": f"Git error: {error_msg}"}
         except Exception as e:
-            logger.warning(f"Could not check worktree status for {worktree_path}: {e}")
-            return {}
+            error_msg = str(e)
+            logger.warning(f"Could not check worktree status for {worktree_path}: {error_msg}")
+            return {"error": f"Status check failed: {error_msg}"}
 
     @contextmanager
     def create_temporary_worktree(self, branch_name: str):

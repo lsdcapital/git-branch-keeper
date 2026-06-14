@@ -2,7 +2,7 @@
 
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -10,7 +10,7 @@ from textual.containers import Container, Vertical, ScrollableContainer
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TabbedContent, TabPane
 
-from git_branch_keeper.formatters import format_pr_link
+from git_branch_keeper.formatters import format_display_status, format_pr_link
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 
@@ -240,6 +240,72 @@ class TabbedInfoScreen(ModalScreen):
             with Container(id="info-button-container"):
                 yield Button("Close", variant="primary", id="close")
 
+    def _worktree_path_for_branch(self) -> Optional[str]:
+        """Return the worktree path associated with this row, if any."""
+        if self.branch.worktree_path:
+            return self.branch.worktree_path
+
+        if not self.branch.in_worktree:
+            return None
+
+        try:
+            worktree_infos = self.keeper.git_service.worktree_service.get_worktree_info()
+            worktree_info = next(
+                (
+                    wt
+                    for wt in worktree_infos
+                    if wt.branch_name == self.branch.name and not wt.is_main
+                ),
+                None,
+            )
+            return worktree_info.path if worktree_info else None
+        except Exception:
+            return None
+
+    def _build_deletion_blockers(self) -> list[str]:
+        """Return human-readable reasons this row is not currently deletable."""
+        blockers = []
+        worktree_path = self._worktree_path_for_branch()
+
+        if self.branch.is_worktree:
+            if self.branch.modified_files:
+                blockers.append("Worktree has modified files")
+            if self.branch.untracked_files:
+                blockers.append("Worktree has untracked files")
+            if self.branch.staged_files:
+                blockers.append("Worktree has staged files")
+            return blockers
+
+        if BranchValidationService.is_protected(
+            self.branch.name, self.keeper.protected_branches
+        ):
+            blockers.append("Branch is protected")
+
+        if self.branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
+            blockers.append(f"Branch status is {self.branch.status.value}, not stale/merged")
+
+        if self.branch.in_worktree:
+            if worktree_path:
+                blockers.append(f"Branch is checked out in worktree: {worktree_path}")
+            else:
+                blockers.append("Branch is checked out in another worktree")
+
+        if self.branch.modified_files:
+            blockers.append("Worktree/branch has modified files")
+        if self.branch.untracked_files:
+            blockers.append("Worktree/branch has untracked files")
+        if self.branch.staged_files:
+            blockers.append("Worktree/branch has staged files")
+
+        return blockers
+
+    def _format_deletion_blockers(self) -> str:
+        """Format deletion blockers for the Info tab."""
+        blockers = self._build_deletion_blockers()
+        if not blockers:
+            return "None"
+        return "\n".join(f"  • {blocker}" for blocker in blockers)
+
     def _build_info_tab(self) -> Static:
         """Build the general info tab (always shown)."""
         # Build change details
@@ -274,13 +340,26 @@ class TabbedInfoScreen(ModalScreen):
             else:
                 notes_text = self.branch.notes
 
-        # Format PR display using shared formatter
+        # Format PR/status display using shared formatters
         github_base_url = self.keeper._get_github_base_url()
         pr_display = format_pr_link(self.branch.pr_status, github_base_url) or "None"
+        display_status = format_display_status(self.branch, self.keeper.protected_branches)
+        status_lines = f"[bold]Status:[/bold] {display_status}"
+        if display_status != self.branch.status.value:
+            status_lines += f"\n[bold]Merge Status:[/bold] {self.branch.status.value}"
+        worktree_path = self._worktree_path_for_branch()
+        deletion_blockers = self._format_deletion_blockers()
+        is_deletable = (
+            False
+            if self.branch.is_worktree
+            else BranchValidationService.is_deletable(
+                self.branch, self.keeper.protected_branches
+            )
+        )
 
         # Format detailed info
         info = f"""[bold]Branch:[/bold] {self.branch.name}
-[bold]Status:[/bold] {self.branch.status.value}
+{status_lines}
 [bold]Age:[/bold] {self.branch.age_days} days
 [bold]Last Commit:[/bold] {self.branch.last_commit_date}
 [bold]Branch State:[/bold] {changes_text}
@@ -289,11 +368,16 @@ class TabbedInfoScreen(ModalScreen):
 [bold]PRs:[/bold] {pr_display}
 [bold]Notes:[/bold] {notes_text}
 [bold]Protected:[/bold] {"Yes" if BranchValidationService.is_protected(self.branch.name, self.keeper.protected_branches) else "No"}
-[bold]Deletable:[/bold] {"Yes" if BranchValidationService.is_deletable(self.branch, self.keeper.protected_branches) else "No"}
+[bold]Deletable:[/bold] {"Yes" if is_deletable else "No"}
+[bold]Deletion Blockers:[/bold]
+{deletion_blockers}
         """.strip()
 
         if self.branch.is_worktree:
-            info += f"\n[bold]Worktree Path:[/bold] {self.branch.worktree_path}"
+            info += "\n[bold]Row Type:[/bold] Worktree entry (remove worktree before deleting branch)"
+
+        if worktree_path:
+            info += f"\n[bold]Worktree Path:[/bold] {worktree_path}"
 
         return Static(info, markup=True)
 
@@ -301,11 +385,11 @@ class TabbedInfoScreen(ModalScreen):
         """Build the files tab showing uncommitted files."""
         git_service = self.keeper.git_service
 
+        worktree_path = self._worktree_path_for_branch()
+
         # Check if this is a worktree entry or a parent branch with a worktree
-        if self.branch.is_worktree or (self.branch.in_worktree and self.branch.worktree_path):
-            file_status = git_service.get_file_status_detailed(
-                worktree_path=self.branch.worktree_path
-            )
+        if self.branch.is_worktree or (self.branch.in_worktree and worktree_path):
+            file_status = git_service.get_file_status_detailed(worktree_path=worktree_path)
         else:
             file_status = git_service.get_file_status_detailed(branch_name=self.branch.name)
 
@@ -339,16 +423,14 @@ class TabbedInfoScreen(ModalScreen):
         git_service = self.keeper.git_service
 
         # Get both staged and unstaged diffs
+        worktree_path = self._worktree_path_for_branch()
+
         # Check if this is a worktree entry or a parent branch with a worktree
-        if self.branch.is_worktree or (self.branch.in_worktree and self.branch.worktree_path):
-            unstaged_diff = git_service.get_diff(
-                worktree_path=self.branch.worktree_path, staged=False
-            )
-            staged_diff = git_service.get_diff(worktree_path=self.branch.worktree_path, staged=True)
-            file_status = git_service.get_file_status_detailed(
-                worktree_path=self.branch.worktree_path
-            )
-            base_path = self.branch.worktree_path
+        if self.branch.is_worktree or (self.branch.in_worktree and worktree_path):
+            unstaged_diff = git_service.get_diff(worktree_path=worktree_path, staged=False)
+            staged_diff = git_service.get_diff(worktree_path=worktree_path, staged=True)
+            file_status = git_service.get_file_status_detailed(worktree_path=worktree_path)
+            base_path = worktree_path
         else:
             unstaged_diff = git_service.get_diff(branch_name=self.branch.name, staged=False)
             staged_diff = git_service.get_diff(branch_name=self.branch.name, staged=True)
