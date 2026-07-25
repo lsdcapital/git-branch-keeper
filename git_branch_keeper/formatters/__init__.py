@@ -9,49 +9,44 @@ organized into logical modules:
 """
 
 # Date formatters
-from .date import format_date, format_age
-
 # Branch formatters
 from .branch import (
-    format_remote_status,
     format_branch_name,
     format_branch_name_with_indent,
     format_changes,
+    format_remote_status,
+)
+from .date import format_age, format_date
+
+# Link formatters
+from .links import (
+    format_branch_link,
+    format_branch_link_with_indent,
+    format_pr_link,
 )
 
 # Status formatters
 from .status import (
-    format_status,
-    format_display_status,
-    format_deletion_reason,
     format_deletion_confirmation_items,
+    format_deletion_reason,
+    format_display_status,
+    format_status,
     get_branch_style_type,
 )
 
-# Link formatters
-from .links import (
-    format_pr_link,
-    format_branch_link,
-    format_branch_link_with_indent,
-)
-
 __all__ = [
-    # Date
-    "format_date",
     "format_age",
-    # Branch
-    "format_remote_status",
+    "format_branch_link",
+    "format_branch_link_with_indent",
     "format_branch_name",
     "format_branch_name_with_indent",
     "format_changes",
-    # Status
-    "format_status",
-    "format_display_status",
-    "format_deletion_reason",
+    "format_date",
     "format_deletion_confirmation_items",
-    "get_branch_style_type",
-    # Links
+    "format_deletion_reason",
+    "format_display_status",
     "format_pr_link",
-    "format_branch_link",
-    "format_branch_link_with_indent",
+    "format_remote_status",
+    "format_status",
+    "get_branch_style_type",
 ]

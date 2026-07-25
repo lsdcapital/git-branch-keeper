@@ -1,8 +1,10 @@
 """Threading utilities for detecting and optimizing Python threading mode."""
 
+from __future__ import annotations
+
 import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Any
 
 
 def is_free_threading_enabled() -> bool:
@@ -16,7 +18,7 @@ def is_free_threading_enabled() -> bool:
         # sys._is_gil_enabled() returns False when GIL is disabled
         # Available in Python 3.13+
         return hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
-    except Exception:
+    except AttributeError:
         # Python < 3.13 always has GIL enabled
         return False
 
@@ -29,17 +31,13 @@ def get_python_threading_mode() -> str:
     """
     try:
         if hasattr(sys, "_is_gil_enabled"):
-            if sys._is_gil_enabled():
-                return "GIL-enabled"
-            else:
-                return "free-threading"
-        else:
-            return "GIL-enabled (Python < 3.13)"
-    except Exception:
+            return "GIL-enabled" if sys._is_gil_enabled() else "free-threading"
+        return "GIL-enabled (Python < 3.13)"
+    except AttributeError:
         return "unknown"
 
 
-def get_optimal_worker_count(user_specified: Optional[int] = None) -> int:
+def get_optimal_worker_count(user_specified: int | None = None) -> int:
     """Calculate optimal worker count based on threading mode and CPU count.
 
     Args:
@@ -54,14 +52,10 @@ def get_optimal_worker_count(user_specified: Optional[int] = None) -> int:
 
     cpu_count = os.cpu_count() or 1
 
-    try:
-        # Python 3.13+ with free-threading: can use more workers for true parallelism
-        if is_free_threading_enabled():
-            # Free-threading: use more workers (CPU_count * 2)
-            # Cap at 64 to avoid excessive overhead
-            return min(64, cpu_count * 2)
-    except Exception:
-        pass
+    # Python 3.13+ with free-threading: can use more workers for true parallelism.
+    # Cap at 64 to avoid excessive overhead.
+    if is_free_threading_enabled():
+        return min(64, cpu_count * 2)
 
     # GIL-enabled or older Python: use fewer workers for I/O-bound operations
     # CPU_count + 4 is a good heuristic for I/O-bound work
@@ -69,7 +63,7 @@ def get_optimal_worker_count(user_specified: Optional[int] = None) -> int:
     return min(32, cpu_count + 4)
 
 
-def get_threading_info() -> Dict[str, Any]:
+def get_threading_info() -> dict[str, Any]:
     """Get comprehensive information about Python threading configuration.
 
     Returns:

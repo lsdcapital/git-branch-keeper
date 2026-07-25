@@ -6,9 +6,9 @@ import git
 import pytest
 
 from git_branch_keeper.cli.undo import pick_entry, restore_entry, run_undo
-from git_branch_keeper.services.undo_service import pick_latest_batch
 from git_branch_keeper.services.deletion_journal import DeletionJournal
 from git_branch_keeper.services.git import GitOperations
+from git_branch_keeper.services.undo_service import pick_latest_batch
 
 
 @pytest.fixture

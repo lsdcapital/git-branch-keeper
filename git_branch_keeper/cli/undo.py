@@ -1,11 +1,12 @@
 """Undo command - restore branches recorded in the deletion journal."""
 
-from typing import Dict, List, Optional
+from __future__ import annotations
 
 import git
 from rich.console import Console
 from rich.table import Table
 
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.services.deletion_journal import DeletionJournal
 from git_branch_keeper.services.undo_service import (
     pick_entry,
@@ -18,10 +19,10 @@ from git_branch_keeper.utils.logging import get_logger
 console = Console()
 logger = get_logger(__name__)
 
-__all__ = ["run_undo", "pick_entry", "restore_entry"]
+__all__ = ["pick_entry", "restore_entry", "run_undo"]
 
 
-def _print_deletion_list(deletions: List[Dict]) -> None:
+def _print_deletion_list(deletions: list[dict]) -> None:
     table = Table(title="Recent deletions (most recent first)")
     table.add_column("When")
     table.add_column("Branch")
@@ -40,7 +41,7 @@ def _print_deletion_list(deletions: List[Dict]) -> None:
 
 
 def run_undo(
-    repo_path: str, target: Optional[str] = None, list_only: bool = False, force: bool = False
+    repo_path: str, target: str | None = None, list_only: bool = False, force: bool = False
 ) -> int:
     """Entry point for `git-branch-keeper undo`.
 
@@ -66,7 +67,7 @@ def run_undo(
 
     try:
         repo = git.Repo(repo_path)
-    except Exception as e:
+    except GIT_ERRORS as e:
         console.print(f"[red]Could not open repository: {e}[/red]")
         return 1
 

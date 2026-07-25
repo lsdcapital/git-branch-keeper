@@ -6,10 +6,11 @@ import sys
 from typing import Any
 
 from rich.console import Console
+
 from git_branch_keeper.cli.args import parse_args
+from git_branch_keeper.config import Config
 from git_branch_keeper.core import BranchKeeper
 from git_branch_keeper.utils.logging import setup_logging
-from git_branch_keeper.config import Config
 
 console = Console()
 
@@ -173,7 +174,10 @@ def main():
             # Display the error message without full stack trace
             console.print(f"\n[red]{e}[/red]\n")
         return 1
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - CLI entry point must fail closed
+        # Deliberately broad: this is the outermost handler for the whole run.
+        # Anything reaching here is unexpected; show a clean message (with
+        # --debug for the full traceback) instead of crashing with a raw one.
         if output_json:
             _print_json(_json_error("UNEXPECTED_ERROR", str(e)))
         else:

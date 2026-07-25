@@ -3,9 +3,11 @@
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock
-import pytest
-import git
 
+import git
+import pytest
+
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.models.branch import BranchStatus, SyncStatus
 
 
@@ -57,13 +59,13 @@ def git_repo(temp_dir):
     # Rename master to main if needed
     try:
         repo.git.branch("-M", "main")
-    except Exception:
+    except GIT_ERRORS:
         pass
 
     # Add a fake GitHub remote for testing
     try:
         repo.create_remote("origin", "git@github.com:test/test-repo.git")
-    except Exception:
+    except GIT_ERRORS:
         pass
 
     yield repo

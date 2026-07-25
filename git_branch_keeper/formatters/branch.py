@@ -1,12 +1,13 @@
 """Branch name and changes formatting utilities."""
 
-from typing import Optional
-from git_branch_keeper.models.branch import BranchDetails
+from __future__ import annotations
+
 from git_branch_keeper.constants import (
+    SYMBOL_CURRENT_BRANCH,
     SYMBOL_HAS_REMOTE,
     SYMBOL_NO_REMOTE,
-    SYMBOL_CURRENT_BRANCH,
 )
+from git_branch_keeper.models.branch import BranchDetails
 
 
 def format_remote_status(has_remote: bool) -> str:
@@ -55,7 +56,7 @@ def format_branch_name_with_indent(
     return f"{indent}{name}{current_marker}"
 
 
-def format_changes(branch: BranchDetails, current_branch: Optional[str] = None) -> str:
+def format_changes(branch: BranchDetails, current_branch: str | None = None) -> str:
     """
     Format branch state indicators showing uncommitted changes.
 

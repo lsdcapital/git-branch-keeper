@@ -39,7 +39,7 @@ class TestMergeMethodDetection:
         }
 
         # Test: Determine branch status with PR data
-        status, sync_status, pr_status, notes = keeper._determine_branch_status(
+        status, sync_status, _pr_status, _notes = keeper._determine_branch_status(
             "feature/pr-merged", pr_data
         )
 
@@ -144,7 +144,7 @@ class TestMergeMethodDetection:
         }
 
         # Test: Determine branch status with PR data
-        status, sync_status, pr_status, notes = keeper._determine_branch_status(
+        status, sync_status, _pr_status, _notes = keeper._determine_branch_status(
             "feature/git-merged", pr_data
         )
 
@@ -175,7 +175,7 @@ class TestMergeMethodDetection:
         # Test: Determine branch status with empty PR data
         pr_data = {}
 
-        status, sync_status, pr_status, notes = keeper._determine_branch_status(
+        status, sync_status, _pr_status, _notes = keeper._determine_branch_status(
             "feature/no-pr-data", pr_data
         )
 
@@ -250,7 +250,7 @@ class TestMergeMethodDetection:
         }
 
         # Test: Determine branch status
-        status, sync_status, pr_status, notes = keeper._determine_branch_status(
+        status, _sync_status, _pr_status, _notes = keeper._determine_branch_status(
             "feature/closed-unmerged", pr_data
         )
 

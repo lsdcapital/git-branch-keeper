@@ -1,15 +1,19 @@
 """Worktree operations service for git-branch-keeper."""
 
-import git
-import os
-import tempfile
-import shutil
-from contextlib import contextmanager
-from typing import Optional, Dict, Any
-from threading import Lock
+from __future__ import annotations
 
-from git_branch_keeper.models.worktree import WorktreeInfo
+import os
+import shutil
+import tempfile
+from contextlib import contextmanager
+from threading import Lock
+from typing import Any
+
+import git
+
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.models.worktree import WorktreeInfo
 from git_branch_keeper.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -25,7 +29,7 @@ class WorktreeService:
             repo_path: Path to the git repository
         """
         self.repo_path = repo_path
-        self._worktree_info: Optional[list[WorktreeInfo]] = None  # Cache for worktree information
+        self._worktree_info: list[WorktreeInfo] | None = None  # Cache for worktree information
         self._cache_lock = Lock()  # Thread safety for cache access
         self._cleanup_lock = Lock()  # Avoid concurrent self-healing prune attempts
 
@@ -54,7 +58,7 @@ class WorktreeService:
         worktree_infos = self.get_worktree_info()
         return {wt.branch_name for wt in worktree_infos if wt.branch_name}
 
-    def _worktree_info_from_entry(self, entry: Dict[str, Any]) -> Optional[WorktreeInfo]:
+    def _worktree_info_from_entry(self, entry: dict[str, Any]) -> WorktreeInfo | None:
         """Build a WorktreeInfo object from parsed porcelain fields."""
         path = entry.get("path", "")
         if not path:
@@ -76,7 +80,7 @@ class WorktreeService:
     def _parse_worktree_info(self, output: str) -> list[WorktreeInfo]:
         """Parse ``git worktree list --porcelain`` output."""
         worktree_list: list[WorktreeInfo] = []
-        current_worktree: Dict[str, Any] = {}
+        current_worktree: dict[str, Any] = {}
 
         for line in output.split("\n"):
             line = line.strip()
@@ -119,11 +123,10 @@ class WorktreeService:
         try:
             real_path = os.path.realpath(path)
             temp_root = os.path.realpath(tempfile.gettempdir())
-            return (
-                os.path.basename(real_path).startswith("gbk-")
-                and real_path.startswith(temp_root + os.sep)
+            return os.path.basename(real_path).startswith("gbk-") and real_path.startswith(
+                temp_root + os.sep
             )
-        except Exception:
+        except OSError:
             return False
 
     def _is_valid_git_worktree(self, path: str) -> bool:
@@ -133,11 +136,9 @@ class WorktreeService:
 
         try:
             repo = self._get_repo()
-            result = repo.git.execute(
-                ["git", "-C", path, "rev-parse", "--is-inside-work-tree"]
-            )
+            result = repo.git.execute(["git", "-C", path, "rev-parse", "--is-inside-work-tree"])
             return result.strip() == "true"
-        except Exception:
+        except GIT_ERRORS:
             return False
 
     def _cleanup_stale_gbk_temp_worktree(self, path: str) -> bool:
@@ -155,7 +156,7 @@ class WorktreeService:
                 logger.info(f"Pruned stale GBK temporary worktree metadata at {path}")
                 self.clear_cache()
                 return True
-            except Exception as e:
+            except (*GIT_ERRORS, OSError) as e:
                 logger.debug(f"Could not prune stale GBK temporary worktree {path}: {e}")
                 return False
 
@@ -204,7 +205,7 @@ class WorktreeService:
             logger.debug(f"Found {len(worktree_list)} worktrees")
             for wt in worktree_list:
                 logger.debug(f"  {wt}")
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Could not list worktrees: {e}")
             # Return empty list if worktree command fails
 
@@ -213,7 +214,7 @@ class WorktreeService:
             self._worktree_info = worktree_list
         return worktree_list
 
-    def remove_worktree(self, path: str, force: bool = False) -> tuple[bool, Optional[str]]:
+    def remove_worktree(self, path: str, force: bool = False) -> tuple[bool, str | None]:
         """Remove a worktree at the specified path.
 
         Args:
@@ -248,12 +249,12 @@ class WorktreeService:
 
             logger.error(f"Failed to remove worktree at {path}: {error_msg}")
             return False, error_msg
-        except Exception as e:
+        except GIT_ERRORS as e:
             error_msg = f"Unexpected error removing worktree: {e}"
             logger.error(error_msg)
             return False, error_msg
 
-    def prune_worktrees(self) -> tuple[bool, Optional[str]]:
+    def prune_worktrees(self) -> tuple[bool, str | None]:
         """Prune orphaned worktree metadata.
 
         Returns:
@@ -280,7 +281,7 @@ class WorktreeService:
 
             logger.error(f"Failed to prune worktrees: {error_msg}")
             return False, error_msg
-        except Exception as e:
+        except GIT_ERRORS as e:
             error_msg = f"Unexpected error pruning worktrees: {e}"
             logger.error(error_msg)
             return False, error_msg
@@ -368,7 +369,7 @@ class WorktreeService:
 
             logger.warning(f"Could not check worktree status for {worktree_path}: {error_msg}")
             return {"error": f"Git error: {error_msg}"}
-        except Exception as e:
+        except GIT_ERRORS as e:
             error_msg = str(e)
             logger.warning(f"Could not check worktree status for {worktree_path}: {error_msg}")
             return {"error": f"Status check failed: {error_msg}"}
@@ -413,13 +414,13 @@ class WorktreeService:
                     logger.debug(f"Removing worktree at {temp_dir}")
                     repo = self._get_repo()
                     repo.git.worktree("remove", temp_dir, "--force")
-                except Exception as cleanup_error:
+                except GIT_ERRORS as cleanup_error:
                     logger.debug(f"Error removing worktree {temp_dir}: {cleanup_error}")
 
                 # Clean up temp directory
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as dir_error:
+                except OSError as dir_error:
                     logger.debug(f"Error removing temp directory {temp_dir}: {dir_error}")
 
     @staticmethod

@@ -1,19 +1,18 @@
 """Shared undo/restore helpers for deleted branches."""
 
-from typing import Dict, List, Optional, Tuple
+from __future__ import annotations
 
 import git
 
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.services.deletion_journal import DeletionJournal
 
 
-def _local_branch_names(repo: git.Repo) -> List[str]:
+def _local_branch_names(repo: git.Repo) -> list[str]:
     return [head.name for head in repo.heads]
 
 
-def pick_entry(
-    deletions: List[Dict], repo: git.Repo, target: Optional[str] = None
-) -> Optional[Dict]:
+def pick_entry(deletions: list[dict], repo: git.Repo, target: str | None = None) -> dict | None:
     """Pick the journal entry to restore.
 
     With a target branch name, returns its most recent deletion entry.
@@ -30,7 +29,7 @@ def pick_entry(
     return None
 
 
-def pick_latest_batch(deletions: List[Dict], repo: git.Repo) -> List[Dict]:
+def pick_latest_batch(deletions: list[dict], repo: git.Repo) -> list[dict]:
     """Pick the latest deletion batch with at least one missing local branch.
 
     Returns entries in original deletion order so restored branch creation is
@@ -57,10 +56,10 @@ def pick_latest_batch(deletions: List[Dict], repo: git.Repo) -> List[Dict]:
 
 def restore_entries(
     repo_path: str,
-    entries: List[Dict],
+    entries: list[dict],
     journal: DeletionJournal,
     include_remote: bool = False,
-) -> Tuple[List[str], List[Tuple[str, str]]]:
+) -> tuple[list[str], list[tuple[str, str]]]:
     """Restore multiple deletion journal entries.
 
     Returns:
@@ -81,8 +80,8 @@ def restore_entries(
 
 
 def restore_entry(
-    repo_path: str, entry: Dict, journal: DeletionJournal, include_remote: bool = False
-) -> Tuple[bool, Optional[str]]:
+    repo_path: str, entry: dict, journal: DeletionJournal, include_remote: bool = False
+) -> tuple[bool, str | None]:
     """Restore a branch from a journal entry.
 
     Returns:
@@ -93,7 +92,7 @@ def restore_entry(
 
     try:
         repo = git.Repo(repo_path)
-    except Exception as e:
+    except GIT_ERRORS as e:
         return False, f"Could not open repository: {e}"
 
     if branch_name in _local_branch_names(repo):
@@ -103,7 +102,7 @@ def restore_entry(
         # cat-file -e verifies the object actually exists in the object database
         # (GitPython's repo.commit() creates lazy objects without checking)
         repo.git.cat_file("-e", f"{sha}^{{commit}}")
-    except Exception:
+    except GIT_ERRORS:
         return False, (
             f"Commit {sha[:12]} no longer exists in this repository "
             "(it may have been garbage-collected)"
@@ -111,14 +110,14 @@ def restore_entry(
 
     try:
         repo.create_head(branch_name, sha)
-    except Exception as e:
+    except GIT_ERRORS as e:
         return False, f"Could not recreate branch: {e}"
 
     if include_remote and entry.get("remote_deleted"):
         try:
             remote = repo.remote(entry.get("remote", "origin"))
             remote.push(refspec=f"{sha}:refs/heads/{branch_name}")
-        except Exception as e:
+        except GIT_ERRORS as e:
             journal.record_restore(branch_name, sha)
             return False, f"Branch restored locally, but remote push failed: {e}"
 

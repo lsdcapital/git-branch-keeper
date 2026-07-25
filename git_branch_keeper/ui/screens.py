@@ -1,15 +1,18 @@
 """Modal screens for git-branch-keeper TUI."""
 
+from __future__ import annotations
+
 import os
 from datetime import datetime, timezone
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Container, Vertical, ScrollableContainer
+from textual.binding import Binding, BindingType
+from textual.containers import Container, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TabbedContent, TabPane
 
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.formatters import format_display_status, format_pr_link
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
@@ -52,7 +55,7 @@ class ConfirmScreen(ModalScreen[bool]):
     }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "confirm_yes", "Confirm", show=False),
         Binding("y", "confirm_yes", "Yes", show=False),
         Binding("escape", "confirm_no", "Cancel", show=False),
@@ -113,7 +116,7 @@ class InfoScreen(ModalScreen):
     }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "close", "Close", show=False),
         Binding("escape", "close", "Close", show=False),
     ]
@@ -175,7 +178,7 @@ class TabbedInfoScreen(ModalScreen):
     }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("1", "switch_tab(0)", "Tab 1", show=False),
         Binding("2", "switch_tab(1)", "Tab 2", show=False),
         Binding("3", "switch_tab(2)", "Tab 3", show=False),
@@ -184,7 +187,7 @@ class TabbedInfoScreen(ModalScreen):
         Binding("i", "close", "Close", show=False),
     ]
 
-    def __init__(self, branch: BranchDetails, keeper: "BranchKeeper", main_branch: str):
+    def __init__(self, branch: BranchDetails, keeper: BranchKeeper, main_branch: str):
         super().__init__()
         self.branch = branch
         self.keeper = keeper
@@ -240,7 +243,7 @@ class TabbedInfoScreen(ModalScreen):
             with Container(id="info-button-container"):
                 yield Button("Close", variant="primary", id="close")
 
-    def _worktree_path_for_branch(self) -> Optional[str]:
+    def _worktree_path_for_branch(self) -> str | None:
         """Return the worktree path associated with this row, if any."""
         if self.branch.worktree_path:
             return self.branch.worktree_path
@@ -259,7 +262,7 @@ class TabbedInfoScreen(ModalScreen):
                 None,
             )
             return worktree_info.path if worktree_info else None
-        except Exception:
+        except GIT_ERRORS:
             return None
 
     def _build_deletion_blockers(self) -> list[str]:
@@ -276,9 +279,7 @@ class TabbedInfoScreen(ModalScreen):
                 blockers.append("Worktree has staged files")
             return blockers
 
-        if BranchValidationService.is_protected(
-            self.branch.name, self.keeper.protected_branches
-        ):
+        if BranchValidationService.is_protected(self.branch.name, self.keeper.protected_branches):
             blockers.append("Branch is protected")
 
         if self.branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
@@ -352,9 +353,7 @@ class TabbedInfoScreen(ModalScreen):
         is_deletable = (
             False
             if self.branch.is_worktree
-            else BranchValidationService.is_deletable(
-                self.branch, self.keeper.protected_branches
-            )
+            else BranchValidationService.is_deletable(self.branch, self.keeper.protected_branches)
         )
 
         # Format detailed info
@@ -374,7 +373,9 @@ class TabbedInfoScreen(ModalScreen):
         """.strip()
 
         if self.branch.is_worktree:
-            info += "\n[bold]Row Type:[/bold] Worktree entry (remove worktree before deleting branch)"
+            info += (
+                "\n[bold]Row Type:[/bold] Worktree entry (remove worktree before deleting branch)"
+            )
 
         if worktree_path:
             info += f"\n[bold]Worktree Path:[/bold] {worktree_path}"
@@ -457,7 +458,7 @@ class TabbedInfoScreen(ModalScreen):
                 try:
                     # Try to read file content
                     if os.path.isfile(full_path):
-                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                        with open(full_path, encoding="utf-8", errors="ignore") as f:
                             file_content = f.read()
 
                         # Limit content to first 50 lines to avoid huge output
@@ -469,7 +470,7 @@ class TabbedInfoScreen(ModalScreen):
                             content += file_content
                     else:
                         content += "[dim]<file not found>[/dim]\n"
-                except Exception as e:
+                except OSError as e:
                     content += f"[red]<error reading file: {e}>[/red]\n"
 
                 content += "\n\n"
@@ -568,7 +569,7 @@ class TabbedInfoScreen(ModalScreen):
                         }
                     )
                 content_title = f"[bold]Recent commits on {self.main_branch}[/bold]\n\n"
-            except Exception:
+            except GIT_ERRORS:
                 commits = []
                 content_title = f"[bold]Recent commits on {self.main_branch}[/bold]\n\n"
         else:
@@ -611,7 +612,7 @@ class TabbedInfoScreen(ModalScreen):
                         content += f"{diff}"
                     else:
                         content += "[dim]Local and remote are in sync[/dim]"
-                except Exception:
+                except GIT_ERRORS:
                     content = "[dim]Cannot compare with remote - remote may not exist[/dim]"
             else:
                 # For feature branches, show diff compared to main
@@ -621,7 +622,7 @@ class TabbedInfoScreen(ModalScreen):
                     content += f"{diff}"
                 else:
                     content += f"[dim]No differences with {self.main_branch}[/dim]"
-        except Exception as e:
+        except GIT_ERRORS as e:
             content = f"[red]Error getting comparison: {e}[/red]"
 
         return ScrollableContainer(Static(content, markup=True))

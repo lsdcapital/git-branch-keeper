@@ -5,22 +5,20 @@ This package provides utility modules:
 - threading: Threading utilities for Python 3.13+ free-threading support
 """
 
-from .logging import setup_logging, get_logger, ColoredFormatter
+from .logging import ColoredFormatter, get_logger, setup_logging
 from .threading import (
-    is_free_threading_enabled,
-    get_python_threading_mode,
     get_optimal_worker_count,
+    get_python_threading_mode,
     get_threading_info,
+    is_free_threading_enabled,
 )
 
 __all__ = [
-    # Logging
-    "setup_logging",
-    "get_logger",
     "ColoredFormatter",
-    # Threading
-    "is_free_threading_enabled",
-    "get_python_threading_mode",
+    "get_logger",
     "get_optimal_worker_count",
+    "get_python_threading_mode",
     "get_threading_info",
+    "is_free_threading_enabled",
+    "setup_logging",
 ]

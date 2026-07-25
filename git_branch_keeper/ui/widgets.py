@@ -1,10 +1,10 @@
 """Custom widgets for git-branch-keeper TUI."""
 
+from rich.text import Text
 from textual.app import ComposeResult, RenderResult
 from textual.events import Click
 from textual.widgets import Header
-from textual.widgets._header import HeaderIcon, HeaderTitle, HeaderClockSpace
-from rich.text import Text
+from textual.widgets._header import HeaderClockSpace, HeaderIcon, HeaderTitle
 
 from git_branch_keeper.__version__ import __version__
 

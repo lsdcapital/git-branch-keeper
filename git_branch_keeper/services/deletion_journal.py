@@ -6,10 +6,11 @@ containing the branch's tip SHA. As long as the commit object still exists
 restored with `git-branch-keeper undo`.
 """
 
+from __future__ import annotations
+
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 from uuid import uuid4
 
 from git_branch_keeper.utils.logging import get_logger
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 class DeletionJournal:
     """Append-only journal of branch deletions, shared across repositories."""
 
-    def __init__(self, repo_path: str, journal_file: Optional[Path] = None):
+    def __init__(self, repo_path: str, journal_file: Path | None = None):
         """Initialize the journal for a repository.
 
         Args:
@@ -51,7 +52,7 @@ class DeletionJournal:
         had_remote: bool,
         remote_deleted: bool,
         remote_name: str = "origin",
-        batch_id: Optional[str] = None,
+        batch_id: str | None = None,
     ) -> None:
         """Record a branch deletion. Never raises - journaling must not block deletion."""
         self._append(
@@ -68,7 +69,7 @@ class DeletionJournal:
             }
         )
 
-    def record_restore(self, branch_name: str, sha: str, batch_id: Optional[str] = None) -> None:
+    def record_restore(self, branch_name: str, sha: str, batch_id: str | None = None) -> None:
         """Record that a branch was restored from the journal."""
         self._append(
             {
@@ -81,11 +82,11 @@ class DeletionJournal:
             }
         )
 
-    def deletions(self) -> List[Dict]:
+    def deletions(self) -> list[dict]:
         """Return deletion entries for this repository, oldest first."""
         return [e for e in self._read_entries() if e.get("action") == "deleted"]
 
-    def _append(self, entry: Dict) -> None:
+    def _append(self, entry: dict) -> None:
         try:
             self.journal_file.parent.mkdir(parents=True, exist_ok=True)
             line = json.dumps(entry, sort_keys=True)
@@ -99,17 +100,17 @@ class DeletionJournal:
                     if HAS_FCNTL:
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             logger.debug(f"Journaled {entry['action']} of {entry['branch']} ({entry.get('sha')})")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - journaling is best-effort, see docstring
             # Journaling is best-effort; never let it break a deletion or restore
             logger.warning(f"Could not write deletion journal: {e}")
 
-    def _read_entries(self) -> List[Dict]:
+    def _read_entries(self) -> list[dict]:
         """Read all entries for this repository, skipping corrupt lines."""
         if not self.journal_file.exists():
             return []
         entries = []
         try:
-            with open(self.journal_file, "r", encoding="utf-8") as f:
+            with open(self.journal_file, encoding="utf-8") as f:
                 if HAS_FCNTL:
                     fcntl.flock(f.fileno(), fcntl.LOCK_SH)
                 try:
@@ -127,6 +128,8 @@ class DeletionJournal:
                 finally:
                     if HAS_FCNTL:
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - journal file is untrusted disk state
+            # Deliberately broad: reading is best-effort, matching _append's contract;
+            # a corrupt or locked journal must degrade to "no entries", not crash.
             logger.warning(f"Could not read deletion journal: {e}")
         return entries

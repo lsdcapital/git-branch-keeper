@@ -1,8 +1,10 @@
 """Branch model and related enums"""
 
-from enum import Enum
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from enum import Enum
+from typing import Any, Callable
 
 
 class BranchStatus(Enum):
@@ -32,11 +34,11 @@ class BranchAnalysisProgress:
 
     phase: str
     current: int = 0
-    total: Optional[int] = None
-    message: Optional[str] = None
+    total: int | None = None
+    message: str | None = None
 
     @property
-    def percent(self) -> Optional[int]:
+    def percent(self) -> int | None:
         """Return whole-number completion percentage when a total is known."""
         if self.total is None:
             return None
@@ -57,13 +59,13 @@ OperationProgressCallback = Callable[[OperationProgress], None]
 class BranchAnalysisResult:
     """Shared branch analysis output consumed by CLI and TUI views."""
 
-    branches: List["BranchDetails"] = field(default_factory=list)
-    local_branch_names: List[str] = field(default_factory=list)
-    branches_to_process: List[str] = field(default_factory=list)
-    deletable_branches: List["BranchDetails"] = field(default_factory=list)
-    removable_worktrees: List["BranchDetails"] = field(default_factory=list)
-    current_branch: Optional[str] = None
-    github_base_url: Optional[str] = None
+    branches: list[BranchDetails] = field(default_factory=list)
+    local_branch_names: list[str] = field(default_factory=list)
+    branches_to_process: list[str] = field(default_factory=list)
+    deletable_branches: list[BranchDetails] = field(default_factory=list)
+    removable_worktrees: list[BranchDetails] = field(default_factory=list)
+    current_branch: str | None = None
+    github_base_url: str | None = None
     cached_count: int = 0
     refreshed_count: int = 0
     is_complete: bool = True
@@ -77,16 +79,16 @@ class BranchDetails:
     last_commit_date: str
     age_days: int
     status: BranchStatus
-    modified_files: Optional[bool]  # None = couldn't check
-    untracked_files: Optional[bool]  # None = couldn't check
-    staged_files: Optional[bool]  # None = couldn't check
+    modified_files: bool | None  # None = couldn't check
+    untracked_files: bool | None  # None = couldn't check
+    staged_files: bool | None  # None = couldn't check
     has_remote: bool
     sync_status: str
-    pr_status: Optional[str] = None
-    pr_details: Optional[Dict[str, Any]] = None  # Structured PR metadata from provider APIs
-    notes: Optional[str] = None  # Added notes field
+    pr_status: str | None = None
+    pr_details: dict[str, Any] | None = None  # Structured PR metadata from provider APIs
+    notes: str | None = None  # Added notes field
     in_worktree: bool = False  # True if branch is checked out in a worktree
     is_worktree: bool = False  # True if this entry represents a worktree (not a branch)
-    worktree_path: Optional[str] = None  # Path to the worktree directory if is_worktree=True
+    worktree_path: str | None = None  # Path to the worktree directory if is_worktree=True
     worktree_is_orphaned: bool = False  # True if branch's worktree directory is missing
-    merge_detection: Optional[Dict[str, Any]] = None  # Structured merge-detection details
+    merge_detection: dict[str, Any] | None = None  # Structured merge-detection details

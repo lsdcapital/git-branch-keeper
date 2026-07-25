@@ -14,12 +14,15 @@ Detection uses three principled, git-native checks, ordered cheapest-first:
    advisory only (see `is_likely_squash_merged`), never as merged.
 """
 
+from __future__ import annotations
+
 import subprocess
+from threading import Lock
+from typing import TYPE_CHECKING, Any
 
 import git
-from threading import Lock
-from typing import Any, Dict, Optional, Union, TYPE_CHECKING
 
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -31,7 +34,7 @@ logger = get_logger(__name__)
 class MergeDetector:
     """Service for detecting if branches have been merged."""
 
-    def __init__(self, repo_path: str, config: Union["Config", dict]):
+    def __init__(self, repo_path: str, config: Config | dict):
         """Initialize the merge detector.
 
         Args:
@@ -41,9 +44,9 @@ class MergeDetector:
         self.repo_path = repo_path
         self.config = config
         self.debug_mode = config.get("debug", False)
-        self._merge_status_cache: Dict[str, bool] = {}  # Cache for merge status checks
+        self._merge_status_cache: dict[str, bool] = {}  # Cache for merge status checks
         self._cache_lock = Lock()  # Thread safety for cache access
-        self._main_branch_sha_cache: Dict[str, str] = (
+        self._main_branch_sha_cache: dict[str, str] = (
             {}
         )  # Track main branch SHA for cache invalidation
         # Branches that look squash-merged by fuzzy diff similarity but were NOT
@@ -51,7 +54,7 @@ class MergeDetector:
         # never treated as merged (a fuzzy guess must not trigger deletion).
         self._likely_squash_merged: set = set()
         self._squash_lock = Lock()
-        self._merge_detection_info: Dict[str, Dict[str, Any]] = {}
+        self._merge_detection_info: dict[str, dict[str, Any]] = {}
         self._merge_info_lock = Lock()
         # Add counters for merge detection methods
         self.merge_detection_stats = {
@@ -91,7 +94,7 @@ class MergeDetector:
         with self._stats_lock:
             self.merge_detection_stats[method] += 1
 
-    def _default_merge_detection_info(self, method: str = "not_checked") -> Dict[str, Any]:
+    def _default_merge_detection_info(self, method: str = "not_checked") -> dict[str, Any]:
         """Return a stable, JSON-friendly merge-detection info object."""
         return {
             "merged": False,
@@ -103,18 +106,16 @@ class MergeDetector:
             "truncated": False,
         }
 
-    def _set_merge_detection_info(self, branch_name: str, info: Dict[str, Any]) -> None:
+    def _set_merge_detection_info(self, branch_name: str, info: dict[str, Any]) -> None:
         """Record structured merge-detection info for later display/JSON output."""
         with self._merge_info_lock:
             self._merge_detection_info[branch_name] = info
 
-    def get_merge_detection_info(self, branch_name: str) -> Dict[str, Any]:
+    def get_merge_detection_info(self, branch_name: str) -> dict[str, Any]:
         """Return structured merge-detection info for a branch."""
         with self._merge_info_lock:
             return dict(
-                self._merge_detection_info.get(
-                    branch_name, self._default_merge_detection_info()
-                )
+                self._merge_detection_info.get(branch_name, self._default_merge_detection_info())
             )
 
     def _get_squash_scan_limit(self) -> int:
@@ -124,7 +125,7 @@ class MergeDetector:
         except (TypeError, ValueError):
             return 500
 
-    def _patch_id_for_diff(self, diff: str) -> Optional[str]:
+    def _patch_id_for_diff(self, diff: str) -> str | None:
         """Return git's stable patch-id for a diff, or None if no patch-id exists."""
         if not diff.strip():
             return None
@@ -135,11 +136,10 @@ class MergeDetector:
                 cwd=self.repo_path,
                 input=diff,
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
             )
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             logger.debug(f"[patch-id] Error running git patch-id: {e}")
             return None
 
@@ -157,7 +157,7 @@ class MergeDetector:
         try:
             repo = self._get_repo()
             return repo.refs[main_branch].commit.hexsha
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error getting main branch SHA: {e}")
             return ""
 
@@ -185,7 +185,7 @@ class MergeDetector:
             # Strip refs/tags/ prefix if present
             tag_name = ref_name.replace("refs/tags/", "")
             return tag_name in [tag.name for tag in repo.tags]
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error checking if {ref_name} is a tag: {e}")
             return False
 
@@ -253,7 +253,11 @@ class MergeDetector:
 
             self._set_in_cache(cache_key, False)
             return False
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - last-resort safety net
+            # Deliberately broad: the individual detection methods already narrow
+            # their own git failures, so anything reaching here is unexpected. Report
+            # "not merged" rather than propagating - an unexpected failure must never
+            # mark a branch deletable, nor abort analysis of the remaining branches.
             logger.debug(f"Error checking if branch is merged: {e}")
             info = self._default_merge_detection_info("error")
             info["error"] = str(e)
@@ -289,7 +293,7 @@ class MergeDetector:
                 )
                 self._increment_stat("reachable")
                 return True
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"[reachable] Error: {e}")
 
         return False
@@ -334,7 +338,7 @@ class MergeDetector:
                 )
                 self._increment_stat("patch_equivalent")
                 return True
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"[patch-equivalent] Error: {e}")
 
         return False
@@ -384,7 +388,7 @@ class MergeDetector:
             truncated = len(candidate_shas) > scan_limit
             candidate_shas = candidate_shas[:scan_limit]
 
-            advisory_info: Optional[Dict[str, Any]] = None
+            advisory_info: dict[str, Any] | None = None
             for searched_count, commit_sha in enumerate(candidate_shas, start=1):
                 try:
                     commit_diff = repo.git.show(
@@ -432,7 +436,7 @@ class MergeDetector:
                                 f"[squash-patch-id] Possible squash merge for {branch_name} "
                                 f"in commit {commit_sha[:7]} ({similarity:.1%} similarity)"
                             )
-                except Exception as e:
+                except GIT_ERRORS as e:
                     logger.debug(f"[squash-patch-id] Error processing {commit_sha[:7]}: {e}")
                     continue
 

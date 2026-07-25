@@ -7,7 +7,7 @@ blockers, actionable recommended actions, and no human-table scraping.
 from __future__ import annotations
 
 import shlex
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from git_branch_keeper.formatters import format_deletion_reason
 from git_branch_keeper.models.branch import BranchAnalysisResult, BranchDetails, BranchStatus
@@ -162,7 +162,7 @@ def _worktree_removal_blockers(branch: BranchDetails) -> list[dict[str, str]]:
     ]
 
 
-def _parse_pr_count(value: Optional[str], prefix: str = "") -> int:
+def _parse_pr_count(value: str | None, prefix: str = "") -> int:
     if not value:
         return 0
     if prefix and value.startswith(prefix):
@@ -173,7 +173,7 @@ def _parse_pr_count(value: Optional[str], prefix: str = "") -> int:
         return 0
 
 
-def _attach_pr_details(pr: dict[str, Any], details: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _attach_pr_details(pr: dict[str, Any], details: dict[str, Any] | None) -> dict[str, Any]:
     """Attach stable PR metadata when available."""
     if not details:
         return pr
@@ -350,11 +350,11 @@ def _command(argv: list[str]) -> dict[str, Any]:
 
 
 def _branch_to_dict(
-    keeper: "BranchKeeper",
+    keeper: BranchKeeper,
     branch: BranchDetails,
     protected_branches: list[str],
     delete_remote: bool,
-    current_branch: Optional[str],
+    current_branch: str | None,
 ) -> dict[str, Any]:
     """Serialize one BranchDetails row to a machine-readable shape."""
     stale_days = int(keeper.min_stale_days)
@@ -480,7 +480,7 @@ def _recommended_actions(
     return actions
 
 
-def analysis_to_dict(keeper: "BranchKeeper", analysis: BranchAnalysisResult) -> dict[str, Any]:
+def analysis_to_dict(keeper: BranchKeeper, analysis: BranchAnalysisResult) -> dict[str, Any]:
     """Serialize BranchAnalysisResult for JSON output."""
     protected_branches = list(keeper.protected_branches)
     delete_remote = bool(keeper.delete_remote)

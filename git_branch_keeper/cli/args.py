@@ -1,6 +1,7 @@
 """Command-line argument parsing for git-branch-keeper."""
 
 import argparse
+
 from git_branch_keeper.__version__ import __version__
 
 

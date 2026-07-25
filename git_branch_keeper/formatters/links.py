@@ -1,10 +1,11 @@
 """GitHub link formatting utilities."""
 
-from typing import Optional
+from __future__ import annotations
+
 from git_branch_keeper.formatters.branch import format_branch_name
 
 
-def format_pr_link(pr_status: Optional[str], github_base_url: Optional[str]) -> str:
+def format_pr_link(pr_status: str | None, github_base_url: str | None) -> str:
     """
     Format PR status with optional link for CLI output.
 
@@ -31,7 +32,7 @@ def format_pr_link(pr_status: Optional[str], github_base_url: Optional[str]) -> 
 
 
 def format_branch_link(
-    branch_name: str, github_base_url: Optional[str], is_current: bool = False
+    branch_name: str, github_base_url: str | None, is_current: bool = False
 ) -> str:
     """
     Format branch name with optional GitHub link for CLI output.
@@ -54,7 +55,7 @@ def format_branch_link(
 
 def format_branch_link_with_indent(
     branch_name: str,
-    github_base_url: Optional[str],
+    github_base_url: str | None,
     is_worktree: bool = False,
     is_current: bool = False,
 ) -> str:

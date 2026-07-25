@@ -1,7 +1,7 @@
 """Tests for BranchStatusService"""
 
-from git_branch_keeper.services.branch_status_service import BranchStatusService
 from git_branch_keeper.models.branch import BranchStatus
+from git_branch_keeper.services.branch_status_service import BranchStatusService
 
 
 class TestBranchStatusServiceInit:

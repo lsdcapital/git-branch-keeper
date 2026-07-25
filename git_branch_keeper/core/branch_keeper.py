@@ -1,35 +1,37 @@
 """Core functionality for git-branch-keeper"""
 
+from __future__ import annotations
+
 import signal
 import sys
-from contextlib import nullcontext
-from typing import Dict, Optional, Union
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 
 import git
 from rich.console import Console
 from rich.progress import Progress
 
+from git_branch_keeper.config import Config
+from git_branch_keeper.exceptions import GIT_ERRORS, GITHUB_ERRORS, GitBranchKeeperError
+from git_branch_keeper.formatters import format_deletion_confirmation_items, format_deletion_reason
 from git_branch_keeper.models.branch import (
-    BranchStatus,
-    SyncStatus,
-    BranchDetails,
     BranchAnalysisProgress,
     BranchAnalysisProgressCallback,
     BranchAnalysisResult,
+    BranchDetails,
+    BranchStatus,
     OperationProgressCallback,
+    SyncStatus,
 )
+from git_branch_keeper.services.branch_status_service import BranchStatusService
+from git_branch_keeper.services.branch_validation_service import BranchValidationService
+from git_branch_keeper.services.cache_service import CacheService
+from git_branch_keeper.services.display_service import DisplayService
 from git_branch_keeper.services.git import GitHubService, GitOperations
 from git_branch_keeper.services.git.github import resolve_github_token
-from git_branch_keeper.services.display_service import DisplayService
-from git_branch_keeper.services.branch_status_service import BranchStatusService
-from git_branch_keeper.services.cache_service import CacheService
-from git_branch_keeper.services.branch_validation_service import BranchValidationService
-from git_branch_keeper.utils.threading import get_optimal_worker_count
 from git_branch_keeper.utils.logging import get_logger
 from git_branch_keeper.utils.remotes import detect_remote_name, get_remote_url
-from git_branch_keeper.config import Config
-from git_branch_keeper.formatters import format_deletion_confirmation_items, format_deletion_reason
+from git_branch_keeper.utils.threading import get_optimal_worker_count
 
 console = Console()
 logger = get_logger(__name__)
@@ -40,7 +42,7 @@ logger = get_logger(__name__)
 GITHUB_ENABLED_WORKER_CAP = 8
 
 # Module-level reference to the active BranchKeeper instance for signal handling
-_active_keeper: Optional["BranchKeeper"] = None
+_active_keeper: BranchKeeper | None = None
 
 
 def _signal_handler(signum, frame):
@@ -63,7 +65,7 @@ signal.signal(signal.SIGINT, _signal_handler)
 class BranchKeeper:
     """Main class for managing Git branches."""
 
-    def __init__(self, repo_path: str, config: Union[Config, dict], tui_mode: bool = False):
+    def __init__(self, repo_path: str, config: Config | dict, tui_mode: bool = False):
         """Initialize BranchKeeper.
 
         Args:
@@ -84,8 +86,8 @@ class BranchKeeper:
         # Initialize repo first
         try:
             self.repo = git.Repo(self.repo_path)
-        except Exception as e:
-            raise Exception(f"Error initializing repository: {e}")
+        except GIT_ERRORS as e:
+            raise GitBranchKeeperError(f"Error initializing repository: {e}") from e
 
         # Detect which remote to use (prefers "origin"; adapts to a single non-origin remote)
         self.remote_name = detect_remote_name(self.repo)
@@ -157,7 +159,9 @@ class BranchKeeper:
                 logger.debug(f"Setting up GitHub API with remote: {remote_url}")
                 self.github_service.setup_github_api(remote_url)
                 logger.info("[GitHub] Integration enabled - PR detection active")
-            except Exception as e:
+            except (*GITHUB_ERRORS, IndexError) as e:
+                # IndexError: malformed remote_url doesn't match the expected
+                # git@github.com:org/repo or https://github.com/org/repo shape.
                 logger.debug(f"Failed to setup GitHub API: {e}")
                 logger.warning("[GitHub] Setup failed - PR detection disabled")
         else:
@@ -191,8 +195,8 @@ class BranchKeeper:
         branch_name: str,
         reason: str,
         force_mode: bool = False,
-        batch_id: Optional[str] = None,
-    ) -> tuple[bool, Optional[str]]:
+        batch_id: str | None = None,
+    ) -> tuple[bool, str | None]:
         """Delete a branch or show what would be deleted in dry-run mode.
 
         Args:
@@ -310,7 +314,9 @@ class BranchKeeper:
             else:
                 return False, "Git deletion failed (may be protected remotely)"
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - per-branch deletion must fail closed
+            # Deliberately broad: an unexpected failure here must be reported and
+            # move on to the next branch, not abort the whole cleanup run.
             error_msg = str(e)
             self._console_print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
             return False, error_msg
@@ -406,16 +412,18 @@ class BranchKeeper:
 
             self._display_and_cleanup(analysis, cleanup_enabled)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - top-level run must fail closed
+            # Deliberately broad: this wraps the entire analyze+display+cleanup
+            # run; report the failure instead of crashing with a raw traceback.
             self._console_print(f"[red]Error processing branches: {e}[/red]")
 
     def _emit_operation_progress(
         self,
-        progress_callback: Optional[OperationProgressCallback],
+        progress_callback: OperationProgressCallback | None,
         phase: str,
         current: int = 0,
-        total: Optional[int] = None,
-        message: Optional[str] = None,
+        total: int | None = None,
+        message: str | None = None,
     ) -> None:
         """Emit a shared operation progress update if a callback was supplied."""
         if progress_callback is None:
@@ -431,15 +439,17 @@ class BranchKeeper:
                 )
             )
         except Exception:
+            # Deliberately broad: progress_callback is arbitrary caller code; a
+            # failure in it must not abort the operation it's just reporting on.
             logger.debug("Operation progress callback failed", exc_info=True)
 
     def _emit_analysis_progress(
         self,
-        progress_callback: Optional[BranchAnalysisProgressCallback],
+        progress_callback: BranchAnalysisProgressCallback | None,
         phase: str,
         current: int = 0,
-        total: Optional[int] = None,
-        message: Optional[str] = None,
+        total: int | None = None,
+        message: str | None = None,
     ) -> None:
         """Emit a branch-analysis progress update if a callback was supplied."""
         self._emit_operation_progress(progress_callback, phase, current, total, message)
@@ -447,7 +457,7 @@ class BranchKeeper:
     def analyze_branches(
         self,
         show_progress: bool = True,
-        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
+        progress_callback: BranchAnalysisProgressCallback | None = None,
     ) -> BranchAnalysisResult:
         """Analyze branch state using the shared CLI/TUI data path.
 
@@ -481,7 +491,7 @@ class BranchKeeper:
             return BranchAnalysisResult(local_branch_names=[])
 
         use_cache = not self.config.get("refresh", False)
-        cached_branches: Dict[str, BranchDetails] = {}
+        cached_branches: dict[str, BranchDetails] = {}
         branches_to_process = branches
 
         if use_cache:
@@ -607,7 +617,10 @@ class BranchKeeper:
                 save_cache=False,
             )
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - cache fast-path must degrade gracefully
+            # Deliberately broad: the cache file is untrusted on-disk state (may be
+            # corrupt, stale-schema, etc.); any failure here should fall back to a
+            # fresh listing rather than crash the whole analysis.
             logger.debug(f"Error fast-loading cached analysis: {e}")
             try:
                 branches = self._get_filtered_branches()
@@ -616,7 +629,7 @@ class BranchKeeper:
                     branches_to_process=branches,
                     is_complete=False,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - last-resort fallback, must not raise
                 return BranchAnalysisResult(is_complete=False)
 
     def get_cached_branches_fast(self) -> tuple[list, list]:
@@ -637,7 +650,7 @@ class BranchKeeper:
         """
         try:
             return self.analyze_branches(show_progress=show_progress).branches
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - caller expects a list, never a raise
             self._console_print(f"[red]Error getting branch details: {e}[/red]")
             return []
 
@@ -646,7 +659,7 @@ class BranchKeeper:
         status_filter = self.config.get("status_filter", "all")
         return status_filter == "all" or branch.status.value == status_filter
 
-    def _current_branch_name(self) -> Optional[str]:
+    def _current_branch_name(self) -> str | None:
         """Return the current branch name, or None for detached HEAD."""
         try:
             return self.repo.active_branch.name
@@ -813,7 +826,7 @@ class BranchKeeper:
         self,
         branches: list,
         show_progress: bool = True,
-        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
+        progress_callback: BranchAnalysisProgressCallback | None = None,
     ) -> list:
         """Process branches and collect their details with unified progress tracking.
 
@@ -864,8 +877,7 @@ class BranchKeeper:
             )
 
             # Process branches sequentially in verbose mode for readable logs
-            completed = 0
-            for branch_name in branches:
+            for completed, branch_name in enumerate(branches, start=1):
                 details = self._process_single_branch(
                     branch_name,
                     status_filter,
@@ -876,7 +888,6 @@ class BranchKeeper:
                 )
                 if details:
                     branch_details.append(details)
-                completed += 1
                 self._emit_analysis_progress(
                     progress_callback,
                     "Processing branches",
@@ -947,12 +958,12 @@ class BranchKeeper:
         self,
         branches: list,
         status_filter: str,
-        pr_data: Optional[Dict[str, Dict]],
+        pr_data: dict[str, dict] | None,
         progress,
         task,
-        current_branch_name: Optional[str] = None,
-        current_branch_status: Optional[dict] = None,
-        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
+        current_branch_name: str | None = None,
+        current_branch_status: dict | None = None,
+        progress_callback: BranchAnalysisProgressCallback | None = None,
     ) -> list:
         """Process branches sequentially."""
         branch_details = []
@@ -992,12 +1003,12 @@ class BranchKeeper:
         self,
         branches: list,
         status_filter: str,
-        pr_data: Optional[Dict[str, Dict]],
+        pr_data: dict[str, dict] | None,
         progress,
         task,
-        current_branch_name: Optional[str] = None,
-        current_branch_status: Optional[dict] = None,
-        progress_callback: Optional[BranchAnalysisProgressCallback] = None,
+        current_branch_name: str | None = None,
+        current_branch_status: dict | None = None,
+        progress_callback: BranchAnalysisProgressCallback | None = None,
     ) -> list:
         """Process branches in parallel using ThreadPoolExecutor."""
         branch_details: list[BranchDetails] = []
@@ -1014,7 +1025,7 @@ class BranchKeeper:
         # Submit all branch processing tasks. Manage shutdown explicitly so Ctrl-C
         # can cancel queued work instead of waiting for every pending future.
         executor = ThreadPoolExecutor(max_workers=max_workers)
-        future_to_branch: Dict[Future[Optional[BranchDetails]], str] = {}
+        future_to_branch: dict[Future[BranchDetails | None], str] = {}
         try:
             future_to_branch = {
                 executor.submit(
@@ -1037,7 +1048,10 @@ class BranchKeeper:
                     details = future.result()
                     if details:
                         branch_details.append(details)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - one bad branch must not abort the batch
+                    # Deliberately broad: this collects results from worker threads
+                    # running arbitrary per-branch analysis; any failure must be
+                    # logged and skipped so the rest of the batch still completes.
                     logger.error(f"Error processing branch {branch_name}: {e}")
                     if self.debug_mode and not self.tui_mode:
                         console.print_exception()
@@ -1061,7 +1075,7 @@ class BranchKeeper:
 
         return branch_details
 
-    def _get_github_base_url(self) -> Optional[str]:
+    def _get_github_base_url(self) -> str | None:
         """Extract GitHub base URL from remote URL."""
         try:
             remote_url = get_remote_url(self.repo, self.remote_name)
@@ -1073,7 +1087,7 @@ class BranchKeeper:
                 return f"https://github.com/{org_repo}"
             else:
                 return remote_url.replace(".git", "")
-        except Exception:
+        except IndexError:
             return None
 
     def _display_and_cleanup(self, analysis: BranchAnalysisResult, cleanup_enabled: bool) -> None:
@@ -1198,8 +1212,8 @@ class BranchKeeper:
         branches_to_delete: list,
         worktrees_to_remove: list,
         force_mode: bool = False,
-        batch_id: Optional[str] = None,
-        progress_callback: Optional[OperationProgressCallback] = None,
+        batch_id: str | None = None,
+        progress_callback: OperationProgressCallback | None = None,
         show_progress: bool = False,
     ) -> tuple:
         """Perform deletion of branches and removal of worktrees.
@@ -1316,8 +1330,8 @@ class BranchKeeper:
     def _perform_cleanup(
         self,
         branch_details: list,
-        branches_to_delete: Optional[list] = None,
-        worktrees_to_remove: Optional[list] = None,
+        branches_to_delete: list | None = None,
+        worktrees_to_remove: list | None = None,
     ) -> None:
         """Delete stale and merged branches and remove worktrees after confirmation."""
         # Use precomputed analysis data when available; otherwise keep the
@@ -1355,10 +1369,13 @@ class BranchKeeper:
 
         # Get confirmation for real deletion if not in force mode.
         # Dry-run is always read-only and should never prompt.
-        if not self.force_mode and not self.dry_run:
-            if not self._confirm_deletion_with_worktrees(branches_to_delete, worktrees_to_remove):
-                self._console_print("[yellow]Cleanup cancelled[/yellow]")
-                return
+        if (
+            not self.force_mode
+            and not self.dry_run
+            and not self._confirm_deletion_with_worktrees(branches_to_delete, worktrees_to_remove)
+        ):
+            self._console_print("[yellow]Cleanup cancelled[/yellow]")
+            return
 
         # Perform the deletion using shared method
         self._console_print("")
@@ -1432,7 +1449,7 @@ class BranchKeeper:
         response = console.input("\nProceed with cleanup? [y/N] ")
         return response.lower() == "y"
 
-    def _annotate_pr_head_match(self, branch: str, pr_info: Dict) -> None:
+    def _annotate_pr_head_match(self, branch: str, pr_info: dict) -> None:
         """Add local-tip comparison fields to PR metadata when a PR head SHA is available."""
         head_sha = pr_info.get("head_sha")
         if not head_sha or pr_info.get("local_head_sha"):
@@ -1442,7 +1459,7 @@ class BranchKeeper:
         pr_info["local_head_sha"] = local_head_sha
         pr_info["head_matches_local"] = bool(local_head_sha and local_head_sha == head_sha)
 
-    def _determine_branch_status(self, branch: str, pr_data: Optional[Dict] = None) -> tuple:
+    def _determine_branch_status(self, branch: str, pr_data: dict | None = None) -> tuple:
         """
         Consolidated method to determine branch status, sync_status, pr_status, and notes.
 
@@ -1536,11 +1553,11 @@ class BranchKeeper:
         self,
         branch: str,
         status_filter: str,
-        pr_data: Optional[Dict[str, Dict]],
+        pr_data: dict[str, dict] | None,
         progress=None,
-        current_branch_name: Optional[str] = None,
-        current_branch_status: Optional[dict] = None,
-    ) -> Optional[BranchDetails]:
+        current_branch_name: str | None = None,
+        current_branch_status: dict | None = None,
+    ) -> BranchDetails | None:
         """Process a single branch and return its details if it matches the filter.
 
         Args:
@@ -1629,7 +1646,10 @@ class BranchKeeper:
                 modified_files = None
                 untracked_files = None
                 staged_files = None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one branch's status must not abort the run
+            # Deliberately broad: wraps several git service calls; an unexpected
+            # failure should surface as "status couldn't be determined" for this
+            # branch rather than crashing the whole analysis.
             error_msg = str(e)
             logger.warning(f"Could not check branch status for {branch}: {error_msg}")
             status_error = f"Unexpected error: {error_msg}"
@@ -1687,5 +1707,5 @@ class BranchKeeper:
             # Close GitHub API connection
             if self.github_service:
                 self.github_service.close()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - cleanup must never raise
             logger.debug(f"Error during cleanup: {e}")

@@ -1,8 +1,12 @@
 """Service for determining branch status and related operations"""
 
-from typing import Optional, Dict, Union, TYPE_CHECKING
+from __future__ import annotations
+
 from fnmatch import fnmatch
+from typing import TYPE_CHECKING
+
 from rich.console import Console
+
 from git_branch_keeper.models.branch import BranchStatus
 from git_branch_keeper.utils.logging import get_logger
 
@@ -19,7 +23,7 @@ class BranchStatusService:
     def __init__(
         self,
         repo_path: str,
-        config: Union["Config", dict],
+        config: Config | dict,
         git_service,
         github_service,
         verbose: bool = False,
@@ -38,7 +42,7 @@ class BranchStatusService:
         self.main_branch = config.get("main_branch", "main")
 
     def get_branch_status(
-        self, branch_name: str, main_branch: str, pr_data: Optional[Dict] = None
+        self, branch_name: str, main_branch: str, pr_data: dict | None = None
     ) -> BranchStatus:
         """Get the status of a branch."""
         logger.debug(f"Checking status for branch: {branch_name}")

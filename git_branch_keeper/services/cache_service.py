@@ -1,15 +1,17 @@
 """Cache service for storing branch analysis results."""
 
-import json
+from __future__ import annotations
+
 import hashlib
+import json
 import logging
-from pathlib import Path
-from typing import Dict, List, Optional, Set
-from datetime import datetime
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
 import git
 
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 
 # Import fcntl for POSIX file locking (Unix/Linux/macOS)
@@ -67,10 +69,10 @@ class CacheService:
             try:
                 fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
                 logger.debug(f"Released {operation} lock on cache file")
-            except Exception as e:
+            except OSError as e:
                 logger.debug(f"Error releasing lock: {e}")
 
-    def _get_current_local_branch_names(self) -> Optional[Set[str]]:
+    def _get_current_local_branch_names(self) -> set[str] | None:
         """Return the current local branch names for this repository.
 
         Cache entries are keyed by branch name, so pruning must use the same namespace as
@@ -84,11 +86,11 @@ class CacheService:
                 return {head.name for head in repo.heads}
             finally:
                 repo.close()
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Could not list local branches for cache pruning: {e}")
             return None
 
-    def _validate_cache_data(self, cache_data: Dict) -> bool:
+    def _validate_cache_data(self, cache_data: dict) -> bool:
         """Validate cache data structure and required fields.
 
         Args:
@@ -130,11 +132,13 @@ class CacheService:
                     return False
 
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - validates untrusted on-disk cache data
+            # Deliberately broad: cache_data comes from a JSON file that could be
+            # corrupt or hand-edited; any anomaly here means "not valid", not a bug.
             logger.warning(f"Error validating cache: {e}")
             return False
 
-    def load_cache(self) -> Dict[str, Dict]:
+    def load_cache(self) -> dict[str, dict]:
         """Load cached branch data from disk with file locking and validation.
 
         Returns:
@@ -145,10 +149,9 @@ class CacheService:
             return {}
 
         try:
-            with open(self.cache_file, "r") as f:
-                # Acquire shared lock for reading
-                with self._acquire_cache_lock(f, operation="read"):
-                    cache_data = json.load(f)
+            # Acquire shared lock for reading
+            with open(self.cache_file) as f, self._acquire_cache_lock(f, operation="read"):
+                cache_data = json.load(f)
 
             # Validate cache data
             if not self._validate_cache_data(cache_data):
@@ -160,11 +163,13 @@ class CacheService:
         except json.JSONDecodeError as e:
             logger.warning(f"Invalid JSON in cache file: {e}")
             return {}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - cache file is untrusted disk state
+            # Deliberately broad: any read/lock/permission failure should degrade
+            # to "no cache" rather than crash the whole run.
             logger.warning(f"Failed to load cache: {e}")
             return {}
 
-    def save_cache(self, branches: List[BranchDetails], main_branch: str) -> None:
+    def save_cache(self, branches: list[BranchDetails], main_branch: str) -> None:
         """Save branch data to cache using atomic writes with file locking.
 
         Saves all branches with metadata indicating stability.
@@ -211,18 +216,17 @@ class CacheService:
             cache_data = {
                 "repo_path": str(self.repo_path),
                 "main_branch": main_branch,
-                "last_updated": datetime.now().isoformat(),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
                 "branches": existing_cache,
             }
 
             # Atomic write: write to temp file, then rename
             temp_file = self.cache_file.with_suffix(".tmp")
             try:
-                with open(temp_file, "w") as f:
-                    # Acquire exclusive lock for writing
-                    with self._acquire_cache_lock(f, operation="write"):
-                        json.dump(cache_data, f, indent=2)
-                        f.flush()  # Ensure data is written to disk
+                # Acquire exclusive lock for writing
+                with open(temp_file, "w") as f, self._acquire_cache_lock(f, operation="write"):
+                    json.dump(cache_data, f, indent=2)
+                    f.flush()  # Ensure data is written to disk
 
                 # Atomic rename (POSIX systems guarantee atomicity)
                 temp_file.replace(self.cache_file)
@@ -236,9 +240,9 @@ class CacheService:
                 if temp_file.exists():
                     try:
                         temp_file.unlink()
-                    except Exception:
-                        pass
-        except Exception as e:
+                    except OSError:
+                        logger.debug("Could not remove leftover temp cache file")
+        except Exception as e:  # noqa: BLE001 - cache save must not crash the run
             logger.warning(f"Failed to save cache: {e}")
 
     def is_stable(self, branch: BranchDetails) -> bool:
@@ -262,12 +266,9 @@ class CacheService:
 
         # If the PR is closed (not open), it's stable
         # pr_status format is like "open" or "closed:merged" or "closed:unmerged"
-        if not branch.pr_status.startswith("open"):
-            return True
+        return not branch.pr_status.startswith("open")
 
-        return False
-
-    def _serialize_branch(self, branch: BranchDetails) -> Dict:
+    def _serialize_branch(self, branch: BranchDetails) -> dict:
         """Convert BranchDetails to a cache-friendly dictionary.
 
         Args:
@@ -291,10 +292,10 @@ class CacheService:
             "notes": branch.notes,
             "merge_detection": branch.merge_detection,
             "stable": self.is_stable(branch),
-            "cached_at": datetime.now().isoformat(),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def deserialize_branch(self, data: Dict) -> Optional[BranchDetails]:
+    def deserialize_branch(self, data: dict) -> BranchDetails | None:
         """Convert cached dictionary back to BranchDetails.
 
         Args:
@@ -325,11 +326,11 @@ class CacheService:
                 in_worktree=False,  # Don't cache worktree status - it's dynamic
                 merge_detection=data.get("merge_detection"),
             )
-        except Exception as e:
+        except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Failed to deserialize branch {data.get('name', 'unknown')}: {e}")
             return None
 
-    def get_cached_branches(self, current_branches: List[str]) -> Dict[str, BranchDetails]:
+    def get_cached_branches(self, current_branches: list[str]) -> dict[str, BranchDetails]:
         """Get cached branch details for all branches that still exist.
 
         Args:
@@ -352,7 +353,7 @@ class CacheService:
         logger.debug(f"Found {len(cached_branches)} cached branches ({stable_count} stable)")
         return cached_branches
 
-    def get_stale_branches(self, current_branches: List[str], main_branch: str) -> List[str]:
+    def get_stale_branches(self, current_branches: list[str], main_branch: str) -> list[str]:
         """Get list of branches that need to be refreshed (unstable or not cached).
 
         A branch needs refresh if:
@@ -401,7 +402,7 @@ class CacheService:
             if self.cache_file.exists():
                 self.cache_file.unlink()
                 logger.info("Cache cleared")
-        except Exception as e:
+        except OSError as e:
             logger.warning(f"Failed to clear cache: {e}")
 
     def remove_branch_from_cache(self, branch_name: str) -> None:
@@ -431,24 +432,22 @@ class CacheService:
 
             # Read the full cache data to preserve metadata
             try:
-                with open(self.cache_file, "r") as f:
-                    with self._acquire_cache_lock(f, operation="read"):
-                        full_cache_data = json.load(f)
-            except Exception as e:
+                with open(self.cache_file) as f, self._acquire_cache_lock(f, operation="read"):
+                    full_cache_data = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
                 logger.warning(f"Failed to read full cache data: {e}")
                 return
 
             # Update the branches section
             full_cache_data["branches"] = cache
-            full_cache_data["last_updated"] = datetime.now().isoformat()
+            full_cache_data["last_updated"] = datetime.now(timezone.utc).isoformat()
 
             # Atomic write: write to temp file, then rename
             temp_file = self.cache_file.with_suffix(".tmp")
             try:
-                with open(temp_file, "w") as f:
-                    with self._acquire_cache_lock(f, operation="write"):
-                        json.dump(full_cache_data, f, indent=2)
-                        f.flush()
+                with open(temp_file, "w") as f, self._acquire_cache_lock(f, operation="write"):
+                    json.dump(full_cache_data, f, indent=2)
+                    f.flush()
 
                 temp_file.replace(self.cache_file)
                 logger.debug(f"Cache updated, {len(cache)} branches remaining")
@@ -456,12 +455,12 @@ class CacheService:
                 if temp_file.exists():
                     try:
                         temp_file.unlink()
-                    except Exception:
-                        pass
-        except Exception as e:
+                    except OSError:
+                        logger.debug("Could not remove leftover temp cache file")
+        except Exception as e:  # noqa: BLE001 - cache update must not crash the run
             logger.warning(f"Failed to remove branch '{branch_name}' from cache: {e}")
 
-    def remove_branches_from_cache(self, branch_names: List[str]) -> None:
+    def remove_branches_from_cache(self, branch_names: list[str]) -> None:
         """Remove multiple branches from the cache in a single operation.
 
         Args:
@@ -495,24 +494,22 @@ class CacheService:
 
             # Read the full cache data to preserve metadata
             try:
-                with open(self.cache_file, "r") as f:
-                    with self._acquire_cache_lock(f, operation="read"):
-                        full_cache_data = json.load(f)
-            except Exception as e:
+                with open(self.cache_file) as f, self._acquire_cache_lock(f, operation="read"):
+                    full_cache_data = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
                 logger.warning(f"Failed to read full cache data: {e}")
                 return
 
             # Update the branches section
             full_cache_data["branches"] = cache
-            full_cache_data["last_updated"] = datetime.now().isoformat()
+            full_cache_data["last_updated"] = datetime.now(timezone.utc).isoformat()
 
             # Atomic write: write to temp file, then rename
             temp_file = self.cache_file.with_suffix(".tmp")
             try:
-                with open(temp_file, "w") as f:
-                    with self._acquire_cache_lock(f, operation="write"):
-                        json.dump(full_cache_data, f, indent=2)
-                        f.flush()
+                with open(temp_file, "w") as f, self._acquire_cache_lock(f, operation="write"):
+                    json.dump(full_cache_data, f, indent=2)
+                    f.flush()
 
                 temp_file.replace(self.cache_file)
                 logger.debug(
@@ -522,7 +519,7 @@ class CacheService:
                 if temp_file.exists():
                     try:
                         temp_file.unlink()
-                    except Exception:
-                        pass
-        except Exception as e:
+                    except OSError:
+                        logger.debug("Could not remove leftover temp cache file")
+        except Exception as e:  # noqa: BLE001 - cache update must not crash the run
             logger.warning(f"Failed to remove branches from cache: {e}")

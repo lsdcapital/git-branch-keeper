@@ -5,6 +5,7 @@ import shutil
 import tempfile
 
 from git_branch_keeper.config import Config
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.services.git import GitOperations
 from git_branch_keeper.services.git.worktrees import WorktreeService
 
@@ -37,7 +38,7 @@ def test_valid_gbk_temp_worktree_is_hidden_from_user_worktrees(git_repo):
     finally:
         try:
             repo.git.worktree("remove", temp_path, "--force")
-        except Exception:
+        except GIT_ERRORS:
             pass
         shutil.rmtree(temp_path, ignore_errors=True)
         repo.git.worktree("prune", "--expire=now")

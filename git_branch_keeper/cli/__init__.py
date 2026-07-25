@@ -3,7 +3,7 @@
 This package provides the CLI entry point and argument parsing.
 """
 
-from .main import main
 from .args import parse_args
+from .main import main
 
 __all__ = ["main", "parse_args"]

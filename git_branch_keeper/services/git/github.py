@@ -1,20 +1,25 @@
 """GitHub API integration service"""
 
+from __future__ import annotations
+
 import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple, TYPE_CHECKING, Union
+from functools import lru_cache
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
-from github import Github, Auth
+
+from github import Auth, Github
 from rich.console import Console
 
+from git_branch_keeper.exceptions import GITHUB_ERRORS
 from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from github.Repository import Repository
+
     from git_branch_keeper.config import Config
 
 console = Console()
@@ -22,7 +27,7 @@ logger = get_logger(__name__)
 
 
 @lru_cache(maxsize=1)
-def get_gh_cli_token() -> Optional[str]:
+def get_gh_cli_token() -> str | None:
     """Return a token from the GitHub CLI if it is installed and authenticated.
 
     This is intentionally non-interactive: prompts are disabled so GBK never hangs
@@ -40,14 +45,13 @@ def get_gh_cli_token() -> Optional[str]:
         env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
         result = subprocess.run(
             [gh_path, "auth", "token", "--hostname", "github.com"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=5,
             check=False,
             env=env,
         )
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         logger.debug(f"[GitHub] Could not read token from gh CLI: {e}")
         return None
 
@@ -62,7 +66,7 @@ def get_gh_cli_token() -> Optional[str]:
     return None
 
 
-def resolve_github_token(config: Union["Config", dict]) -> Optional[str]:
+def resolve_github_token(config: Config | dict) -> str | None:
     """Resolve a GitHub token from config, environment, or gh CLI auth."""
     return (
         config.get("github_token")
@@ -73,7 +77,7 @@ def resolve_github_token(config: Union["Config", dict]) -> Optional[str]:
 
 
 class GitHubService:
-    def __init__(self, repo_path: str, config: Union["Config", dict]):
+    def __init__(self, repo_path: str, config: Config | dict):
         """Initialize the service.
 
         Note: GitHub integration is optional. Call setup_github_api() to enable.
@@ -83,10 +87,10 @@ class GitHubService:
         self.verbose = config.get("verbose", False)
         self.debug_mode = config.get("debug", False)
         self.github_token = resolve_github_token(config)
-        self.github_api_url: Optional[str] = None
-        self.github_repo: Optional[str] = None
-        self.github: Optional[Github] = None
-        self.gh_repo: Optional["Repository"] = None
+        self.github_api_url: str | None = None
+        self.github_repo: str | None = None
+        self.github: Github | None = None
+        self.gh_repo: Repository | None = None
 
     def is_enabled(self) -> bool:
         """Check if GitHub integration is enabled and configured."""
@@ -107,8 +111,7 @@ class GitHubService:
                 parsed_url = urlparse(remote_url)
                 path = parsed_url.path.strip("/")
 
-            if path.endswith(".git"):
-                path = path[:-4]
+            path = path.removesuffix(".git")
 
             self.github_repo = path
 
@@ -133,19 +136,20 @@ class GitHubService:
             logger.debug(f"[GitHub] Skipping PR check for {branch_name} - integration disabled")
             return False
 
-        try:
-            assert self.gh_repo is not None
-            assert self.github_repo is not None
+        if self.gh_repo is None or self.github_repo is None:
+            logger.debug(f"[GitHub] Skipping PR check for {branch_name} - repo not resolved")
+            return False
 
+        try:
             pulls = self.gh_repo.get_pulls(
                 state="open", head=f"{self.github_repo.split('/')[0]}:{branch_name}"
             )
             return pulls.totalCount > 0
-        except Exception as e:
+        except GITHUB_ERRORS as e:
             logger.debug(f"[GitHub] Error checking PR status for {branch_name}: {e}")
             return False
 
-    def _empty_pr_data(self) -> Dict:
+    def _empty_pr_data(self) -> dict:
         """Return the default PR data shape used throughout the app."""
         return {
             "count": 0,
@@ -162,7 +166,7 @@ class GitHubService:
             "local_head_sha": None,
         }
 
-    def _safe_str(self, value) -> Optional[str]:
+    def _safe_str(self, value) -> str | None:
         """Return a string only for real scalar values; ignore MagicMock placeholders."""
         if value is None:
             return None
@@ -170,22 +174,22 @@ class GitHubService:
             return value
         return None
 
-    def _safe_int(self, value) -> Optional[int]:
+    def _safe_int(self, value) -> int | None:
         """Return an int only for real integer values; ignore MagicMock placeholders."""
         if isinstance(value, int) and not isinstance(value, bool):
             return value
         return None
 
-    def _safe_isoformat(self, value) -> Optional[str]:
+    def _safe_isoformat(self, value) -> str | None:
         """Return an ISO timestamp string for datetime-like values."""
         if not isinstance(value, datetime):
             return None
         try:
             return value.isoformat()
-        except Exception:
+        except (AttributeError, ValueError):
             return None
 
-    def _pr_summary(self, pr) -> Dict:
+    def _pr_summary(self, pr) -> dict:
         """Extract stable scalar metadata from a PyGithub PR object."""
         head = getattr(pr, "head", None)
         base = getattr(pr, "base", None)
@@ -199,7 +203,7 @@ class GitHubService:
             "merged_at": self._safe_isoformat(getattr(pr, "merged_at", None)),
         }
 
-    def _latest_pr(self, prs: List) -> Optional[object]:
+    def _latest_pr(self, prs: list) -> object | None:
         """Return the latest PR by updated_at when available, otherwise the first PR."""
         if not prs:
             return None
@@ -210,12 +214,12 @@ class GitHubService:
                 return 0
             try:
                 return value.timestamp()
-            except Exception:
+            except (OSError, OverflowError, ValueError):
                 return 0
 
         return max(prs, key=timestamp)
 
-    def _fetch_single_branch_pr_data(self, branch_name: str) -> Tuple[str, Dict]:
+    def _fetch_single_branch_pr_data(self, branch_name: str) -> tuple[str, dict]:
         """Fetch PR data for a single branch. Returns (branch_name, pr_data_dict)."""
         try:
             # These should never be None when this method is called (guarded by public fetch methods)
@@ -272,12 +276,12 @@ class GitHubService:
 
             return (branch_name, pr_data)
 
-        except Exception as e:
+        except GITHUB_ERRORS as e:
             logger.debug(f"[GitHub] Error fetching PRs for branch {branch_name}: {e}")
             # Return default values if branch PR fetch fails
             return (branch_name, self._empty_pr_data())
 
-    def get_pr_data_for_branch(self, branch_name: str) -> Dict[str, Dict]:
+    def get_pr_data_for_branch(self, branch_name: str) -> dict[str, dict]:
         """Get PR data for one branch.
 
         Returns an empty dict if GitHub integration is not enabled. This is used
@@ -291,7 +295,7 @@ class GitHubService:
         fetched_branch, pr_data = self._fetch_single_branch_pr_data(branch_name)
         return {fetched_branch: pr_data}
 
-    def get_bulk_pr_data(self, branch_names: List[str]) -> Dict[str, Dict]:
+    def get_bulk_pr_data(self, branch_names: list[str]) -> dict[str, dict]:
         """Get PR data for multiple branches by fetching PRs in parallel.
 
         Returns empty dict if GitHub integration is not enabled.
@@ -333,7 +337,7 @@ class GitHubService:
 
             return result
 
-        except Exception as e:
+        except GITHUB_ERRORS as e:
             logger.debug(f"[GitHub] Error getting bulk PR data: {e}")
             return {}
 
@@ -343,5 +347,5 @@ class GitHubService:
             try:
                 self.github.close()
                 logger.debug("[GitHub] Closed GitHub API connection")
-            except Exception as e:
+            except GITHUB_ERRORS as e:
                 logger.debug(f"[GitHub] Error closing GitHub API connection: {e}")

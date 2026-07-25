@@ -1,18 +1,41 @@
 """Custom exceptions for git-branch-keeper"""
 
-from typing import Optional
+from __future__ import annotations
+
+import git
+import urllib3.exceptions
+from github import GithubException
+
+#: Exceptions raised when a git query or command fails, rather than when GBK
+#: itself is buggy. Caught wherever GBK deliberately falls back to another
+#: strategy or a safe default instead of aborting the run:
+#:
+#: - ``git.GitError``     - non-zero git exit, missing path, invalid repository
+#: - ``git.exc.ODBError`` - object database could not resolve a ref
+#: - ``LookupError``      - ``repo.refs[name]`` raises IndexError for unknown refs
+#: - ``ValueError``       - ``repo.remote(name)`` raises this for unknown remotes
+#:
+#: Deliberately excludes AttributeError/TypeError/RuntimeError so genuine bugs
+#: in GBK surface instead of being silently swallowed as "git failed".
+GIT_ERRORS = (git.GitError, git.exc.ODBError, LookupError, ValueError)
+
+#: Exceptions raised when a GitHub API call fails. GitHub integration is optional
+#: and advisory, so these are caught wherever GBK degrades to git-only behaviour:
+#:
+#: - ``GithubException``            - the API answered with an error status
+#: - ``OSError``                    - transport failure (``requests`` errors subclass this)
+#: - ``urllib3.exceptions.HTTPError`` - connection-pool and timeout errors
+GITHUB_ERRORS = (GithubException, OSError, urllib3.exceptions.HTTPError)
 
 
 class GitBranchKeeperError(Exception):
     """Base exception for all git-branch-keeper errors."""
 
-    pass
-
 
 class GitOperationError(GitBranchKeeperError):
     """Exception raised for errors in Git operations."""
 
-    def __init__(self, operation: str, branch: Optional[str] = None, message: Optional[str] = None):
+    def __init__(self, operation: str, branch: str | None = None, message: str | None = None):
         self.operation = operation
         self.branch = branch
         self.message = message
@@ -29,7 +52,7 @@ class GitOperationError(GitBranchKeeperError):
 class GitHubAPIError(GitBranchKeeperError):
     """Exception raised for errors in GitHub API operations."""
 
-    def __init__(self, operation: str, message: Optional[str] = None):
+    def __init__(self, operation: str, message: str | None = None):
         self.operation = operation
         self.message = message
 

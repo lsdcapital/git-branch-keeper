@@ -1,5 +1,6 @@
 """Helpers for working with git remotes."""
 
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -23,7 +24,7 @@ def detect_remote_name(repo) -> str:
     """
     try:
         names = [remote.name for remote in repo.remotes]
-    except Exception as e:
+    except GIT_ERRORS as e:
         logger.debug(f"Could not enumerate remotes: {e}")
         return DEFAULT_REMOTE
 
@@ -52,5 +53,6 @@ def get_remote_url(repo, remote_name: str):
     """
     try:
         return repo.remote(remote_name).url
-    except Exception:
+    except GIT_ERRORS:
+        # Unknown remote (ValueError) or unreadable config; caller treats None as "no remote".
         return None

@@ -122,9 +122,13 @@ class TestGitHubServicePROperations:
         mock_config["github_token"] = "test_token"
         service = GitHubService(mock_git_repo.working_dir, mock_config)
 
+        from github import GithubException
+
         service.github_repo = "test/repo"
         service.gh_repo = Mock()
-        service.gh_repo.get_pulls.side_effect = Exception("API Error")
+        service.gh_repo.get_pulls.side_effect = GithubException(
+            status=500, data={"message": "API Error"}
+        )
 
         result = service.has_open_pr("feature/test")
 
@@ -242,8 +246,12 @@ class TestGitHubServiceBulkOperations:
         service.github_repo = "test/repo"
         service.gh_repo = Mock()
 
+        from github import GithubException
+
         # Simulate API error
-        service.gh_repo.get_pulls.side_effect = Exception("API Error")
+        service.gh_repo.get_pulls.side_effect = GithubException(
+            status=500, data={"message": "API Error"}
+        )
 
         result = service.get_bulk_pr_data(["feature/test"])
 
@@ -285,8 +293,8 @@ class TestGitHubServiceEdgeCases:
         service.github_repo = "test/repo"
         service.gh_repo = Mock()
 
-        # Simulate network error
-        service.gh_repo.get_pulls.side_effect = Exception("Network error")
+        # Simulate network error (requests errors, which PyGithub raises, subclass OSError)
+        service.gh_repo.get_pulls.side_effect = OSError("Network error")
 
         result = service.has_open_pr("feature/test")
 

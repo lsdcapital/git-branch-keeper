@@ -288,5 +288,4 @@ async def test_quit_binding_exits(make_app):
     async with app.run_test() as pilot:
         await pilot.press("q")
         await pilot.pause()
-    # Exiting cleanly (no exception) is the assertion here.
-    assert app.return_code is not None or True
+    # Exiting cleanly (no exception raised on context exit) is the assertion here.

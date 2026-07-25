@@ -1,11 +1,12 @@
 """Tests for GitOperations"""
 
-import pytest
 from unittest.mock import Mock, patch
-import git
 
-from git_branch_keeper.services.git import GitOperations
+import git
+import pytest
+
 from git_branch_keeper.models.branch import SyncStatus
+from git_branch_keeper.services.git import GitOperations
 
 
 class TestGitServiceInit:
@@ -29,7 +30,7 @@ class TestGitServiceInit:
         # GitService doesn't validate path in __init__, it creates repo on-demand
         service = GitOperations(str(temp_dir / "nonexistent"), mock_config)
         # Should fail when we try to get the repo
-        with pytest.raises(Exception):
+        with pytest.raises(git.exc.NoSuchPathError):
             service._get_repo()
 
 
@@ -174,29 +175,31 @@ class TestGitServiceBranchDeletion:
         """Test deleting branch with protected remote."""
         service = GitOperations(git_repo_with_branches.working_dir, mock_config)
 
-        # Mock has_remote_branch to return True
-        with patch.object(service, "has_remote_branch", return_value=True):
-            # Mock the repo to simulate protected branch error
-            with patch.object(service, "_get_repo") as mock_get_repo:
-                mock_repo = git_repo_with_branches
-                mock_remote = Mock()
-                mock_remote.push.side_effect = git.exc.GitCommandError(
-                    "git push", status=1, stderr="remote: error: GH006: Protected branch"
-                )
+        # Mock has_remote_branch to return True, and mock the repo to simulate
+        # a protected branch error
+        with (
+            patch.object(service, "has_remote_branch", return_value=True),
+            patch.object(service, "_get_repo") as mock_get_repo,
+        ):
+            mock_repo = git_repo_with_branches
+            mock_remote = Mock()
+            mock_remote.push.side_effect = git.exc.GitCommandError(
+                "git push", status=1, stderr="remote: error: GH006: Protected branch"
+            )
 
-                # Save original remote method
-                original_remote = mock_repo.remote
-                mock_repo.remote = Mock(return_value=mock_remote)
-                mock_get_repo.return_value = mock_repo
+            # Save original remote method
+            original_remote = mock_repo.remote
+            mock_repo.remote = Mock(return_value=mock_remote)
+            mock_get_repo.return_value = mock_repo
 
-                git_repo_with_branches.git.checkout("main")
-                result = service.delete_branch("feature/test-feature", dry_run=False)
+            git_repo_with_branches.git.checkout("main")
+            result = service.delete_branch("feature/test-feature", dry_run=False)
 
-                # Restore original remote method
-                mock_repo.remote = original_remote
+            # Restore original remote method
+            mock_repo.remote = original_remote
 
-                # Should still return True (local deletion succeeded)
-                assert result is True
+            # Should still return True (local deletion succeeded)
+            assert result is True
 
 
 class TestGitServiceBranchStatusDetails:

@@ -1,11 +1,15 @@
 """Branch query service for git-branch-keeper."""
 
-import git
+from __future__ import annotations
+
 import os
 import re
 from datetime import datetime, timezone
-from typing import Optional, List, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
+import git
+
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.models.branch import SyncStatus
 from git_branch_keeper.services.git.worktrees import WorktreeService
 from git_branch_keeper.utils.logging import get_logger
@@ -23,8 +27,8 @@ class BranchQueries:
     def __init__(
         self,
         repo_path: str,
-        config: Union["Config", dict],
-        merge_detector: "MergeDetector",
+        config: Config | dict,
+        merge_detector: MergeDetector,
         remote_name: str = "origin",
     ):
         """Initialize the branch queries service.
@@ -55,12 +59,12 @@ class BranchQueries:
         """
         return git.Repo(self.repo_path)
 
-    def get_branch_tip_sha(self, branch_name: str) -> Optional[str]:
+    def get_branch_tip_sha(self, branch_name: str) -> str | None:
         """Return the tip SHA for a local branch, or None if it cannot be resolved."""
         try:
             repo = self._get_repo()
             return repo.refs[branch_name].commit.hexsha
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error getting branch tip SHA for {branch_name}: {e}")
             return None
 
@@ -81,7 +85,7 @@ class BranchQueries:
                 return True
             except (IndexError, KeyError):
                 return False
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error checking remote branch {branch_name}: {e}")
             return False
 
@@ -99,7 +103,7 @@ class BranchQueries:
             age = (today - commit_date).days
 
             return age
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error getting branch age for {branch_name}: {e}")
             return 0
 
@@ -164,7 +168,7 @@ class BranchQueries:
                 return f"behind {len(behind)}"
             else:
                 return SyncStatus.SYNCED.value
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error checking sync status for {branch_name}: {e}")
             return SyncStatus.LOCAL_ONLY.value  # Return local-only instead of unknown for better UX
 
@@ -174,7 +178,7 @@ class BranchQueries:
             repo = self._get_repo()
             commit = repo.refs[branch_name].commit
             return commit.committed_datetime.isoformat()
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error getting last commit timestamp for {branch_name}: {e}")
             return "unknown"
 
@@ -185,7 +189,7 @@ class BranchQueries:
             commit = repo.refs[branch_name].commit
             dt = datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
             return dt.strftime("%Y-%m-%d")
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.debug(f"Error getting last commit date for {branch_name}: {e}")
             return "unknown"
 
@@ -322,7 +326,7 @@ class BranchQueries:
             logger.warning(f"Could not check branch status for {branch_name}: {error_msg}")
             # Return error info instead of raising
             return {"error": f"Git error: {error_msg}"}
-        except Exception as e:
+        except GIT_ERRORS as e:
             error_msg = str(e)
             logger.warning(f"Could not check branch status for {branch_name}: {error_msg}")
             # Return error info instead of raising
@@ -331,7 +335,7 @@ class BranchQueries:
             self.in_git_operation = False
 
     def get_file_status_detailed(
-        self, branch_name: Optional[str] = None, worktree_path: Optional[str] = None
+        self, branch_name: str | None = None, worktree_path: str | None = None
     ) -> dict:
         """Get detailed file status with actual file lists.
 
@@ -407,14 +411,14 @@ class BranchQueries:
 
             return {"modified": modified, "untracked": untracked, "staged": staged}
 
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.warning(f"Could not get detailed file status: {e}")
             return {"modified": [], "untracked": [], "staged": []}
 
     def get_diff(
         self,
-        branch_name: Optional[str] = None,
-        worktree_path: Optional[str] = None,
+        branch_name: str | None = None,
+        worktree_path: str | None = None,
         staged: bool = False,
     ) -> str:
         """Get diff output for a branch or worktree.
@@ -474,11 +478,11 @@ class BranchQueries:
 
             return diff or "No changes"
 
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.warning(f"Could not get diff: {e}")
             return f"Error getting diff: {e}"
 
-    def get_branch_commits(self, branch_name: str, main_branch: str, limit: int = 20) -> List[dict]:
+    def get_branch_commits(self, branch_name: str, main_branch: str, limit: int = 20) -> list[dict]:
         """Get list of commits unique to a branch.
 
         Args:
@@ -508,7 +512,7 @@ class BranchQueries:
 
             return commits
 
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.warning(f"Could not get branch commits: {e}")
             return []
 
@@ -557,7 +561,7 @@ class BranchQueries:
                 "message": "Merged via fast-forward or squash (no explicit merge commit found)",
             }
 
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.warning(f"Could not get merge details: {e}")
             return {"found": False, "message": f"Error: {e}"}
 
@@ -595,7 +599,7 @@ class BranchQueries:
                 comparison["merge_base"] = merge_base
 
             return comparison
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.warning(f"Could not compare {branch_name} to {main_branch}: {e}")
             return {
                 "checked": False,
@@ -649,6 +653,6 @@ class BranchQueries:
                 "behind_commits": behind_commits,
             }
 
-        except Exception as e:
+        except GIT_ERRORS as e:
             logger.warning(f"Could not get divergence info: {e}")
             return {"ahead": 0, "behind": 0, "ahead_commits": [], "behind_commits": []}

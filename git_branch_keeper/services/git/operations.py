@@ -1,14 +1,18 @@
 """Git operations service - Facade for git operations."""
 
-import git
-from contextlib import contextmanager
-from rich.console import Console
-from typing import Union, TYPE_CHECKING, Optional, List
+from __future__ import annotations
 
-from git_branch_keeper.services.git.merge_detector import MergeDetector
-from git_branch_keeper.services.git.branch_queries import BranchQueries
-from git_branch_keeper.services.git.worktrees import WorktreeService
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
+import git
+from rich.console import Console
+
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.services.deletion_journal import DeletionJournal
+from git_branch_keeper.services.git.branch_queries import BranchQueries
+from git_branch_keeper.services.git.merge_detector import MergeDetector
+from git_branch_keeper.services.git.worktrees import WorktreeService
 from git_branch_keeper.utils.logging import get_logger
 from git_branch_keeper.utils.remotes import detect_remote_name
 
@@ -22,7 +26,7 @@ logger = get_logger(__name__)
 class GitOperations:
     """Facade for Git operations, composing specialized services."""
 
-    def __init__(self, repo_path: str, config: Union["Config", dict]):
+    def __init__(self, repo_path: str, config: Config | dict):
         """Initialize the service.
 
         Args:
@@ -38,7 +42,7 @@ class GitOperations:
         # fail construction here - fall back to the default and let _get_repo() surface it.
         try:
             self.remote_name = detect_remote_name(git.Repo(repo_path))
-        except Exception:
+        except GIT_ERRORS:
             self.remote_name = "origin"
         self.in_git_operation = False  # Track if operation is in progress
 
@@ -100,7 +104,7 @@ class GitOperations:
     # Delegation methods to BranchQueries
     # ============================================================================
 
-    def get_branch_tip_sha(self, branch_name: str) -> Optional[str]:
+    def get_branch_tip_sha(self, branch_name: str) -> str | None:
         """Return local branch tip SHA. Delegates to BranchQueries."""
         return self.branch_queries.get_branch_tip_sha(branch_name)
 
@@ -129,21 +133,21 @@ class GitOperations:
         return self.branch_queries.get_branch_status_details(branch_name)
 
     def get_file_status_detailed(
-        self, branch_name: Optional[str] = None, worktree_path: Optional[str] = None
+        self, branch_name: str | None = None, worktree_path: str | None = None
     ) -> dict:
         """Get detailed file status. Delegates to BranchQueries."""
         return self.branch_queries.get_file_status_detailed(branch_name, worktree_path)
 
     def get_diff(
         self,
-        branch_name: Optional[str] = None,
-        worktree_path: Optional[str] = None,
+        branch_name: str | None = None,
+        worktree_path: str | None = None,
         staged: bool = False,
     ) -> str:
         """Get diff output. Delegates to BranchQueries."""
         return self.branch_queries.get_diff(branch_name, worktree_path, staged)
 
-    def get_branch_commits(self, branch_name: str, main_branch: str, limit: int = 20) -> List[dict]:
+    def get_branch_commits(self, branch_name: str, main_branch: str, limit: int = 20) -> list[dict]:
         """Get branch commits. Delegates to BranchQueries."""
         return self.branch_queries.get_branch_commits(branch_name, main_branch, limit)
 
@@ -213,7 +217,7 @@ class GitOperations:
         branch_name: str,
         dry_run: bool = False,
         delete_remote: bool = False,
-        batch_id: Optional[str] = None,
+        batch_id: str | None = None,
     ) -> bool:
         """Delete a branch locally, and remotely only when explicitly requested.
 
@@ -236,7 +240,7 @@ class GitOperations:
                 deleted_sha = None
                 try:
                     deleted_sha = repo.heads[branch_name].commit.hexsha
-                except Exception:
+                except GIT_ERRORS:
                     logger.warning(f"Could not resolve tip SHA for {branch_name} before deletion")
 
                 # Delete local branch
@@ -314,6 +318,8 @@ class GitOperations:
 
                 return True
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - deletion must fail closed
+                # Deliberately broad: report the failure and keep the branch rather than
+                # letting anything unexpected propagate mid-way through a cleanup run.
                 console.print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
                 return False

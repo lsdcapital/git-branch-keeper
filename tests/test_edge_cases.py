@@ -1,13 +1,13 @@
 """Tests for edge cases and error scenarios"""
 
 from unittest.mock import Mock, patch
+
 import git
 import pytest
 
 from git_branch_keeper.core import BranchKeeper
-from git_branch_keeper.services.git import GitOperations
-from git_branch_keeper.services.git import GitHubService
 from git_branch_keeper.models.branch import SyncStatus
+from git_branch_keeper.services.git import GitHubService, GitOperations
 
 
 class TestDetachedHeadHandling:
@@ -48,23 +48,27 @@ class TestProtectedRemoteBranches:
         """Test deletion of branch with protected remote."""
         service = GitOperations(git_repo.working_dir, mock_config)
 
-        with patch.object(service, "has_remote_branch", return_value=True):
-            # Mock the repo.remote() call to simulate protected branch error
-            with patch.object(service, "_get_repo") as mock_get_repo:
-                mock_repo = Mock()
-                mock_remote = Mock()
-                mock_remote.push.side_effect = git.exc.GitCommandError(
-                    "push", status=1, stderr="remote: error: GH006: Protected branch update failed"
-                )
-                mock_repo.remote.return_value = mock_remote
-                mock_repo.delete_head = Mock()
-                mock_get_repo.return_value = mock_repo
+        # Mock the repo.remote() call to simulate protected branch error
+        with (
+            patch.object(service, "has_remote_branch", return_value=True),
+            patch.object(service, "_get_repo") as mock_get_repo,
+        ):
+            mock_repo = Mock()
+            mock_remote = Mock()
+            mock_remote.push.side_effect = git.exc.GitCommandError(
+                "push", status=1, stderr="remote: error: GH006: Protected branch update failed"
+            )
+            mock_repo.remote.return_value = mock_remote
+            mock_repo.delete_head = Mock()
+            # repo.heads is subscriptable on a real repo; the tip SHA is read before deletion
+            mock_repo.heads = {"main": Mock(commit=Mock(hexsha="a" * 40))}
+            mock_get_repo.return_value = mock_repo
 
-                # Should handle gracefully
-                result = service.delete_branch("main", dry_run=False)
+            # Should handle gracefully
+            result = service.delete_branch("main", dry_run=False)
 
-                # Local deletion should succeed even if remote fails
-                assert result is True
+            # Local deletion should succeed even if remote fails
+            assert result is True
 
 
 class TestGitHubAPIPagination:
@@ -109,8 +113,8 @@ class TestNetworkErrors:
         service.github_repo = "test/repo"
         service.gh_repo = Mock()
 
-        # Simulate network error
-        service.gh_repo.get_pulls.side_effect = Exception("Network unreachable")
+        # Simulate network error (requests errors, which PyGithub raises, subclass OSError)
+        service.gh_repo.get_pulls.side_effect = OSError("Network unreachable")
 
         # Should handle gracefully
         result = service.has_open_pr("feature/test")

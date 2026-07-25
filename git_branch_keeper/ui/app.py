@@ -1,37 +1,38 @@
 """Main TUI application for git-branch-keeper."""
 
+from __future__ import annotations
+
 import asyncio
 import os
-from typing import List, Set, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import git
-
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
-from textual.timer import Timer
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.coordinate import Coordinate
+from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
-from rich.text import Text
 
-from git_branch_keeper.services.undo_service import pick_latest_batch, restore_entries
 from git_branch_keeper.constants import (
-    TUI_COLORS,
-    SYMBOL_MARKED,
-    SYMBOL_UNMARKED,
     COLUMNS,
     LEGEND_TEXT,
+    SYMBOL_MARKED,
+    SYMBOL_UNMARKED,
+    TUI_COLORS,
     BranchStyleType,
 )
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.formatters import (
-    format_date,
-    format_remote_status,
-    format_display_status,
     format_age,
-    format_changes,
-    format_deletion_confirmation_items,
     format_branch_name_with_indent,
+    format_changes,
+    format_date,
+    format_deletion_confirmation_items,
+    format_display_status,
     format_pr_link,
+    format_remote_status,
     get_branch_style_type,
 )
 from git_branch_keeper.models.branch import (
@@ -41,6 +42,7 @@ from git_branch_keeper.models.branch import (
     BranchStatus,
 )
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
+from git_branch_keeper.services.undo_service import pick_latest_batch, restore_entries
 from git_branch_keeper.ui.screens import ConfirmScreen, InfoScreen, TabbedInfoScreen
 from git_branch_keeper.ui.widgets import NonExpandingHeader
 from git_branch_keeper.utils.logging import get_logger
@@ -59,13 +61,13 @@ class BranchKeeperApp(App):
     SUB_TITLE = ""  # Will be set dynamically to repo name
 
     STATUS_MESSAGE_TIMEOUT = 4.0
-    STATUS_MESSAGE_PREFIXES = {
+    STATUS_MESSAGE_PREFIXES: ClassVar[dict[str, str]] = {
         "information": "ℹ",
         "success": "✓",
         "warning": "⚠",
         "error": "✖",
     }
-    STATUS_MESSAGE_STYLES = {
+    STATUS_MESSAGE_STYLES: ClassVar[dict[str, str]] = {
         "information": "cyan",
         "success": "green",
         "warning": "yellow",
@@ -102,7 +104,7 @@ class BranchKeeperApp(App):
 
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("q", "quit", "Quit"),
         Binding("space", "toggle_mark", "Mark/Unmark"),
         Binding("f", "force_mark", "Force Mark"),
@@ -117,25 +119,25 @@ class BranchKeeperApp(App):
 
     def __init__(
         self,
-        keeper: "BranchKeeper",
-        branches: Optional[List[BranchDetails]] = None,
+        keeper: BranchKeeper,
+        branches: list[BranchDetails] | None = None,
         cleanup_mode: bool = False,
     ):
         super().__init__()
         self.keeper = keeper
         self.branches = branches or []
-        self.analysis: Optional[BranchAnalysisResult] = None
-        self.marked_branches: Set[str] = set()  # Normal marked branches
-        self.force_marked_branches: Set[str] = set()  # Force-marked branches
+        self.analysis: BranchAnalysisResult | None = None
+        self.marked_branches: set[str] = set()  # Normal marked branches
+        self.force_marked_branches: set[str] = set()  # Force-marked branches
         self.sort_column = "age"
         self.sort_reverse = False  # Newest first by default
         self.cleanup_mode = cleanup_mode
         self.is_refreshing = False
         self.operation_label = "Refreshing"
-        self.analysis_progress: Optional[BranchAnalysisProgress] = None
-        self.status_message: Optional[str] = None
+        self.analysis_progress: BranchAnalysisProgress | None = None
+        self.status_message: str | None = None
         self.status_message_severity = "information"
-        self._status_message_timer: Optional[Timer] = None
+        self._status_message_timer: Timer | None = None
 
         # Set subtitle to show repository name (version displays on right via clock)
         repo_path = self.keeper.repo.working_dir
@@ -149,9 +151,7 @@ class BranchKeeperApp(App):
         yield Static(id="status-bar")
         yield Footer()
 
-    def _auto_mark_deletable(
-        self, deletable_branches: Optional[List[BranchDetails]] = None
-    ) -> None:
+    def _auto_mark_deletable(self, deletable_branches: list[BranchDetails] | None = None) -> None:
         """Auto-mark deletable branches when cleanup mode is active."""
         if not self.cleanup_mode:
             return
@@ -236,7 +236,7 @@ class BranchKeeperApp(App):
             self._status_message_timer.stop()
             self._status_message_timer = None
 
-    def _clear_status_message(self, expected_message: Optional[str] = None) -> None:
+    def _clear_status_message(self, expected_message: str | None = None) -> None:
         """Clear the transient status-bar message."""
         if expected_message is not None and self.status_message != expected_message:
             return
@@ -248,9 +248,9 @@ class BranchKeeperApp(App):
 
     def _set_status_message(
         self,
-        message: Optional[str],
+        message: str | None,
         severity: str = "information",
-        timeout: Optional[float] = STATUS_MESSAGE_TIMEOUT,
+        timeout: float | None = STATUS_MESSAGE_TIMEOUT,
     ) -> None:
         """Show short feedback in the status bar instead of a toast."""
         self._cancel_status_message_timer()
@@ -291,7 +291,11 @@ class BranchKeeperApp(App):
             current = max(0, min(progress.current, progress.total))
             detail = f"{label} {current}/{progress.total} ({progress.percent}%)"
 
-        suffix = "navigation OK; actions paused" if self.operation_label == "Refreshing" else "actions paused"
+        suffix = (
+            "navigation OK; actions paused"
+            if self.operation_label == "Refreshing"
+            else "actions paused"
+        )
         return f"⟳ {self.operation_label}: {detail} — {suffix}"
 
     def _set_refreshing(
@@ -383,7 +387,7 @@ class BranchKeeperApp(App):
         """Return the stable DataTable row key for a branch/worktree entry."""
         return f"{branch.name}:{branch.worktree_path}" if branch.is_worktree else branch.name
 
-    def _current_branch_name(self) -> Optional[str]:
+    def _current_branch_name(self) -> str | None:
         """Return the current branch name, or None for detached HEAD/unavailable repos."""
         try:
             return self.keeper.repo.active_branch.name
@@ -393,8 +397,8 @@ class BranchKeeperApp(App):
     def _format_branch_row(
         self,
         branch: BranchDetails,
-        current_branch_name: Optional[str],
-        github_base_url: Optional[str],
+        current_branch_name: str | None,
+        github_base_url: str | None,
     ):
         """Build DataTable cell values for a branch row."""
         is_marked = branch.name in self.marked_branches
@@ -477,7 +481,7 @@ class BranchKeeperApp(App):
                 key=row_key,
             )
 
-    def _refresh_branch_rows(self, branch_names: Optional[Set[str]] = None) -> None:
+    def _refresh_branch_rows(self, branch_names: set[str] | None = None) -> None:
         """Refresh existing table rows without clearing the table.
 
         Clearing and rebuilding the DataTable resets its scroll offset. Mark/unmark
@@ -509,8 +513,8 @@ class BranchKeeperApp(App):
                 table.update_cell(row_key, column_key, value, update_width=column_key == "mark")
 
     def _mark_with_hierarchy(
-        self, branch_name: str, mark_set: Set[str], is_force: bool = False
-    ) -> tuple[bool, Optional[str]]:
+        self, branch_name: str, mark_set: set[str], is_force: bool = False
+    ) -> tuple[bool, str | None]:
         """Mark a branch and all related items (parent + worktrees) if validation passes.
 
         Args:
@@ -787,7 +791,7 @@ class BranchKeeperApp(App):
         # Show confirmation screen
         self.push_screen(ConfirmScreen(message), self._handle_delete_confirmation)
 
-    def _handle_delete_confirmation(self, confirmed: Optional[bool]) -> None:
+    def _handle_delete_confirmation(self, confirmed: bool | None) -> None:
         """Handle delete confirmation result."""
         if not confirmed:
             self._set_status_message("Deletion cancelled")
@@ -804,10 +808,12 @@ class BranchKeeperApp(App):
                 for branch in matching:
                     if branch.is_worktree:
                         worktrees.append(branch)
-                    elif branch.worktree_is_orphaned:
-                        branches.append(branch)
-                    elif is_force or BranchValidationService.is_deletable(
-                        branch, self.keeper.protected_branches
+                    elif (
+                        branch.worktree_is_orphaned
+                        or is_force
+                        or BranchValidationService.is_deletable(
+                            branch, self.keeper.protected_branches
+                        )
                     ):
                         branches.append(branch)
 
@@ -933,8 +939,10 @@ class BranchKeeperApp(App):
                 )
                 self.push_screen(InfoScreen(error_msg))
 
-        except Exception as e:
-            error_msg = f"Error during deletion:\n\n{str(e)}"
+        except Exception as e:  # noqa: BLE001 - background worker must fail closed
+            # Deliberately broad: this is a @work-decorated worker; an unexpected
+            # failure must surface as an InfoScreen, not crash the whole TUI.
+            error_msg = f"Error during deletion:\n\n{e!s}"
             self.push_screen(InfoScreen(error_msg))
         finally:
             self._set_refreshing(False)
@@ -961,7 +969,7 @@ class BranchKeeperApp(App):
 
         try:
             repo = git.Repo(repo_path)
-        except Exception as e:
+        except GIT_ERRORS as e:
             self.push_screen(InfoScreen(f"Could not open repository:\n\n{e}"))
             return
 
@@ -996,7 +1004,7 @@ class BranchKeeperApp(App):
             lambda confirmed: self._handle_undo_confirmation(confirmed, entries),
         )
 
-    def _handle_undo_confirmation(self, confirmed: Optional[bool], entries: list[dict]) -> None:
+    def _handle_undo_confirmation(self, confirmed: bool | None, entries: list[dict]) -> None:
         """Handle confirmation for restoring a deleted branch batch."""
         if not confirmed:
             self._set_status_message("Restore cancelled")
@@ -1138,15 +1146,15 @@ class BranchKeeperApp(App):
                 self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
-            logger.error(f"Error loading branches: {e}", exc_info=True)
-            error_msg = f"Error loading branches:\n\n{str(e)}\n\nCheck the logs for more details."
+            logger.exception("Error loading branches")
+            error_msg = f"Error loading branches:\n\n{e!s}\n\nCheck the logs for more details."
             self.push_screen(InfoScreen(error_msg))
         finally:
             self._set_refreshing(False)
 
     @work(exclusive=True, thread=False)
     async def load_additional_data(
-        self, cached_branches: Optional[List[BranchDetails]], branches_to_process: List[str]
+        self, cached_branches: list[BranchDetails] | None, branches_to_process: list[str]
     ) -> None:
         """Load branches with cached data as starting point, refresh unstable branches.
 
@@ -1181,8 +1189,10 @@ class BranchKeeperApp(App):
                 self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
-            logger.error(f"Error loading additional branches: {e}", exc_info=True)
-            error_msg = f"Error loading additional branches:\n\n{str(e)}\n\nCheck the logs for more details."
+            logger.exception("Error loading additional branches")
+            error_msg = (
+                f"Error loading additional branches:\n\n{e!s}\n\nCheck the logs for more details."
+            )
             self.push_screen(InfoScreen(error_msg))
         finally:
             self._set_refreshing(False)
@@ -1231,9 +1241,9 @@ class BranchKeeperApp(App):
                 self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
-            logger.error(f"Error refreshing: {e}", exc_info=True)
+            logger.exception("Error refreshing")
             error_msg = (
-                f"Error refreshing branch data:\n\n{str(e)}\n\nCheck the logs for more details."
+                f"Error refreshing branch data:\n\n{e!s}\n\nCheck the logs for more details."
             )
             self.push_screen(InfoScreen(error_msg))
         finally:
@@ -1250,9 +1260,10 @@ class BranchKeeperApp(App):
             # Close keeper resources (GitHub connections, etc.)
             if self.keeper:
                 self.keeper.close()
-        except Exception:
-            # Silently ignore cleanup errors to avoid delays
-            pass
+        except Exception as e:  # noqa: BLE001 - quit must never be blocked by cleanup errors
+            # Deliberately broad: this runs on the way out; log and keep exiting
+            # rather than delaying or blocking shutdown.
+            logger.debug(f"Error during quit cleanup: {e}")
         finally:
             # Call parent's exit method
             self.exit()

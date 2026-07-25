@@ -1,7 +1,8 @@
 """Configuration handling for git-branch-keeper"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional, List
 
 
 @dataclass
@@ -9,8 +10,8 @@ class Config:
     """Configuration for git-branch-keeper with validation."""
 
     # Branch filtering
-    protected_branches: List[str] = field(default_factory=lambda: ["main", "master"])
-    ignore_patterns: List[str] = field(default_factory=list)
+    protected_branches: list[str] = field(default_factory=lambda: ["main", "master"])
+    ignore_patterns: list[str] = field(default_factory=list)
     main_branch: str = "main"
     status_filter: str = "all"  # all, merged, stale
 
@@ -26,11 +27,11 @@ class Config:
     debug: bool = False
     refresh: bool = False  # Force refresh, bypass cache
     sequential: bool = False  # Force sequential processing (disable parallelism)
-    workers: Optional[int] = None  # Number of parallel workers (None = auto-detect)
+    workers: int | None = None  # Number of parallel workers (None = auto-detect)
     squash_scan_limit: int = 500  # First-parent main commits to scan for squash patch-id
 
     # GitHub integration
-    github_token: Optional[str] = None
+    github_token: str | None = None
     max_prs_to_fetch: int = 500
 
     # Sorting options
@@ -68,7 +69,7 @@ class Config:
     def _validate_protected_branches(self):
         """Validate protected_branches list."""
         if not isinstance(self.protected_branches, list):
-            raise ValueError("protected_branches must be a list")
+            raise TypeError("protected_branches must be a list")
 
         # Ensure main_branch is in protected_branches
         if self.main_branch not in self.protected_branches:
@@ -94,9 +95,7 @@ class Config:
     def _validate_squash_scan_limit(self):
         """Validate squash_scan_limit is positive."""
         if self.squash_scan_limit <= 0:
-            raise ValueError(
-                f"squash_scan_limit must be positive, got {self.squash_scan_limit}"
-            )
+            raise ValueError(f"squash_scan_limit must be positive, got {self.squash_scan_limit}")
 
     def to_dict(self) -> dict:
         """Convert config to dictionary for backward compatibility."""
@@ -127,7 +126,7 @@ class Config:
         return getattr(self, key, default)
 
     @classmethod
-    def from_dict(cls, config_dict: dict) -> "Config":
+    def from_dict(cls, config_dict: dict) -> Config:
         """Create Config from dictionary."""
         # Extract only known fields
         known_fields = {

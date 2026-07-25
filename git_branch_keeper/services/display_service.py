@@ -1,23 +1,27 @@
 """Display and formatting service for branch information"""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import git
 from rich.console import Console
 from rich.table import Table
-from typing import List, Optional, TYPE_CHECKING
-from git_branch_keeper.models.branch import BranchDetails, BranchStatus
-from git_branch_keeper.utils.logging import get_logger
-from git_branch_keeper.constants import COLUMNS, CLI_COLORS
+
+from git_branch_keeper.constants import CLI_COLORS, COLUMNS
 from git_branch_keeper.formatters import (
-    format_date,
-    format_remote_status,
-    format_display_status,
-    format_changes,
-    format_pr_link,
     format_branch_link_with_indent,
+    format_changes,
+    format_date,
     format_deletion_reason,
+    format_display_status,
+    format_pr_link,
+    format_remote_status,
     get_branch_style_type,
 )
+from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
-import git
+from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from git_branch_keeper.services.branch_status_service import BranchStatusService
@@ -30,18 +34,18 @@ class DisplayService:
     def __init__(self, verbose: bool = False, debug: bool = False):
         self.verbose = verbose
         self.debug_mode = debug
-        self.repo: Optional[git.Repo] = None  # Will be set when display_branch_table is called
-        self.branch_status_service: Optional["BranchStatusService"] = (
+        self.repo: git.Repo | None = None  # Will be set when display_branch_table is called
+        self.branch_status_service: BranchStatusService | None = (
             None  # Will be set when display_branch_table is called
         )
 
     def display_branch_table(
         self,
-        branch_details: List[BranchDetails],
+        branch_details: list[BranchDetails],
         repo: git.Repo,
-        github_base_url: Optional[str],
-        branch_status_service: "BranchStatusService",
-        protected_branches: List[str],
+        github_base_url: str | None,
+        branch_status_service: BranchStatusService,
+        protected_branches: list[str],
         show_summary: bool = False,
         delete_remote: bool = False,
     ) -> None:

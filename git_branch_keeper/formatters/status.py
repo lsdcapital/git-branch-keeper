@@ -1,7 +1,7 @@
 """Status and deletion formatting utilities."""
 
-from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.constants import STATUS_DISPLAY, BranchStyleType
+from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 
 
 def format_status(status: BranchStatus) -> str:

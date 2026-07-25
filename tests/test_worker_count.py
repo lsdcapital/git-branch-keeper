@@ -1,8 +1,10 @@
 """Tests for branch processing worker-count selection."""
 
-from typing import Any, Optional, cast
+from __future__ import annotations
 
-from git_branch_keeper.core.branch_keeper import BranchKeeper, GITHUB_ENABLED_WORKER_CAP
+from typing import Any, cast
+
+from git_branch_keeper.core.branch_keeper import GITHUB_ENABLED_WORKER_CAP, BranchKeeper
 
 
 class DummyGitHubService:
@@ -15,7 +17,7 @@ class DummyGitHubService:
         return self.enabled
 
 
-def _keeper_with_workers(workers: Optional[int], github_enabled: bool) -> Any:
+def _keeper_with_workers(workers: int | None, github_enabled: bool) -> Any:
     keeper = cast(Any, object.__new__(BranchKeeper))
     keeper.config = {"workers": workers}
     keeper.github_service = DummyGitHubService(github_enabled)

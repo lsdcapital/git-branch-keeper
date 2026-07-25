@@ -1,7 +1,6 @@
 """Shared constants for git-branch-keeper."""
 
 from dataclasses import dataclass
-from typing import List
 
 
 @dataclass
@@ -14,7 +13,7 @@ class ColumnDefinition:
 
 
 # Unified column definitions for both CLI and TUI
-COLUMNS: List[ColumnDefinition] = [
+COLUMNS: list[ColumnDefinition] = [
     ColumnDefinition("branch", "Branch", 30),
     ColumnDefinition("status", "Status", 10),
     ColumnDefinition("last_commit", "Last Commit", 12),
