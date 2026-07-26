@@ -48,10 +48,17 @@ class GitOperations:
 
         # Compose specialized services (Dependency Injection pattern)
         self.merge_detector = MergeDetector(repo_path, config)
-        self.branch_queries = BranchQueries(
-            repo_path, config, self.merge_detector, remote_name=self.remote_name
-        )
+        # One WorktreeService for the whole facade: it caches Git's worktree list,
+        # and a second instance would keep its own copy, so a cache refresh taken
+        # before a deletion would not be seen by branch queries.
         self.worktree_service = WorktreeService(repo_path)
+        self.branch_queries = BranchQueries(
+            repo_path,
+            config,
+            self.merge_detector,
+            remote_name=self.remote_name,
+            worktree_service=self.worktree_service,
+        )
         self.deletion_journal = DeletionJournal(repo_path)
 
         logger.info("Git operations initialized")

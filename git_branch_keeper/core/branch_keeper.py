@@ -226,10 +226,25 @@ class BranchKeeper:
                 # Detached HEAD state - no active branch, so we can delete any branch
                 pass
 
+            # Re-read worktree metadata before touching the branch. Analysis
+            # cached it, and the TUI can sit on that cache for minutes while the
+            # user reviews, so a worktree created (or removed) in between would
+            # otherwise be missed. Doing it here rather than just before the
+            # delete also keeps the status probe below from trying to build a
+            # temporary worktree for a branch that is already checked out
+            # elsewhere, which fails with an opaque git error.
+            worktree = self.git_service.worktree_service.find_worktree_for_branch(
+                branch_name, refresh=True
+            )
+            if worktree is not None:
+                error_msg = f"Branch is checked out in a worktree ({worktree.path})"
+                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                return False, error_msg
+
             # Check for local changes
             status_details = self.git_service.get_branch_status_details(branch_name)
 
-            # Check if branch is in a worktree (can't delete while in worktree - even with force)
+            # Cannot delete while in a worktree - even with force
             if status_details.get("in_worktree"):
                 error_msg = "Branch is checked out in a worktree"
                 self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
@@ -297,6 +312,17 @@ class BranchKeeper:
                 else:
                     self._console_print(f"Would delete local branch {branch_name} ({reason})")
                 return True, None
+
+            # Narrow the remaining window: the status probe above builds a
+            # temporary worktree and can take seconds, so check once more with
+            # nothing but the delete left to do.
+            recheck = self.git_service.worktree_service.find_worktree_for_branch(
+                branch_name, refresh=True
+            )
+            if recheck is not None:
+                error_msg = f"Branch was checked out in a worktree ({recheck.path})"
+                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                return False, error_msg
 
             # Delete the branch
             success = self.git_service.delete_branch(
@@ -374,11 +400,13 @@ class BranchKeeper:
         Returns:
             New list with worktree entries inserted
         """
-        # Get all worktrees
-        worktree_infos = self.git_service.worktree_service.get_worktree_info()
-
-        # Skip main worktree
-        worktree_infos = [wt for wt in worktree_infos if not wt.is_main]
+        # Only worktrees that could actually be removed get their own row. Git
+        # refuses to remove the main working tree, and GBK refuses to remove the
+        # one it is running in; both still protect their branch via
+        # _apply_dynamic_worktree_status.
+        worktree_infos = [
+            wt for wt in self.git_service.worktree_service.get_other_worktrees() if not wt.is_main
+        ]
 
         if not worktree_infos:
             return branch_details
@@ -672,10 +700,8 @@ class BranchKeeper:
         Worktree membership is intentionally not trusted from cache; it can
         change independently of branch commits or status.
         """
-        worktree_infos = self.git_service.worktree_service.get_worktree_info()
-        worktree_by_branch = {
-            wt.branch_name: wt for wt in worktree_infos if wt.branch_name and not wt.is_main
-        }
+        worktree_infos = self.git_service.worktree_service.get_other_worktrees()
+        worktree_by_branch = {wt.branch_name: wt for wt in worktree_infos if wt.branch_name}
         worktree_branches = set(worktree_by_branch)
         logger.debug(f"Worktree branches detected: {worktree_branches}")
 
@@ -1123,10 +1149,19 @@ class BranchKeeper:
         Returns:
             List of deletable BranchDetails (excludes worktree entries)
         """
+        # The checked-out branch can never be deleted. When GBK runs from a
+        # linked worktree that branch is usually a feature branch rather than
+        # main, so without this it would be offered up as a cleanup candidate
+        # and then fail at deletion time.
+        current_branch = self._current_branch_name()
+
         deletable = []
         for branch in branches:
             # Skip worktree entries
             if branch.is_worktree:
+                continue
+
+            if current_branch and branch.name == current_branch:
                 continue
 
             # Check if deletable using validation service
@@ -1180,10 +1215,13 @@ class BranchKeeper:
             branch.name for branch in branches_to_delete if not branch.is_worktree
         }
         removable_worktree_names = {wt.name for wt in worktrees_to_remove if wt.is_worktree}
+        current_branch = self._current_branch_name()
 
         unblocked = []
         for branch in branches:
             if branch.is_worktree:
+                continue
+            if current_branch and branch.name == current_branch:
                 continue
             if branch.name in planned_branch_names:
                 continue

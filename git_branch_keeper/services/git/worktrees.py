@@ -32,6 +32,9 @@ class WorktreeService:
         self._worktree_info: list[WorktreeInfo] | None = None  # Cache for worktree information
         self._cache_lock = Lock()  # Thread safety for cache access
         self._cleanup_lock = Lock()  # Avoid concurrent self-healing prune attempts
+        self._current_path: str | None = None  # Cache for the running worktree's path
+        self._current_path_resolved = False
+        self._current_path_lock = Lock()
 
     def _get_repo(self):
         """Get a thread-safe git.Repo instance.
@@ -47,6 +50,72 @@ class WorktreeService:
         """Clear the worktree information cache."""
         with self._cache_lock:
             self._worktree_info = None
+
+    def get_current_worktree_path(self) -> str | None:
+        """Return the real path of the worktree GBK itself is running in.
+
+        This is the main working tree in the common case, but it is a linked
+        worktree whenever GBK is invoked from inside one.
+        """
+        with self._current_path_lock:
+            if self._current_path_resolved:
+                return self._current_path
+
+            current: str | None = None
+            try:
+                working_dir = self._get_repo().working_dir
+                if working_dir:
+                    current = os.path.realpath(working_dir)
+            except GIT_ERRORS as e:
+                logger.debug(f"Could not resolve current worktree path: {e}")
+
+            self._current_path = current
+            self._current_path_resolved = True
+            return current
+
+    def is_current_worktree(self, path: str) -> bool:
+        """Return True when path is the worktree GBK is running in."""
+        if not path:
+            return False
+        current = self.get_current_worktree_path()
+        if not current:
+            return False
+        return os.path.realpath(path) == current
+
+    def get_other_worktrees(self, refresh: bool = False) -> list[WorktreeInfo]:
+        """Return every worktree except the one GBK is running in.
+
+        ``is_main`` is not a safe stand-in for "not ours": when GBK runs from a
+        linked worktree, the main working tree holds a *different* branch that
+        still must be protected from deletion.
+        """
+        return [
+            worktree
+            for worktree in self.get_worktree_info(refresh=refresh)
+            if not self.is_current_worktree(worktree.path)
+        ]
+
+    def find_worktree_for_branch(
+        self, branch_name: str, refresh: bool = False
+    ) -> WorktreeInfo | None:
+        """Return the worktree holding branch_name, ignoring our own worktree.
+
+        Args:
+            branch_name: Branch to look for
+            refresh: Bypass the cache and re-read Git's worktree metadata. Use
+                this immediately before destructive operations, where a stale
+                cache would let GBK act on an out-of-date view.
+        """
+        if not branch_name:
+            return None
+        return next(
+            (
+                worktree
+                for worktree in self.get_other_worktrees(refresh=refresh)
+                if worktree.branch_name == branch_name
+            ),
+            None,
+        )
 
     def get_worktree_branches(self) -> set[str]:
         """Get set of branch names that are checked out in worktrees.
@@ -170,16 +239,20 @@ class WorktreeService:
                 cleaned = self._cleanup_stale_gbk_temp_worktree(worktree.path) or cleaned
         return cleaned
 
-    def get_worktree_info(self) -> list[WorktreeInfo]:
+    def get_worktree_info(self, refresh: bool = False) -> list[WorktreeInfo]:
         """Get detailed information about all worktrees.
+
+        Args:
+            refresh: Ignore the cache and re-read Git's worktree metadata.
 
         Returns:
             List of WorktreeInfo objects for all worktrees
         """
         # Return cached result if available
-        with self._cache_lock:
-            if self._worktree_info is not None:
-                return self._worktree_info
+        if not refresh:
+            with self._cache_lock:
+                if self._worktree_info is not None:
+                    return self._worktree_info
 
         worktree_list: list[WorktreeInfo] = []
         try:
@@ -224,6 +297,14 @@ class WorktreeService:
         Returns:
             Tuple of (success, error_message). error_message is None on success.
         """
+        # Git happily removes the worktree the caller is standing in (it only
+        # refuses for the *main* working tree), which with force=True would
+        # delete the directory GBK is running from along with any work in it.
+        if self.is_current_worktree(path):
+            error_msg = "Refusing to remove the worktree git-branch-keeper is running in"
+            logger.error(f"Failed to remove worktree at {path}: {error_msg}")
+            return False, error_msg
+
         try:
             repo = self._get_repo()
             args = ["remove", path]

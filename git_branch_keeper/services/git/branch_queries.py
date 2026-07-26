@@ -30,6 +30,7 @@ class BranchQueries:
         config: Config | dict,
         merge_detector: MergeDetector,
         remote_name: str = "origin",
+        worktree_service: WorktreeService | None = None,
     ):
         """Initialize the branch queries service.
 
@@ -38,12 +39,16 @@ class BranchQueries:
             config: Configuration dictionary or Config object
             merge_detector: MergeDetector instance for merge checks (dependency injection)
             remote_name: Name of the remote to query (default "origin")
+            worktree_service: Shared WorktreeService. Callers should pass the same
+                instance used elsewhere - WorktreeService caches Git's worktree
+                list, and two instances would drift apart, so a refresh taken
+                before a deletion would not be visible here.
         """
         self.repo_path = repo_path
         self.config = config
         self.merge_detector = merge_detector
         self.remote_name = remote_name
-        self.worktree_service = WorktreeService(repo_path)
+        self.worktree_service = worktree_service or WorktreeService(repo_path)
         self.in_git_operation = False
 
         logger.debug("Branch queries service initialized")
@@ -215,12 +220,11 @@ class BranchQueries:
                 # Detached HEAD
                 is_current = False
 
-            # Check if branch is in a worktree (but not the current branch)
-            worktree_infos = self.worktree_service.get_worktree_info()
-            worktree_info = next(
-                (wt for wt in worktree_infos if wt.branch_name == branch_name and not wt.is_main),
-                None,
-            )
+            # Check if branch is checked out in a worktree other than our own.
+            # That worktree already has the branch on disk, so read its status
+            # directly - creating a temporary worktree for it would fail with
+            # "already used by worktree at ...".
+            worktree_info = self.worktree_service.find_worktree_for_branch(branch_name)
             if worktree_info and not is_current:
                 logger.debug(
                     f"Branch {branch_name} is in another worktree, using existing worktree"

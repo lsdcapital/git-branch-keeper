@@ -242,7 +242,13 @@ The tool automatically protects:
 - ✅ Branches matching `ignore_patterns`
 - ✅ Branches with open pull requests (if GitHub auth is available)
 - ✅ Current branch you're on
-- ✅ Branches in active worktrees
+- ✅ Branches checked out in any other worktree, including the main working tree
+- ✅ The worktree GBK is running in (never removed, even with `--force`)
+
+You can run GBK from inside a linked worktree. It protects whatever the *other*
+worktrees have checked out - including the main working tree, which often holds a
+feature branch rather than `main` - and only ever offers to remove linked
+worktrees that are neither the main working tree nor the one you're standing in.
 
 ## ⚙️ Configuration
 

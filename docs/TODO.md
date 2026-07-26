@@ -294,39 +294,45 @@ def delete_branch(self, branch_name: str, reason: str, force_mode: bool = False)
 
 ### 🟡 8. Worktree Race Condition
 
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
+**Status**: [ ] Not started | [ ] In progress | [x] Complete
 
 **Severity**: Medium
 **Impact**: Low probability - branch could be checked out in worktree between check and deletion
 
-**Code Location**: `git_branch_keeper/core.py:191-195` and `git_branch_keeper/services/git_service.py:206-244`
+**Code Location**: `git_branch_keeper/core/branch_keeper.py` (`delete_branch`) and
+`git_branch_keeper/services/git/worktrees.py`
 
 **Problem Description**:
-Small time window between checking if a branch is in a worktree and attempting to delete it:
+The window was not the microseconds between two adjacent calls - it was the whole
+gap between analysis and deletion. Worktree membership is read once during
+analysis and cached, and the TUI then sits on that cache for as long as the user
+takes to review, so a worktree created in between was invisible.
 
-```python
-# Check status (get_branch_status_details)
-status_details = self.git_service.get_branch_status_details(branch_name)
+Two things made it worse:
+- `GitOperations` and `BranchQueries` each built their own `WorktreeService`, so
+  they held **separate caches** that could disagree with each other.
+- With a stale cache, `get_branch_status_details()` tried to build a temporary
+  worktree for a branch that was already checked out, failing with an opaque
+  `fatal: '<branch>' is already used by worktree at ...`.
 
-# If no worktree was detected...
-if not status_details.get("in_worktree"):
-    # ... continue to deletion
-    # ⚠️ Race: Branch could be checked out in new worktree HERE
+**Fix implemented**:
+- `WorktreeService.get_worktree_info(refresh=True)` bypasses the cache;
+  `find_worktree_for_branch(branch, refresh=True)` is the pre-deletion probe.
+- `BranchKeeper.delete_branch()` refreshes *before* the status probe (fail fast
+  with a real message, and keep the probe from tripping over the checkout) and
+  once more immediately before the delete itself.
+- `GitOperations` now constructs one `WorktreeService` and injects it into
+  `BranchQueries`, so a refresh is visible to every caller.
+- `remove_worktree()` refuses the worktree GBK is running in. Git only protects
+  the *main* working tree; it will happily remove your current linked worktree,
+  and with `force=True` that discards uncommitted work.
 
-# Try to delete
-self.git_service.delete_branch(branch_name)
-```
+Git itself refuses `git branch -D` for a branch checked out in any worktree, so
+the race was never a data-loss path for branches - the fix turns an opaque
+mid-cleanup git error into a clear "checked out in a worktree (<path>)" skip.
 
-**Scenario** (unlikely but possible):
-1. Tool checks branch status - not in worktree
-2. Another process creates worktree with this branch (in parallel)
-3. Tool attempts to delete branch
-4. Deletion might fail due to worktree, or succeed with unintended consequences
-
-**Recommended Fix**:
-- Re-check worktree status immediately before deletion
-- Use atomic operations where possible
-- Implement lock mechanism
+**Tests**: `tests/test_worktree_toctou.py` (both directions of the race, plus a
+racing branch failing without aborting the run).
 
 **Implementation Complexity**: Low-Medium
 

@@ -115,6 +115,33 @@ spam. Open PRs keep branches active/protected. A merged PR is authoritative only
 the local branch tip still matches the PR head SHA; if the local tip differs, GBK adds
 a warning note and falls through to the git-native checks above.
 
+### Worktrees
+
+`WorktreeService` (`services/git/worktrees.py`) owns all worktree state. Two rules
+matter and are easy to get wrong:
+
+**`is_main` is not "not ours".** GBK can be run from inside a linked worktree, in
+which case the *main* working tree holds some other branch that must still be
+protected. Use `get_other_worktrees()` / `find_worktree_for_branch()`, which
+compare against `get_current_worktree_path()` (the real path of `repo.working_dir`),
+not `wt.is_main`. `is_main` is only for "can this worktree be removed" — Git
+refuses to remove the main working tree, and `remove_worktree()` refuses the one
+GBK is running in (Git does *not*; with `--force` it would delete the directory
+out from under the process). Worktree rows in the table are therefore linked
+worktrees other than our own; branches in the main/current worktree are still
+protected via `in_worktree` in `_apply_dynamic_worktree_status`.
+
+**The cache is shared, and stale by design.** `get_worktree_info()` caches Git's
+worktree list, and `GitOperations` injects a single `WorktreeService` into
+`BranchQueries` so both see the same cache — two instances would drift and a
+refresh would be invisible to one of them. Before anything destructive, re-read
+with `refresh=True`: analysis caches worktree membership and the TUI then sits on
+it for as long as the user takes to review. `BranchKeeper.delete_branch()`
+refreshes twice — before the status probe (which would otherwise fail with
+`already used by worktree at ...` while trying to build a temp worktree) and again
+immediately before the delete. See `tests/test_worktree_toctou.py` and
+`tests/test_worktree_linked_checkout.py`.
+
 ### Error Handling
 - Services use exceptions for error propagation
 - The core BranchKeeper class handles errors gracefully with user-friendly messages
