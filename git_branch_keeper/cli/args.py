@@ -92,9 +92,9 @@ def parse_args():
     parser.add_argument("--ignore", nargs="*", default=[], help="Branch patterns to ignore")
     parser.add_argument(
         "--filter",
-        choices=["all", "stale", "merged"],
+        choices=["all", "stale", "merged", "unstarted"],
         default="all",
-        help="Filter which branches to show and process (all/stale/merged)",
+        help="Filter which branches to show and process (all/stale/merged/unstarted)",
     )
     parser.add_argument("--main-branch", default="main", help="Main branch name")
     parser.add_argument(

@@ -13,6 +13,11 @@ class BranchStatus(Enum):
     ACTIVE = "active"
     STALE = "stale"
     MERGED = "merged"
+    # Branch has no commits of its own relative to main. Reachability would call
+    # this "merged" (a tip that is already in main is trivially an ancestor of it),
+    # but nothing was ever merged - there was nothing to merge. Kept distinct so the
+    # label is honest and so it stays out of every [STALE, MERGED] cleanup check.
+    UNSTARTED = "unstarted"
 
 
 class SyncStatus(Enum):
@@ -25,6 +30,7 @@ class SyncStatus(Enum):
     LOCAL_ONLY = "local-only"
     MERGED_GIT = "merged-git"
     MERGED_PR = "merged-pr"
+    NO_COMMITS = "no-commits"  # No commits unique to the branch (see BranchStatus.UNSTARTED)
     CLOSED_UNMERGED = "closed-unmerged"  # New status for branches with closed but unmerged PRs
 
 

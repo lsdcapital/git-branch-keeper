@@ -56,7 +56,7 @@ class Config:
 
     def _validate_status_filter(self):
         """Validate status_filter is one of allowed values."""
-        allowed = ["all", "merged", "stale"]
+        allowed = ["all", "merged", "stale", "unstarted"]
         if self.status_filter not in allowed:
             raise ValueError(f"status_filter must be one of {allowed}, got '{self.status_filter}'")
 

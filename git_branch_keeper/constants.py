@@ -39,6 +39,7 @@ STATUS_DISPLAY = {
     "active": "active",
     "stale": "stale",
     "merged": "merged",
+    "unstarted": "unstarted",
 }
 
 

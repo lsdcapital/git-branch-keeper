@@ -129,6 +129,9 @@ class DisplayService:
             active_branches = sum(1 for b in branch_details if b.status == BranchStatus.ACTIVE)
             stale_branches = sum(1 for b in branch_details if b.status == BranchStatus.STALE)
             merged_branches = sum(1 for b in branch_details if b.status == BranchStatus.MERGED)
+            unstarted_branches = sum(
+                1 for b in branch_details if b.status == BranchStatus.UNSTARTED
+            )
 
             # Display summary
             console.print("\nSummary:")
@@ -136,6 +139,8 @@ class DisplayService:
             console.print(f"Active branches: {active_branches}")
             console.print(f"Stale branches: {stale_branches}")
             console.print(f"Merged branches: {merged_branches}")
+            if unstarted_branches:
+                console.print(f"Unstarted branches: {unstarted_branches}")
 
             # Display merge detection stats
             merge_stats = self.branch_status_service.git_service.get_merge_stats()

@@ -78,6 +78,16 @@ class BranchStatusService:
                 logger.debug(f"Branch {branch_name} marked as active (has open PRs)")
                 return BranchStatus.ACTIVE
 
+        # A branch created from main that never moved was never merged - there was
+        # nothing to merge. Checked before the git-native detection below because
+        # reachability would otherwise call it MERGED (its tip is already in main, so
+        # it is trivially an ancestor) and make a freshly-cut branch a cleanup
+        # candidate. Also short-circuits the staleness check: age is meaningless here,
+        # since the branch inherits main's commit date rather than having one of its own.
+        if self.git_service.is_unstarted_branch(branch_name, main_branch):
+            logger.debug(f"Branch {branch_name} was never committed to, marking as unstarted")
+            return BranchStatus.UNSTARTED
+
         # Then try to detect merge using Git methods (faster)
         logger.debug(f"Checking if {branch_name} is merged into {main_branch}...")
         if self.git_service.is_branch_merged(branch_name, main_branch):

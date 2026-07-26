@@ -319,6 +319,55 @@ class MergeDetector:
             self._set_in_cache(cache_key, False)
             return False
 
+    def is_unstarted_branch(self, branch_name: str, main_branch: str) -> bool:
+        """Whether the branch was created from main and never moved since.
+
+        Such a branch trivially satisfies the reachability check in
+        :meth:`_check_reachable` - its tip *is* an ancestor of main - so without this
+        distinction it is reported as merged, asserting a merge that never happened.
+        Callers use it to classify the branch as :attr:`BranchStatus.UNSTARTED`.
+
+        Zero unique commits (``git rev-list --count <main>..<branch> == 0``) is
+        necessary but *not* sufficient: a fast-forward-merged branch also has none,
+        because its commits became main's. Refs alone cannot separate the two - after
+        a fast-forward there is no merge commit and no record that those commits ever
+        belonged to the branch. The reflog is that record, and it is the only local
+        evidence which distinguishes them::
+
+            feature/done        (ff-merged)   commit: work
+                                              branch: Created from HEAD
+            feature/not-started (unstarted)   branch: Created from HEAD
+
+        So this requires *positive* proof: exactly one reflog entry, and that entry a
+        creation. Anything else - a commit, reset, rebase, or a reflog that is missing,
+        expired, or disabled - returns False and leaves the branch to the ordinary
+        merge detection. Being wrong in that direction only over-reports "merged",
+        which the existing deletion guards already re-verify; being wrong in the other
+        direction would hide a genuinely merged branch behind a label that is never a
+        cleanup candidate.
+        """
+        if branch_name == main_branch:
+            return False
+
+        try:
+            repo = self._get_repo()
+            count = repo.git.rev_list("--count", f"{main_branch}..{branch_name}").strip()
+            if int(count) != 0:
+                return False
+
+            # %gs is the reflog subject, newest first.
+            reflog = repo.git.reflog("show", "--format=%gs", branch_name).strip()
+        except (*GIT_ERRORS, ValueError) as e:
+            logger.debug(f"[unstarted] Error for {branch_name}: {e}")
+            return False
+
+        entries = [line for line in reflog.splitlines() if line.strip()]
+        if len(entries) != 1 or not entries[0].startswith("branch: Created from"):
+            return False
+
+        logger.debug(f"[unstarted] {branch_name} was created from main and never moved")
+        return True
+
     def _check_reachable(self, branch_name: str, main_branch: str) -> bool:
         """Reachability: the branch tip is an ancestor of main.
 

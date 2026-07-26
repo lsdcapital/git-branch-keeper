@@ -98,7 +98,19 @@ def _branch_deletion_blockers(
                 "This row represents a worktree, not a local branch ref.",
             )
         )
-    if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
+    if branch.status == BranchStatus.UNSTARTED:
+        # Age would be main's commit date here, not the branch's own, so quoting it
+        # against stale_days as the generic message does would be meaningless.
+        blockers.append(
+            _blocker(
+                "NO_UNIQUE_COMMITS",
+                (
+                    "Branch has no commits of its own relative to main, so it was "
+                    "never merged and is not a cleanup candidate."
+                ),
+            )
+        )
+    elif branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
         blockers.append(
             _blocker(
                 "NOT_STALE_OR_MERGED",
@@ -418,6 +430,7 @@ def _summary(analysis: BranchAnalysisResult, protected_branches: list[str]) -> d
         "active": sum(1 for branch in branch_rows if branch.status == BranchStatus.ACTIVE),
         "stale": sum(1 for branch in branch_rows if branch.status == BranchStatus.STALE),
         "merged": sum(1 for branch in branch_rows if branch.status == BranchStatus.MERGED),
+        "unstarted": sum(1 for branch in branch_rows if branch.status == BranchStatus.UNSTARTED),
         "protected": sum(1 for branch in branch_rows if branch.name in protected_branches),
         "deletable_branches": len(analysis.deletable_branches),
         "removable_worktrees": len(analysis.removable_worktrees),
@@ -561,7 +574,7 @@ def schema_to_dict() -> dict[str, Any]:
             "global_flags": [
                 "--json",
                 "--output json",
-                "--filter {all,stale,merged}",
+                "--filter {all,stale,merged,unstarted}",
                 "--main-branch NAME",
                 "--protected BRANCH [BRANCH ...]",
                 "--ignore PATTERN [PATTERN ...]",

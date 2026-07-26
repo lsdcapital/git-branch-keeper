@@ -100,6 +100,27 @@ checks, ordered cheapest-first. Each maps to a real merge style; see
    multi-commit squash merges (N commits collapsed into 1, so no per-commit patch-id
    match).
 
+**Unstarted branches are excluded before any of this runs.** A branch created from main
+that was never committed to has no commits of its own, so check 1 matches trivially — its
+tip *is* an ancestor of main — and it would be reported `merged`/`merged-git`, asserting a
+merge that never happened and making a freshly-cut branch (e.g. a Conductor `git worktree
+add -b` workspace whose work is still uncommitted) a cleanup candidate.
+`MergeDetector.is_unstarted_branch()` catches these first, and `BranchStatusService` returns
+`BranchStatus.UNSTARTED` / `SyncStatus.NO_COMMITS`. That status is deliberately absent from
+every `[STALE, MERGED]` check in the codebase, so such branches are never deletable.
+
+Do not reduce that check to `git rev-list --count main..branch == 0`. **A fast-forward-merged
+branch also has zero unique commits** — its commits became main's — and refs alone cannot
+separate the two, since a fast-forward leaves no merge commit and no record that those
+commits were ever the branch's. The reflog is that record: an unstarted branch has exactly
+one entry (`branch: Created from …`), a fast-forward-merged one also has its `commit:`
+entries. So the check requires *positive* proof and returns False whenever the reflog is
+missing, expired, disabled, or shows the branch moved — falling back to ordinary merge
+detection. Erring toward `merged` is safe (the deletion guards below re-verify); erring
+toward `unstarted` would hide a genuinely merged branch behind a never-deletable label.
+See `tests/test_unstarted_branches.py`, whose `TestMergedBranchesStayMerged` is the
+regression guard for exactly this.
+
 **Squash detection has two confidence levels.** An *exact* combined patch-id match counts as
 merged/deletable. A *fuzzy* high-similarity substring match does NOT mark the branch
 merged — diff-text containment doesn't prove the work is in main (it may have been

@@ -95,6 +95,10 @@ class GitOperations:
             branch_name, main_branch, force_refresh=force_refresh
         )
 
+    def is_unstarted_branch(self, branch_name: str, main_branch: str) -> bool:
+        """Whether a branch was created and never moved. Delegates to MergeDetector."""
+        return self.merge_detector.is_unstarted_branch(branch_name, main_branch)
+
     def get_merge_stats(self) -> str:
         """Get merge detection statistics. Delegates to MergeDetector."""
         return self.merge_detector.get_merge_stats()

@@ -153,6 +153,12 @@ class BranchQueries:
                 else:
                     return SyncStatus.SYNCED.value
 
+            # Never committed to: report that, rather than the merged-git the
+            # reachability check would produce. Must precede the merge check for the
+            # same reason BranchStatusService checks it first.
+            if self.merge_detector.is_unstarted_branch(branch_name, main_branch):
+                return SyncStatus.NO_COMMITS.value
+
             # Check if branch is merged into main (via dependency injection)
             if self.merge_detector.is_branch_merged(branch_name, main_branch):
                 return SyncStatus.MERGED_GIT.value

@@ -232,7 +232,7 @@ class TabbedInfoScreen(ModalScreen):
                     with TabPane("Commits", id="tab-commits"):
                         yield self._build_commits_tab()
 
-                elif self.branch.status == BranchStatus.ACTIVE:
+                elif self.branch.status in (BranchStatus.ACTIVE, BranchStatus.UNSTARTED):
                     # Tabs for active clean branches
                     with TabPane("History", id="tab-history"):
                         yield self._build_history_tab()
@@ -282,7 +282,9 @@ class TabbedInfoScreen(ModalScreen):
         if BranchValidationService.is_protected(self.branch.name, self.keeper.protected_branches):
             blockers.append("Branch is protected")
 
-        if self.branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
+        if self.branch.status == BranchStatus.UNSTARTED:
+            blockers.append("Branch has no commits of its own - nothing was merged")
+        elif self.branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
             blockers.append(f"Branch status is {self.branch.status.value}, not stale/merged")
 
         if self.branch.in_worktree:

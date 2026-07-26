@@ -843,7 +843,12 @@ class BranchKeeper:
             )
         elif sort_by == "status":
             # Sort: protected first, then by status, then by age, then newest first
-            status_order = {BranchStatus.ACTIVE: 0, BranchStatus.STALE: 1, BranchStatus.MERGED: 2}
+            status_order = {
+                BranchStatus.ACTIVE: 0,
+                BranchStatus.UNSTARTED: 1,
+                BranchStatus.STALE: 2,
+                BranchStatus.MERGED: 3,
+            }
             branch_details.sort(
                 key=lambda b: (
                     0 if b.name in self.protected_branches else 1,
@@ -1595,6 +1600,11 @@ class BranchKeeper:
                 sync_status = SyncStatus.MERGED_PR.value
             else:
                 sync_status = SyncStatus.MERGED_GIT.value
+        elif status == BranchStatus.UNSTARTED:
+            # Keep the two columns telling the same story. get_branch_sync_status()
+            # already returns this, but it has earlier exits (protected branches) that
+            # would otherwise leave a merge-flavoured label on an unstarted row.
+            sync_status = SyncStatus.NO_COMMITS.value
 
         return status, sync_status, pr_status, notes
 
