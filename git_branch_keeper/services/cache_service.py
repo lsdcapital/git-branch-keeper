@@ -72,23 +72,49 @@ class CacheService:
             except OSError as e:
                 logger.debug(f"Error releasing lock: {e}")
 
-    def _get_current_local_branch_names(self) -> set[str] | None:
-        """Return the current local branch names for this repository.
+    def _get_current_branch_tips(self) -> dict[str, str] | None:
+        """Return {branch name: tip SHA} for this repository's local branches.
 
         Cache entries are keyed by branch name, so pruning must use the same namespace as
-        branch discovery: local heads only (``refs/heads/*``). If the repository cannot be
-        opened, return None so callers can preserve existing cache data instead of risking
-        accidental data loss.
+        branch discovery: local heads only (``refs/heads/*``). The tip SHA is what makes a
+        cached entry verifiable - without it a "merged" row stays trusted even after the
+        branch grows new, unmerged commits. If the repository cannot be opened, return
+        None so callers can preserve existing cache data instead of risking accidental
+        data loss.
         """
         try:
             repo = git.Repo(self.repo_path)
             try:
-                return {head.name for head in repo.heads}
+                return {head.name: head.commit.hexsha for head in repo.heads}
             finally:
                 repo.close()
         except GIT_ERRORS as e:
-            logger.debug(f"Could not list local branches for cache pruning: {e}")
+            logger.debug(f"Could not read local branch tips for cache: {e}")
             return None
+
+    def _get_current_local_branch_names(self) -> set[str] | None:
+        """Return the current local branch names, or None if the repo cannot be opened."""
+        tips = self._get_current_branch_tips()
+        return None if tips is None else set(tips)
+
+    def _branches_reachable_from(self, main_branch: str) -> set[str] | None:
+        """Return local branches whose tip is currently reachable from main_branch.
+
+        One `git branch --merged` call answers this for every branch at once, which
+        is what makes it usable as a cheap re-validation for cache entries written
+        before tip SHAs were recorded. Returns None if the query fails.
+        """
+        try:
+            repo = git.Repo(self.repo_path)
+            try:
+                output = repo.git.branch("--merged", main_branch, "--format=%(refname:short)")
+            finally:
+                repo.close()
+        except GIT_ERRORS as e:
+            logger.debug(f"Could not list branches merged into {main_branch}: {e}")
+            return None
+
+        return {line.strip() for line in output.splitlines() if line.strip()}
 
     def _validate_cache_data(self, cache_data: dict) -> bool:
         """Validate cache data structure and required fields.
@@ -182,7 +208,8 @@ class CacheService:
             # Load existing cache to preserve data for branches that still exist locally.
             existing_cache = self.load_cache()
 
-            current_local_branches = self._get_current_local_branch_names()
+            branch_tips = self._get_current_branch_tips()
+            current_local_branches = None if branch_tips is None else set(branch_tips)
             if current_local_branches is not None:
                 before_count = len(existing_cache)
                 existing_cache = {
@@ -204,7 +231,8 @@ class CacheService:
                     logger.debug(f"Skipping cache for non-local branch ref '{branch.name}'")
                     continue
 
-                serialized = self._serialize_branch(branch)
+                tip_sha = branch_tips.get(branch.name) if branch_tips else None
+                serialized = self._serialize_branch(branch, tip_sha)
                 # Skip if branch has invalid data
                 if serialized.get("last_commit_date") == "unknown":
                     logger.debug(f"Skipping cache for branch '{branch.name}' with invalid date")
@@ -268,17 +296,21 @@ class CacheService:
         # pr_status format is like "open" or "closed:merged" or "closed:unmerged"
         return not branch.pr_status.startswith("open")
 
-    def _serialize_branch(self, branch: BranchDetails) -> dict:
+    def _serialize_branch(self, branch: BranchDetails, tip_sha: str | None = None) -> dict:
         """Convert BranchDetails to a cache-friendly dictionary.
 
         Args:
             branch: Branch details to serialize
+            tip_sha: The branch's tip SHA at the time of caching. This is what lets
+                get_stale_branches() tell "still merged" from "was merged, then grew
+                new commits"; an entry without it is never reused.
 
         Returns:
             Dictionary representation of the branch
         """
         return {
             "name": branch.name,
+            "tip_sha": tip_sha,
             "last_commit_date": branch.last_commit_date,
             "age_days": branch.age_days,
             "status": branch.status.value,
@@ -359,7 +391,19 @@ class CacheService:
         A branch needs refresh if:
         - It's not in cache, OR
         - It's the main branch (always check sync status), OR
-        - It's marked as unstable (not merged or has open PR)
+        - It's marked as unstable (not merged or has open PR), OR
+        - Its tip SHA has moved since it was cached, or cannot be re-validated
+
+        The tip check is a safety requirement, not an optimisation. A merged branch
+        is cached as "stable" and would otherwise never be re-examined, so commits
+        added to it after the merge - the ordinary "merge the PR, keep working"
+        flow - would still be reported as merged and deleted with `git branch -D`.
+
+        Entries written before tip SHAs were recorded get one cheap chance to prove
+        themselves: if the branch is still reachable from main, its cached "merged"
+        verdict is confirmed by git right now and the row is kept (the end-of-run
+        save records its tip, so this only happens once). Anything else - including
+        rebase- and squash-merged branches, which are not reachable - is re-analysed.
 
         Args:
             current_branches: List of current branch names in the repository
@@ -369,6 +413,13 @@ class CacheService:
             List of branch names that need to be refreshed
         """
         cache = self.load_cache()
+        # None means the repo could not be read; then nothing can be validated, so
+        # every cached entry has to be treated as stale.
+        branch_tips = self._get_current_branch_tips()
+        # Resolved lazily - only legacy entries need it, so repos with a current
+        # cache never pay for the extra git call.
+        reachable_from_main: set[str] | None = None
+        reachable_resolved = False
         stale_branches = []
 
         for branch_name in current_branches:
@@ -389,6 +440,37 @@ class CacheService:
             if not branch_data.get("stable", False):
                 logger.debug(f"Branch '{branch_name}' is unstable, needs refresh")
                 stale_branches.append(branch_name)
+                continue
+
+            # Stable, but only trustworthy if the branch still points where it did.
+            cached_tip = branch_data.get("tip_sha")
+            current_tip = branch_tips.get(branch_name) if branch_tips is not None else None
+
+            if cached_tip:
+                if cached_tip != current_tip:
+                    logger.debug(
+                        f"Branch '{branch_name}' tip changed since caching "
+                        f"({cached_tip[:12]} -> {str(current_tip)[:12]}), needs refresh"
+                    )
+                    stale_branches.append(branch_name)
+                continue
+
+            # Legacy entry with no recorded tip. Re-validate against live git instead
+            # of re-analysing: reachability proves the cached "merged" verdict still
+            # holds, and costs one shared git call rather than a full branch analysis.
+            if not reachable_resolved:
+                reachable_from_main = self._branches_reachable_from(main_branch)
+                reachable_resolved = True
+
+            if reachable_from_main is not None and branch_name in reachable_from_main:
+                logger.debug(
+                    f"Branch '{branch_name}' has no cached tip but is still reachable "
+                    f"from '{main_branch}' - keeping cached row"
+                )
+                continue
+
+            logger.debug(f"Branch '{branch_name}' has no verifiable cached tip, needs refresh")
+            stale_branches.append(branch_name)
 
         stable_skipped = len(current_branches) - len(stale_branches)
         logger.debug(

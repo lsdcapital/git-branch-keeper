@@ -56,6 +56,12 @@ class MergeDetector:
         self._squash_lock = Lock()
         self._merge_detection_info: dict[str, dict[str, Any]] = {}
         self._merge_info_lock = Lock()
+        # (patch-id, diff length) per first-parent commit on main, shared by every
+        # branch checked in this run. These depend only on the commit and the fixed
+        # diff flags, so recomputing them per branch made squash detection
+        # O(branches x main commits) - the dominant cost on large repos.
+        self._main_commit_signatures: dict[str, tuple[str | None, int]] = {}
+        self._signature_lock = Lock()
         # Add counters for merge detection methods
         self.merge_detection_stats = {
             "reachable": 0,  # merge commit / fast-forward (tip reachable from main)
@@ -152,6 +158,43 @@ class MergeDetector:
             return None
         return output.split()[0]
 
+    def _commit_diff(self, repo, commit_sha: str) -> str:
+        """Return a commit's diff using the flags squash detection compares on."""
+        return repo.git.show(
+            commit_sha,
+            "--no-color",
+            "--format=",
+            "--ignore-space-change",
+            "--ignore-blank-lines",
+        )
+
+    def _main_commit_signature(self, repo, commit_sha: str) -> tuple[str | None, int]:
+        """Return (patch-id, diff length) for a commit on main, computed once per run.
+
+        The length is kept so the advisory similarity pass can rule a commit out
+        without fetching its diff text again: `branch_diff in commit_diff` requires
+        the commit diff to be at least as long as the branch diff, and the >0.9
+        similarity ratio caps how much longer it can be. That narrows hundreds of
+        candidates down to the handful worth reading.
+
+        A commit that cannot be read is memoised as unusable rather than retried.
+        """
+        with self._signature_lock:
+            cached = self._main_commit_signatures.get(commit_sha)
+        if cached is not None:
+            return cached
+
+        try:
+            diff = self._commit_diff(repo, commit_sha)
+            signature: tuple[str | None, int] = (self._patch_id_for_diff(diff), len(diff))
+        except GIT_ERRORS as e:
+            logger.debug(f"[squash-patch-id] Error reading {commit_sha[:7]}: {e}")
+            signature = (None, -1)
+
+        with self._signature_lock:
+            self._main_commit_signatures[commit_sha] = signature
+        return signature
+
     def _get_main_branch_sha(self, main_branch: str) -> str:
         """Get the current SHA of the main branch."""
         try:
@@ -208,8 +251,18 @@ class MergeDetector:
 
         return f"Merges detected by: {', '.join(stats)}"
 
-    def is_branch_merged(self, branch_name: str, main_branch: str) -> bool:
-        """Check if a branch is merged using multiple methods, ordered by speed."""
+    def is_branch_merged(
+        self, branch_name: str, main_branch: str, force_refresh: bool = False
+    ) -> bool:
+        """Check if a branch is merged using multiple methods, ordered by speed.
+
+        Args:
+            branch_name: Branch to check
+            main_branch: Branch it should be merged into
+            force_refresh: Recompute even if memoised. The memo is only invalidated
+                when *main* moves, so it can outlive changes to the branch itself;
+                pass True before acting destructively on the answer.
+        """
         # A branch cannot be merged into itself
         if branch_name == main_branch:
             logger.debug(f"Skipping merge check: {branch_name} is the main branch")
@@ -220,9 +273,10 @@ class MergeDetector:
 
         # Check cache first (thread-safe)
         cache_key = f"{branch_name}:{main_branch}"
-        found, value = self._check_cache(cache_key)
-        if found:
-            return value
+        if not force_refresh:
+            found, value = self._check_cache(cache_key)
+            if found:
+                return value
 
         self._set_merge_detection_info(branch_name, self._default_merge_detection_info("none"))
         with self._squash_lock:
@@ -389,56 +443,63 @@ class MergeDetector:
             candidate_shas = candidate_shas[:scan_limit]
 
             advisory_info: dict[str, Any] | None = None
+
+            # Pass 1 - exact patch-id match. Signatures are memoised across branches,
+            # so a given main commit is read at most once per run.
             for searched_count, commit_sha in enumerate(candidate_shas, start=1):
-                try:
-                    commit_diff = repo.git.show(
-                        commit_sha,
-                        "--no-color",
-                        "--format=",
-                        "--ignore-space-change",
-                        "--ignore-blank-lines",
+                commit_patch_id, _ = self._main_commit_signature(repo, commit_sha)
+                if commit_patch_id and branch_patch_id == commit_patch_id:
+                    logger.debug(f"[squash-patch-id] Found squash merge in commit {commit_sha[:7]}")
+                    self._set_merge_detection_info(
+                        branch_name,
+                        {
+                            "merged": True,
+                            "method": "squash_patch_id",
+                            "confidence": "exact",
+                            "matched_commit": commit_sha,
+                            "searched_commits": searched_count,
+                            "scan_limit": scan_limit,
+                            "truncated": truncated,
+                        },
                     )
-                    commit_patch_id = self._patch_id_for_diff(commit_diff)
+                    self._increment_stat("squash_diff")
+                    return True
 
-                    if commit_patch_id and branch_patch_id == commit_patch_id:
+            # Pass 2 - advisory similarity, only reached when nothing matched exactly.
+            # Containment requires len(commit_diff) >= len(branch_diff), and the >0.9
+            # ratio requires len(commit_diff) < len(branch_diff) / 0.9, so only commits
+            # whose memoised length falls in that band need their diff text read.
+            if len(branch_diff) > 200:
+                min_len = len(branch_diff)
+                max_len = len(branch_diff) / 0.9
+                for searched_count, commit_sha in enumerate(candidate_shas, start=1):
+                    _, diff_len = self._main_commit_signature(repo, commit_sha)
+                    if not min_len <= diff_len < max_len:
+                        continue
+                    try:
+                        commit_diff = self._commit_diff(repo, commit_sha)
+                    except GIT_ERRORS as e:
+                        logger.debug(f"[squash-patch-id] Error processing {commit_sha[:7]}: {e}")
+                        continue
+
+                    if branch_diff not in commit_diff:
+                        continue
+                    similarity = len(branch_diff) / len(commit_diff)
+                    if similarity > 0.9:
+                        advisory_info = {
+                            "merged": False,
+                            "method": "squash_similarity",
+                            "confidence": "advisory",
+                            "matched_commit": commit_sha,
+                            "searched_commits": searched_count,
+                            "scan_limit": scan_limit,
+                            "truncated": truncated,
+                            "similarity": round(similarity, 4),
+                        }
                         logger.debug(
-                            f"[squash-patch-id] Found squash merge in commit {commit_sha[:7]}"
+                            f"[squash-patch-id] Possible squash merge for {branch_name} "
+                            f"in commit {commit_sha[:7]} ({similarity:.1%} similarity)"
                         )
-                        self._set_merge_detection_info(
-                            branch_name,
-                            {
-                                "merged": True,
-                                "method": "squash_patch_id",
-                                "confidence": "exact",
-                                "matched_commit": commit_sha,
-                                "searched_commits": searched_count,
-                                "scan_limit": scan_limit,
-                                "truncated": truncated,
-                            },
-                        )
-                        self._increment_stat("squash_diff")
-                        return True
-
-                    if len(branch_diff) > 200 and branch_diff in commit_diff:
-                        similarity = len(branch_diff) / len(commit_diff)
-                        if similarity > 0.9:
-                            advisory_info = {
-                                "merged": False,
-                                "method": "squash_similarity",
-                                "confidence": "advisory",
-                                "matched_commit": commit_sha,
-                                "searched_commits": searched_count,
-                                "scan_limit": scan_limit,
-                                "truncated": truncated,
-                                "similarity": round(similarity, 4),
-                            }
-                            logger.debug(
-                                f"[squash-patch-id] Possible squash merge for {branch_name} "
-                                f"in commit {commit_sha[:7]} ({similarity:.1%} similarity)"
-                            )
-                except GIT_ERRORS as e:
-                    logger.debug(f"[squash-patch-id] Error processing {commit_sha[:7]}: {e}")
-                    continue
 
             if advisory_info:
                 with self._squash_lock:

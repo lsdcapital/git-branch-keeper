@@ -118,7 +118,7 @@ def restore_entry(
             remote = repo.remote(entry.get("remote", "origin"))
             remote.push(refspec=f"{sha}:refs/heads/{branch_name}")
         except GIT_ERRORS as e:
-            journal.record_restore(branch_name, sha)
+            journal.record_restore(branch_name, sha, batch_id=entry.get("batch_id"))
             return False, f"Branch restored locally, but remote push failed: {e}"
 
     journal.record_restore(branch_name, sha, batch_id=entry.get("batch_id"))

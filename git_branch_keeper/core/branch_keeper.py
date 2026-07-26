@@ -324,6 +324,17 @@ class BranchKeeper:
                 self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
                 return False, error_msg
 
+            # Confirm "merged" against live git before discarding anything. The row
+            # being acted on may have come from the on-disk cache or from an analysis
+            # run that happened long before the user confirmed, and a branch that has
+            # picked up commits since is no longer merged.
+            if reason == "merged" and not self.git_service.is_branch_merged(
+                branch_name, self.main_branch, force_refresh=True
+            ):
+                error_msg = f"No longer merged into {self.main_branch} - it has new commits"
+                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                return False, error_msg
+
             # Delete the branch
             success = self.git_service.delete_branch(
                 branch_name,

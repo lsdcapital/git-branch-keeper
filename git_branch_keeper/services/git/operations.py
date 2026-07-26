@@ -87,9 +87,13 @@ class GitOperations:
     # Delegation methods to MergeDetector
     # ============================================================================
 
-    def is_branch_merged(self, branch_name: str, main_branch: str) -> bool:
+    def is_branch_merged(
+        self, branch_name: str, main_branch: str, force_refresh: bool = False
+    ) -> bool:
         """Check if a branch is merged. Delegates to MergeDetector."""
-        return self.merge_detector.is_branch_merged(branch_name, main_branch)
+        return self.merge_detector.is_branch_merged(
+            branch_name, main_branch, force_refresh=force_refresh
+        )
 
     def get_merge_stats(self) -> str:
         """Get merge detection statistics. Delegates to MergeDetector."""
@@ -219,6 +223,28 @@ class GitOperations:
             logger.warning("Your changes are still in the stash. Run 'git stash pop' manually.")
             raise
 
+    def _git_can_verify_deletion(self, repo, branch_name: str) -> bool:
+        """Whether `git branch -d` would accept this branch on its own.
+
+        `-d` refuses anything not reachable from HEAD (or the branch's upstream), so
+        it can only vouch for ordinary merges and fast-forwards. Rebase- and
+        squash-merged branches are genuinely unreachable and always need `-D`; using
+        `-d` where it *can* answer keeps git as an independent check on GBK's own
+        merge detection, without turning legitimate cleanups into failures.
+        """
+        try:
+            head_commit = repo.head.commit
+            branch_commit = repo.heads[branch_name].commit
+        except (*GIT_ERRORS, ValueError, IndexError) as e:
+            logger.debug(f"Could not compare {branch_name} against HEAD: {e}")
+            return False
+
+        try:
+            return repo.is_ancestor(branch_commit, head_commit)
+        except GIT_ERRORS as e:
+            logger.debug(f"Ancestry check failed for {branch_name}: {e}")
+            return False
+
     def delete_branch(
         self,
         branch_name: str,
@@ -250,11 +276,16 @@ class GitOperations:
                 except GIT_ERRORS:
                     logger.warning(f"Could not resolve tip SHA for {branch_name} before deletion")
 
-                # Delete local branch
+                # Delete local branch. Prefer `-d` so git independently confirms the
+                # branch is reachable before anything is discarded; fall back to `-D`
+                # only where `-d` structurally cannot succeed (rebase/squash merges,
+                # and stale branches, which are unmerged by definition). A `-d` that
+                # fails is git disagreeing with us - surface it instead of forcing.
                 local_deleted = False
                 if not dry_run:
                     console.print(f"Deleting local branch {branch_name}...")
-                    repo.delete_head(branch_name, force=True)
+                    safe_delete = self._git_can_verify_deletion(repo, branch_name)
+                    repo.delete_head(branch_name, force=not safe_delete)
                     local_deleted = True
 
                 # Delete remote branch only when requested. Journal in `finally` so

@@ -13,6 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+import git
+
+from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.utils.logging import get_logger
 
 # Import fcntl for POSIX file locking (Unix/Linux/macOS)
@@ -33,11 +36,37 @@ class DeletionJournal:
         """Initialize the journal for a repository.
 
         Args:
-            repo_path: Path to the git repository (used to scope entries)
+            repo_path: Path to the git repository or any of its worktrees
             journal_file: Override journal location (mainly for tests)
         """
-        self.repo_path = str(Path(repo_path).resolve())
+        self.repo_path = self._repo_key(repo_path)
         self.journal_file = journal_file or (Path.home() / ".git-branch-keeper" / "deletions.jsonl")
+
+    @staticmethod
+    def _repo_key(repo_path: str) -> str:
+        """Return a scope key that is identical for every worktree of one repository.
+
+        The journal is shared across repositories and filtered by this key, so it has
+        to be a property of the *repository*, not of the directory GBK happened to be
+        invoked from. Scoping by the invocation path meant deletions made from a linked
+        worktree were invisible to `undo` run from the main working tree - and were
+        orphaned entirely once that worktree was removed.
+
+        `common_dir` is shared by all worktrees, so its parent is the main working tree
+        and matches what the old path-based key produced for ordinary runs, keeping
+        existing journals readable.
+        """
+        try:
+            common_dir = Path(git.Repo(repo_path).common_dir).resolve()
+            # Non-bare repositories: <main worktree>/.git -> <main worktree>
+            if common_dir.name == ".git":
+                return str(common_dir.parent)
+            # Bare repos, submodules and other gitdir layouts have no working tree
+            # above them; the git directory itself is the stable identity.
+            return str(common_dir)
+        except (*GIT_ERRORS, OSError) as e:
+            logger.debug(f"Could not resolve repository key for {repo_path}: {e}")
+            return str(Path(repo_path).resolve())
 
     @staticmethod
     def new_batch_id() -> str:

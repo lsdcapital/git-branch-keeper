@@ -117,8 +117,11 @@ Based on the project's TODO.md, here are documented data loss risks:
 
 8. **PR data might be stale if cache not refreshed**
    - **Risk**: Open PRs not detected if cache is old
-   - **Mitigation**: Use `--refresh` flag to bypass cache
-   - **Your action**: Refresh before critical cleanup: `--refresh`
+   - **Mitigation**: Cache entries record the branch tip SHA and are re-analysed as
+     soon as the branch moves, so commits added after a merge can never be deleted
+     on the strength of an older "merged" result. GBK also re-verifies merge status
+     against live git immediately before deleting anything.
+   - **Your action**: Use `--refresh` to bypass the cache entirely if in doubt
 
 9. **Sync status could be wrong if remote changed since last fetch**
    - **Risk**: Remote changes not reflected in sync status

@@ -142,6 +142,36 @@ refreshes twice — before the status probe (which would otherwise fail with
 immediately before the delete. See `tests/test_worktree_toctou.py` and
 `tests/test_worktree_linked_checkout.py`.
 
+### Deletion Safety
+
+Three independent guards stand between "analysis said merged" and an irreversible
+delete. They exist because analysis results are reused across time - from the
+on-disk cache between runs, and across however long the TUI waits for the user.
+
+1. **Cached rows are tied to a commit.** `_serialize_branch` records `tip_sha`, and
+   `get_stale_branches()` re-analyses any branch whose tip has moved or whose entry
+   predates the field. Without this a MERGED branch is cached as `stable` and never
+   re-examined, so the ordinary "merge the PR, keep working on the branch" flow
+   would delete the new commits.
+2. **Merge status is re-verified live.** `BranchKeeper.delete_branch()` re-runs
+   detection with `force_refresh=True` for anything being deleted as `merged`.
+   The `MergeDetector` memo is only invalidated when *main* moves, so it can
+   outlive changes to the branch itself.
+3. **Git gets the last word when it can.** `_git_can_verify_deletion()` uses
+   `git branch -d` when the branch is an ancestor of HEAD, and only falls back to
+   `-D` where `-d` structurally cannot succeed (rebase/squash merges, and stale
+   branches, which are unmerged by definition). Do not "simplify" this back to an
+   unconditional `-D`.
+
+Deletions are journaled to `~/.git-branch-keeper/deletions.jsonl` and scoped by
+`DeletionJournal._repo_key()` - the main working tree, derived from `common_dir`,
+so every worktree of a repo shares one scope. Do not scope it by the invocation
+path: deletions made from a linked worktree would be invisible to `undo` run from
+the repo root, and orphaned outright once that worktree is removed.
+
+A merged PR is authoritative only when `head_matches_local is True`. `None` means
+the comparison could not run and must fall through to the git-native checks.
+
 ### Error Handling
 - Services use exceptions for error propagation
 - The core BranchKeeper class handles errors gracefully with user-friendly messages

@@ -61,10 +61,12 @@ class BranchStatusService:
         # branch processing work item when GitHub integration is enabled.
         if pr_data and branch_name in pr_data:
             pr_info = pr_data[branch_name]
-            if (
-                pr_info.get("merged", False)
-                and pr_info.get("head_matches_local", True) is not False
-            ):
+            # A merged PR is only authoritative when the local tip is confirmed to be
+            # the head that was merged. head_matches_local is None when the comparison
+            # could not run (no head SHA from the API), and "could not verify" must
+            # fall through to the git-native checks below rather than be trusted - if
+            # the branch really is merged, those will say so anyway.
+            if pr_info.get("merged", False) and pr_info.get("head_matches_local") is True:
                 logger.debug(f"Branch {branch_name} is merged (PR was merged)")
                 return BranchStatus.MERGED
             if pr_info.get("closed", False):

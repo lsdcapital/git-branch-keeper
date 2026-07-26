@@ -53,15 +53,70 @@ class TestBranchStatusDetection:
     def test_get_status_merged_via_pr(
         self, mock_git_repo, mock_config, mock_git_service, mock_github_service
     ):
-        """Test branch merged via PR is MERGED."""
+        """A merged PR whose head matches the local tip is MERGED."""
         service = BranchStatusService(
             mock_git_repo, mock_config, mock_git_service, mock_github_service
         )
 
-        pr_data = {"feature/test": {"count": 0, "merged": True, "closed": False}}
+        pr_data = {
+            "feature/test": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "head_matches_local": True,
+            }
+        }
 
         status = service.get_branch_status("feature/test", "main", pr_data)
         assert status == BranchStatus.MERGED
+
+    def test_get_status_merged_pr_without_verified_head_falls_through_to_git(
+        self, mock_git_repo, mock_config, mock_git_service, mock_github_service
+    ):
+        """An unverifiable PR head must not be trusted - git decides instead."""
+        service = BranchStatusService(
+            mock_git_repo, mock_config, mock_git_service, mock_github_service
+        )
+
+        # head_matches_local is None when the API gave us no head SHA to compare.
+        pr_data = {
+            "feature/test": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "head_matches_local": None,
+            }
+        }
+
+        mock_git_service.is_branch_merged.return_value = False
+        mock_git_service.get_branch_age.return_value = 0
+        assert service.get_branch_status("feature/test", "main", pr_data) == BranchStatus.ACTIVE
+
+        # ...and if the work really is in main, git says so anyway.
+        mock_git_service.is_branch_merged.return_value = True
+        assert service.get_branch_status("feature/test", "main", pr_data) == BranchStatus.MERGED
+
+    def test_get_status_merged_pr_with_diverged_head_is_not_merged(
+        self, mock_git_repo, mock_config, mock_git_service, mock_github_service
+    ):
+        """The local branch moved past the merged PR head - it holds unmerged work."""
+        service = BranchStatusService(
+            mock_git_repo, mock_config, mock_git_service, mock_github_service
+        )
+
+        pr_data = {
+            "feature/test": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "head_matches_local": False,
+            }
+        }
+
+        mock_git_service.is_branch_merged.return_value = False
+        mock_git_service.get_branch_age.return_value = 0
+
+        assert service.get_branch_status("feature/test", "main", pr_data) == BranchStatus.ACTIVE
 
     def test_get_status_merged_via_git(
         self, mock_git_repo, mock_config, mock_git_service, mock_github_service
