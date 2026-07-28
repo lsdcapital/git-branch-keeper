@@ -16,7 +16,9 @@ from git_branch_keeper.services.branch_validation_service import BranchValidatio
 if TYPE_CHECKING:
     from git_branch_keeper.core import BranchKeeper
 
-SCHEMA_VERSION = 3
+# 4: remote-only branches are analyzed. Adds remote.has_local, the
+# REMOTE_ONLY_BRANCH blocker, and the "none" deletion scope.
+SCHEMA_VERSION = 4
 
 
 def _notes(branch: BranchDetails) -> list[str]:
@@ -68,6 +70,10 @@ def _has_uncommitted_changes(branch: BranchDetails) -> bool:
 
 def _deletion_scope(branch: BranchDetails, delete_remote: bool) -> str:
     """Describe what a branch delete action would affect."""
+    # No local ref to delete, and GBK does not delete remote branches - so unlike
+    # every case below, there is no delete action for this row to have a scope for.
+    if not branch.has_local:
+        return "none"
     if branch.has_remote and delete_remote:
         return "local-and-remote"
     if branch.has_remote:
@@ -96,6 +102,16 @@ def _branch_deletion_blockers(
             _blocker(
                 "IS_WORKTREE_ROW",
                 "This row represents a worktree, not a local branch ref.",
+            )
+        )
+    if not branch.has_local:
+        blockers.append(
+            _blocker(
+                "REMOTE_ONLY_BRANCH",
+                (
+                    "Branch exists only on the remote. git-branch-keeper analyzes "
+                    "remote-only branches but never deletes them."
+                ),
             )
         )
     if branch.status == BranchStatus.UNSTARTED:
@@ -345,6 +361,8 @@ def _confidence(
         uncertainties.append("possible_squash_merge_requires_human_verification")
     if merge_detection.get("truncated"):
         uncertainties.append("squash_merge_scan_was_truncated")
+    if branch.notes and "partially merged:" in branch.notes:
+        uncertainties.append("branch_partially_applied_to_main")
     if branch.pr_details and branch.pr_details.get("head_matches_local") is False:
         uncertainties.append("local_branch_tip_differs_from_merged_pr_head")
     if not comparison.get("checked", False):
@@ -400,6 +418,7 @@ def _branch_to_dict(
         "age_days": branch.age_days,
         "remote": {
             "has_remote": branch.has_remote,
+            "has_local": branch.has_local,
             "sync_status": branch.sync_status,
         },
         "pr": _pr_status(branch, github_enabled, github_disabled_reason),
@@ -531,6 +550,7 @@ def analysis_to_dict(keeper: BranchKeeper, analysis: BranchAnalysisResult) -> di
             "stale_days": keeper.min_stale_days,
             "protected_branches": protected_branches,
             "delete_remote": delete_remote,
+            "include_remote_branches": keeper.config.get("include_remote_branches", True),
             "sort_by": keeper.config.get("sort_by", "age"),
             "sort_order": keeper.config.get("sort_order", "asc"),
             "squash_scan_limit": keeper.config.get("squash_scan_limit", 500),
@@ -562,7 +582,7 @@ def schema_to_dict() -> dict[str, Any]:
                         "git-branch-keeper --output json --no-interactive",
                     ],
                     "side_effects": "read-only",
-                    "description": "Analyze local Git branches and return structured cleanup recommendations.",
+                    "description": "Analyze Git branches (local, plus remote-only unless --no-remote-branches) and return structured cleanup recommendations.",
                 },
                 {
                     "name": "schema",
@@ -580,6 +600,7 @@ def schema_to_dict() -> dict[str, Any]:
                 "--ignore PATTERN [PATTERN ...]",
                 "--refresh",
                 "--remote",
+                "--no-remote-branches",
             ],
         },
         "branch_scan_result": {
@@ -620,6 +641,8 @@ def schema_to_dict() -> dict[str, Any]:
             ],
             "deletion_blockers": [
                 "IS_WORKTREE_ROW",
+                "REMOTE_ONLY_BRANCH",
+                "NO_UNIQUE_COMMITS",
                 "NOT_STALE_OR_MERGED",
                 "PROTECTED_BRANCH",
                 "HAS_UNCOMMITTED_CHANGES",

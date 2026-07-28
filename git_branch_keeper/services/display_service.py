@@ -58,23 +58,23 @@ class DisplayService:
         for col in COLUMNS:
             table.add_column(col.label)
 
+        try:
+            current_branch_name = repo.active_branch.name
+        except TypeError:
+            current_branch_name = None  # Detached HEAD
+
         # Add rows
         for branch in branch_details:
             # Get row style using shared formatter
             style_type = get_branch_style_type(branch, protected_branches)
             row_style = CLI_COLORS.get(style_type)
 
-            # Format fields using shared formatters
-            try:
-                current_branch_name = repo.active_branch.name
-            except TypeError:
-                current_branch_name = None  # Detached HEAD
             is_current = branch.name == current_branch_name if current_branch_name else False
             branch_name = format_branch_link_with_indent(
                 branch.name, github_base_url, branch.is_worktree, is_current
             )
             last_commit_date = format_date(branch.last_commit_date)
-            remote_status = format_remote_status(branch.has_remote)
+            remote_status = format_remote_status(branch.has_remote, branch.has_local)
             status_text = format_display_status(branch, protected_branches)
             changes_indicator = format_changes(branch, current_branch_name)
             pr_display = format_pr_link(branch.pr_status, github_base_url)
@@ -98,7 +98,8 @@ class DisplayService:
         if show_summary:
             # Display legend
             console.print("\nLegend:")
-            console.print("✓ = Has remote branch     ✗ = Local only")
+            console.print("✓ = Local and remote      ✗ = Local only")
+            console.print("☁ = Remote only (analyzed, never deleted)")
             console.print("↑ = Unpushed commits      ↓ = Commits to pull")
             console.print("* = Current branch        +M = Modified files")
             console.print("+U = Untracked files      +S = Staged files")
@@ -123,6 +124,18 @@ class DisplayService:
                     else:
                         remote_info = "local only"
                     console.print(f"  {branch.name} ({reason}, {remote_info})")
+
+            # Account for the rest. The counts below report how many branches are
+            # merged/stale; without this, a repo whose merged branches are all
+            # remote-only shows "Merged branches: 36" and no deletion section at
+            # all, leaving the reader to infer why.
+            blocked = BranchValidationService.summarize_blocked(
+                branch_details, protected_branches, current_branch_name
+            )
+            if blocked:
+                console.print("\nMerged/stale but not deletable:")
+                for count, blocked_reason in blocked:
+                    console.print(f"  {count} {blocked_reason}")
 
             # Calculate summary statistics
             total_branches = len(branch_details)

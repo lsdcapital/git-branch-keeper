@@ -258,3 +258,37 @@ class TestMergeMethodDetection:
         assert status != BranchStatus.MERGED
         # Should be active (has closed PR but not merged)
         assert status == BranchStatus.ACTIVE
+
+    def test_closed_unmerged_pr_can_still_be_detected_as_merged_via_git(
+        self, git_repo, mock_config
+    ):
+        """A closed PR stays a note when equivalent work reached main another way."""
+        repo = git_repo
+        repo_path = Path(repo.working_dir)
+
+        repo.git.checkout("-b", "feature/closed-pr-merged-via-git")
+        test_file = repo_path / "closed_pr_merged_via_git.txt"
+        test_file.write_text("Work from a closed PR\n")
+        repo.index.add(["closed_pr_merged_via_git.txt"])
+        branch_tip = repo.index.commit("Add work from closed PR").hexsha
+
+        repo.git.checkout("main")
+        repo.git.cherry_pick(branch_tip)
+        repo.git.commit("--amend", "-m", "Integrate closed PR work through another path")
+
+        keeper = BranchKeeper(str(repo_path), mock_config)
+        pr_data = {
+            "feature/closed-pr-merged-via-git": {
+                "count": 0,
+                "merged": False,
+                "closed": True,
+            }
+        }
+
+        status, sync_status, _pr_status, notes = keeper._determine_branch_status(
+            "feature/closed-pr-merged-via-git", pr_data
+        )
+
+        assert status == BranchStatus.MERGED
+        assert sync_status == SyncStatus.MERGED_GIT.value
+        assert notes == "PR closed without merging"

@@ -73,6 +73,13 @@ def parse_args():
         "Remote deletions affect collaborators and are harder to undo.",
     )
     parser.add_argument(
+        "--no-remote-branches",
+        action="store_true",
+        help="Only analyze branches that exist locally. By default branches that exist "
+        "only on the remote are analyzed too (read-only; they are never deleted). "
+        "Unrelated to --remote, which controls remote deletion.",
+    )
+    parser.add_argument(
         "--interactive", action="store_true", help="Launch interactive TUI mode (default for TTY)"
     )
     parser.add_argument(

@@ -86,6 +86,7 @@ def main():
             protected_branches=parsed_args.protected,
             ignore_patterns=parsed_args.ignore,
             status_filter=parsed_args.filter,
+            include_remote_branches=not parsed_args.no_remote_branches,
             main_branch=parsed_args.main_branch,
             debug=parsed_args.debug,
             sort_by=parsed_args.sort_by,

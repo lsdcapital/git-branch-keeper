@@ -30,9 +30,9 @@ A smart Git branch management tool that helps keep your repository clean and org
 │   ✗  feature/new-work       active     2024-03-20     2    ✓  ahead 3 │
 │   ✓  bugfix/old-bug        merged     2023-12-10    90    ✓  synced  │
 ├────────────────────────────────────────────────────────────────────────┤
-│ Total: 15 | Protected: 2 | Deletable: 8 | Marked: 2                   │
+│ Delete scope: LOCAL ONLY — remotes kept [d] | Total: 15 | Marked: 2   │
 ├────────────────────────────────────────────────────────────────────────┤
-│ (q) Quit (d) Delete (space) Mark (a) Mark All (i) Info (r) Refresh   │
+│ (q) Quit (d) Delete Scope (space) Mark (a) Mark All (i) Info         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,7 +79,8 @@ Use keyboard shortcuts to navigate and manage branches:
 - `↑/↓` - Navigate branches
 - `space` - Mark/unmark branch for deletion
 - `a` - Mark all deletable branches
-- `d` - Delete marked branches
+- `d` - Toggle deletion scope between local-only and local + remote
+- `Enter` - Review and delete marked branches
 - `i` - Show detailed branch info
 - `r` - Refresh branch data
 - `q` - Quit
@@ -109,7 +110,9 @@ git-branch-keeper --cli --filter merged --delete --force
 
 > **⚠️ Safety Note**: Plain CLI mode (`--cli` / `--no-interactive`) is read-only by default. Pass `--delete` to clean up branches, or `--dry-run` to preview cleanup candidates.
 
-> **🌐 Remote branches**: By default, deletion is **local-only** — the remote branch is kept. Add `--remote` to also delete it on `origin`. Remote deletions affect collaborators and are harder to undo, so they are opt-in.
+> **🌐 Remote branches**: By default, deletion is **local-only** — the remote branch is kept. In the TUI, the current scope is always shown in the status bar; press `d` to switch between **LOCAL ONLY** and **LOCAL + REMOTE** before confirming. In CLI mode, add `--remote` to also delete it on `origin`. Remote deletions affect collaborators and are harder to undo, so they are opt-in.
+
+> **☁️ Remote-only branches**: Branches that exist on `origin` with no local counterpart are **analyzed and shown by default**, because branch accumulation is mostly a remote problem. They are strictly read-only — git-branch-keeper never deletes a remote-only branch. Pass `--no-remote-branches` for the local-only view. Remote-tracking refs are only as fresh as your last `git fetch`.
 
 ## 📖 Usage
 
@@ -132,6 +135,7 @@ git-branch-keeper [OPTIONS]
 - `--cleanup` - Deprecated alias for `--delete`
 - `--dry-run` - Preview cleanup candidates without deleting or prompting
 - `--remote` - Also delete the remote branch (default: local-only, remote is kept)
+- `--no-remote-branches` - Only analyze branches that exist locally (default: remote-only branches are analyzed too, read-only)
 - `--force` - Delete without confirmation (legacy behavior: also implies `--delete`; use with caution!)
 - `--refresh` - Bypass cache and refresh all data
 
@@ -183,7 +187,7 @@ git-branch-keeper [OPTIONS]
 | **CLI Cleanup** | `--cli --delete` | Deletes eligible branches with confirmation prompts | ⚠️ **CAUTION** |
 | **Force Mode** | `--cli --delete --force` | Deletes immediately without confirmation | 🔴 **DANGEROUS** |
 | **Dry Run** | `--dry-run` flag | Preview only, no deletion or prompts | ✅ **SAFE** |
-| **Remote deletion** | `--remote` flag | Off by default — deletion is local-only unless opted in | ✅ **SAFE default** |
+| **Remote deletion** | TUI `d` toggle / CLI `--remote` | Off by default — deletion is local-only unless opted in | ✅ **SAFE default** |
 
 ### ⚠️ Important Safety Warnings
 
@@ -191,7 +195,7 @@ git-branch-keeper [OPTIONS]
 
 2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking when cleanup is enabled. For legacy compatibility, `--force` also implies `--delete`. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
 
-   **Deletion is local-only by default**: the remote branch is preserved unless you pass `--remote`. This keeps the easily-recoverable case (local, restorable via reflog and `undo`) separate from the harder-to-undo case (remote, visible to collaborators).
+   **Deletion is local-only by default**: the remote branch is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote` in CLI mode. This keeps the easily-recoverable case (local, restorable via reflog and `undo`) separate from the harder-to-undo case (remote, visible to collaborators).
 
 3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
    ```bash
@@ -244,6 +248,7 @@ The tool automatically protects:
 - ✅ Current branch you're on
 - ✅ Branches checked out in any other worktree, including the main working tree
 - ✅ The worktree GBK is running in (never removed, even with `--force`)
+- ✅ Branches that exist only on the remote (analyzed and reported, never deleted)
 
 You can run GBK from inside a linked worktree. It protects whatever the *other*
 worktrees have checked out - including the main working tree, which often holds a
@@ -282,6 +287,7 @@ Create a configuration file to customize behavior. The tool looks for config fil
 | `stale_days` | integer | Days before branch is stale | `30` |
 | `github_token` | string | GitHub personal access token. If omitted, GBK also tries `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token` | `null` |
 | `squash_scan_limit` | integer | First-parent commits on main to scan for exact squash patch-id matches | `500` |
+| `include_remote_branches` | boolean | Analyze branches that exist only on the remote (read-only; they are never deleted) | `true` |
 
 ### GitHub Auth Setup (Optional)
 
@@ -363,7 +369,7 @@ Ignore patterns support glob syntax:
 # Interactive review of all merged branches
 git-branch-keeper --filter merged
 
-# Mark branches in TUI, press 'd' to delete
+# Mark branches in the TUI, choose the deletion scope with 'd', then press Enter
 ```
 
 ### Example 2: Automated Cleanup in CI/CD

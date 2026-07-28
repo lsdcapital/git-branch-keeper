@@ -26,6 +26,8 @@ def _branch(
     is_worktree=False,
     in_worktree=False,
     worktree_path=None,
+    has_remote=False,
+    has_local=True,
 ):
     return BranchDetails(
         name=name,
@@ -35,7 +37,8 @@ def _branch(
         modified_files=modified,
         untracked_files=untracked,
         staged_files=staged,
-        has_remote=False,
+        has_remote=has_remote,
+        has_local=has_local,
         sync_status="local-only",
         is_worktree=is_worktree,
         in_worktree=in_worktree,
@@ -82,6 +85,21 @@ class TestMarkWithHierarchy:
         )
         assert ok is True and err is None
         assert "feature/dirty" in app.force_marked_branches
+
+    @pytest.mark.parametrize("is_force", [False, True])
+    def test_remote_only_branch_cannot_be_marked(self, app, is_force):
+        app.branches = [
+            _branch("feature/remote-only", has_remote=True, has_local=False)
+        ]
+        mark_set = app.force_marked_branches if is_force else app.marked_branches
+
+        ok, err = app._mark_with_hierarchy(
+            "feature/remote-only", mark_set, is_force=is_force
+        )
+
+        assert ok is False
+        assert "remote-only" in err.lower()
+        assert mark_set == set()
 
     def test_unknown_branch_returns_error(self, app):
         app.branches = [_branch("feature/x")]

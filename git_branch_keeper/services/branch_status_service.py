@@ -71,9 +71,9 @@ class BranchStatusService:
                 return BranchStatus.MERGED
             if pr_info.get("closed", False):
                 logger.debug(
-                    f"Branch {branch_name} had PR closed without merging, marking as active"
+                    f"Branch {branch_name} had PR closed without merging; "
+                    "falling through to local Git status"
                 )
-                return BranchStatus.ACTIVE
             if pr_info.get("count", 0) > 0:
                 logger.debug(f"Branch {branch_name} marked as active (has open PRs)")
                 return BranchStatus.ACTIVE

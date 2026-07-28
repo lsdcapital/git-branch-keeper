@@ -118,6 +118,28 @@ class TestBranchStatusDetection:
 
         assert service.get_branch_status("feature/test", "main", pr_data) == BranchStatus.ACTIVE
 
+    def test_get_status_closed_unmerged_pr_falls_through_to_git(
+        self, mock_git_repo, mock_config, mock_git_service, mock_github_service
+    ):
+        """A closed PR is advisory because its work may have reached main another way."""
+        service = BranchStatusService(
+            mock_git_repo, mock_config, mock_git_service, mock_github_service
+        )
+        pr_data = {
+            "feature/test": {
+                "count": 0,
+                "merged": False,
+                "closed": True,
+            }
+        }
+
+        mock_git_service.is_branch_merged.return_value = False
+        mock_git_service.get_branch_age.return_value = 0
+        assert service.get_branch_status("feature/test", "main", pr_data) == BranchStatus.ACTIVE
+
+        mock_git_service.is_branch_merged.return_value = True
+        assert service.get_branch_status("feature/test", "main", pr_data) == BranchStatus.MERGED
+
     def test_get_status_merged_via_git(
         self, mock_git_repo, mock_config, mock_git_service, mock_github_service
     ):

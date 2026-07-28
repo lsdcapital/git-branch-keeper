@@ -47,6 +47,9 @@ git-branch-keeper --debug
 - Deletion requires explicit `--delete` (deprecated `--cleanup` remains an alias; legacy `--force` also implies delete)
 - Deletion is **local-only by default**; the remote branch is kept unless `--remote` is passed (`config.delete_remote`)
 - Use `--dry-run` to preview cleanup candidates without prompts or changes
+- Branches that exist only on the remote are **analyzed by default but never deleted**
+  (`--no-remote-branches` restores the local-only view). Unrelated to `--remote`, which
+  controls remote deletion of branches that also exist locally.
 
 ## Architecture
 
@@ -57,6 +60,8 @@ The codebase follows a service-oriented architecture:
   - `git_service.py`: Handles Git operations (branch listing, deletion, merge detection)
   - `github_service.py`: GitHub API integration for PR status
   - `branch_status_service.py`: Determines branch status (merged, stale, has PR)
+  - `git/refs.py`: `BranchRefResolver` — maps a branch name to the rev git should be
+    handed (`<name>` or `<remote>/<name>`); see "Remote-only branches"
   - `deletion_journal.py`: Records every deleted branch (with tip SHA) to `~/.git-branch-keeper/deletions.jsonl`; powers `git-branch-keeper undo` (see `cli/undo.py`)
   - `display_service.py`: Terminal UI using Rich library
 - **models/branch.py**: Data models for branch information and status
@@ -98,6 +103,26 @@ caps clamp its 90%x80% dialog to 81%x64%.
 - Async workers use `@work` decorator for non-blocking operations
 - DataTable has a built-in loading indicator for async data fetching
 - Cache service enables fast initial load with background refresh
+
+**Marks are keyed by branch name; rows are not.** `_row_key_for_branch()` keys
+worktree rows as `name:path` so the DataTable can tell them apart, but
+`marked_branches` / `force_marked_branches` hold plain names. That is deliberate -
+marking a branch lights up its worktree row too, and deletion removes the worktree
+and then the branch as one operation. It also means anything *counting* candidates
+must count names, and must ask `_plan_deletable()` rather than filtering rows with
+`is_deletable()`: the planner additionally drops the checked-out branch and adds
+branches unblocked by removing a clean worktree. Counting rows made the status bar
+advertise `Deletable: 1 | Marked: 0` for a current branch nothing could ever mark -
+routine when GBK runs from a linked worktree, where the checked-out branch is a
+feature branch. See `tests/test_tui_app.py::test_status_bar_*`.
+
+**Cached rows are painted before the real analysis lands**, so startup applies two
+results in a row. The second apply preserves marks (the user may have marked
+something meanwhile) but passes `mark_newly_deletable=True`, which auto-marks only
+branches that were *not* candidates in the first pass. Without it, a branch merged
+since the previous run renders as `merged` yet stays unmarked until the next
+launch, because the cached pass never offered it. `action_refresh` (`r`) preserves
+marks unconditionally - an unmark there is a deliberate choice.
 
 ## Important Patterns
 
@@ -145,6 +170,25 @@ reverted). Instead it sets `MergeDetector._likely_squash_merged` (exposed via
 `is_likely_squash_merged()`), which surfaces a "possible squash-merge - verify before
 deleting" note. A heuristic guess must never make a branch auto-deletable.
 
+**A partial result from check 2 is kept, not discarded.** `git cherry` answers per
+commit, but merging requires *all* of them to be `-`. When the answer is mixed, the
+branch is correctly not merged — and the mix is itself the finding: work reached main
+and a commit was left behind. That is the ordinary shape of an orphan in a squash-merge
+repo, where a commit pushed moments after the PR merges never lands. `_check_patch_equivalent`
+records `(landed, total)` in `MergeDetector._partial_merge` (exposed via
+`get_partial_merge()`), surfaced as a "partially merged: 1/2 commits in main, 1 not
+landed" note. Advisory only — a partial merge is not a merge, and nothing about this
+makes a branch deletable.
+
+Recorded only when `landed > 0`. "0/N commits in main" is true of every in-progress
+branch in every repo, so emitting it would put a note on every active branch and cost
+the Notes column the scannability that makes the partial case stand out. The distinction
+matters because `active` is GBK's *no-signal* bucket, not a "someone is working on this"
+claim: without this note a 1-of-2-landed branch renders exactly like a branch cut an hour
+ago. Note that the git-native path is the only one that reports this when GitHub auth is
+absent — the PR-derived "merged but local tip differs from PR head" note covers a similar
+case but requires a token. See `tests/test_partial_merge_note.py`.
+
 When GitHub auth is available (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or
 authenticated `gh` CLI), PR metadata is fetched inside each branch processing worker
 rather than as a separate prefetch phase. GitHub-enabled branch workers are capped below
@@ -152,6 +196,81 @@ PyGithub/urllib3's default API connection pool size to avoid connection-pool war
 spam. Open PRs keep branches active/protected. A merged PR is authoritative only when
 the local branch tip still matches the PR head SHA; if the local tip differs, GBK adds
 a warning note and falls through to the git-native checks above.
+
+### Remote-only branches
+
+GBK enumerates `refs/remotes/<remote>/*` alongside `refs/heads/*` **by default**
+(`include_remote_branches`, opt out with `--no-remote-branches`). Enumerating local heads
+alone made GBK blind to the actual problem: branch accumulation is a *remote* phenomenon,
+because local branches are self-limiting - you notice them. On one real repo GBK analysed
+5 branches while 41 existed on origin, and reported "nothing to clean up" for a repo
+carrying ~37 prunable remote branches. Remote-tracking refs are only as fresh as the last
+`git fetch`; GBK does not fetch implicitly.
+
+**Identity stays the plain name.** `BranchDetails.name` is `feat/mermaid`, never
+`origin/feat/mermaid`, so `--ignore`/`--protected` patterns, cache keys, TUI marks, and
+the deletion journal all keep working unchanged. Location is an attribute:
+
+| `has_local` | `has_remote` | meaning |
+|---|---|---|
+| T | T | ordinary tracked branch |
+| T | F | local-only (`SyncStatus.LOCAL_ONLY`) |
+| F | T | remote-only (`SyncStatus.REMOTE_ONLY`) |
+
+**Every git call must go through `BranchRefResolver` (`services/git/refs.py`).** It maps a
+branch name to a *rev string* - the plain name when a local head exists, else
+`<remote>/<name>` - which satisfies every existing call shape (`repo.refs[rev]`,
+`git cherry`, `git rev-list`, `git merge-base`, `git diff`). This is not cosmetic:
+`GIT_ERRORS` includes `LookupError` and `IndexError` subclasses it, so
+`repo.refs["remote-only-name"]` raises, gets swallowed, and the row degrades to
+age 0 / not-merged **silently**. MergeDetector's memo and its `_partial_merge` /
+`_likely_squash_merged` / `_unstarted_unverifiable` collections stay keyed by the plain
+name; only the rev handed to git changes.
+
+The resolver snapshots local and selected-remote refs once per analysis. Resolution is
+called several times per branch and analysis runs concurrently, so rebuilding the complete
+remote-ref list for every lookup is quadratic. Branch discovery refreshes the snapshot;
+the deletion boundary refreshes it again before touching a ref.
+
+The easy sites to miss are the ones outside merge detection, because they fail *quietly
+enough to look answered*: `get_comparison_to_main()`, `get_branch_commits()`, and
+`get_divergence_info()` all interpolate the branch into a `main..<branch>` revision range.
+Unresolved, `git rev-list main..feat/x` is a `bad revision` fatal, `GIT_ERRORS` turns it
+into `comparison_to_main: {checked: false}`, and the JSON row still renders - just with no
+ahead/behind and a silently downgraded confidence. On one real repo that was 37 of 42 rows.
+`get_file_status_detailed()` and `get_diff()` are the other pair: the TUI's Files and Diff
+tabs call them directly, bypassing the analysis path, so each needs its own remote-only
+short-circuit rather than relying on the one in `get_branch_status_details`.
+
+**Remote-only branches are never deletable.** Deleting one means
+`git push origin --delete`, which skips deletion guard 3 (letting `git branch -d` have the
+last word) and cannot be undone by the deletion journal. `BranchValidationService.is_deletable()`
+refuses them, `get_deletable_branches()` repeats the check because `force_mode` bypasses
+`is_deletable`, the TUI refuses normal and force marks, and both deletion entry points
+refresh live refs and require a local head before even reporting a dry-run success.
+
+**The temp-worktree probe is skipped** for them (`get_branch_status_details`). A branch
+with no local checkout cannot have uncommitted work, and the probe costs a checkout per
+branch - running it for 38 remote branches would make GBK unusable.
+
+**`cache_service._get_current_branch_states()` must enumerate the same namespace** as
+`_get_filtered_branches()`, which is why `CacheService` takes `include_remote`. If it
+returned `repo.heads` alone, every remote row would be pruned on each run. A SHA alone is
+not sufficient cache identity: local+remote -> remote-only (or the reverse) can keep the
+same effective tip. Stable cache entries are therefore refreshed whenever `has_local` or
+`has_remote` changes as well as when the tip moves.
+
+A remote-only branch with **zero unique commits** is the ambiguous case: there is no local
+reflog to consult (`git reflog show origin/foo` records this clone's *fetches*), so
+`is_unstarted_branch()`'s usual positive proof is unobtainable.
+`_is_on_main_first_parent()` stands in as far as it can - a tip *off* main's first-parent
+line reached main through a merge commit and is reported `merged` on that content-based
+evidence. That still cannot prove the branch *name* existed when the content landed (it
+could have been created later at the same commit), so the row carries an explicit
+provenance note tracked by `remote_history_is_unverifiable()`. A tip *on* the line is
+reported `UNSTARTED` plus a note explaining that never-started and fast-forward-merged are
+indistinguishable, tracked via `unstarted_is_unverifiable()`. See
+`tests/test_remote_only_branches.py`.
 
 ### Worktrees
 

@@ -28,6 +28,9 @@ class SyncStatus(Enum):
     BEHIND = "behind"
     DIVERGED = "diverged"
     LOCAL_ONLY = "local-only"
+    # Exists on the remote with no local head. Not deletable in this slice: deleting it
+    # means `git push origin --delete`, which the deletion journal cannot undo.
+    REMOTE_ONLY = "remote-only"
     MERGED_GIT = "merged-git"
     MERGED_PR = "merged-pr"
     NO_COMMITS = "no-commits"  # No commits unique to the branch (see BranchStatus.UNSTARTED)
@@ -90,6 +93,10 @@ class BranchDetails:
     staged_files: bool | None  # None = couldn't check
     has_remote: bool
     sync_status: str
+    # Whether refs/heads/<name> exists. Defaults True because every branch GBK saw
+    # before remote enumeration was local by construction. `has_remote and not
+    # has_local` is the remote-only case; see BranchRefResolver.
+    has_local: bool = True
     pr_status: str | None = None
     pr_details: dict[str, Any] | None = None  # Structured PR metadata from provider APIs
     notes: str | None = None  # Added notes field
