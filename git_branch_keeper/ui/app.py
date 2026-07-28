@@ -910,7 +910,14 @@ class BranchKeeperApp(App):
             )
 
         # Show confirmation screen
-        self.push_screen(ConfirmScreen(message), self._handle_delete_confirmation)
+        self.push_screen(
+            ConfirmScreen(
+                message,
+                dialog_title="Confirm deletion",
+                confirm_label="Delete",
+            ),
+            self._handle_delete_confirmation,
+        )
 
     def _handle_delete_confirmation(self, confirmed: bool | None) -> None:
         """Handle delete confirmation result."""
@@ -1121,7 +1128,12 @@ class BranchKeeperApp(App):
             message += "\n\nOne or more remote branches were also deleted; the TUI will not push them back."
 
         self.push_screen(
-            ConfirmScreen(message),
+            ConfirmScreen(
+                message,
+                dialog_title="Restore branches",
+                confirm_label="Restore",
+                danger=False,
+            ),
             lambda confirmed: self._handle_undo_confirmation(confirmed, entries),
         )
 
@@ -1169,8 +1181,9 @@ class BranchKeeperApp(App):
         highlighted row. In this app mouse clicks should only move/highlight the cursor;
         deletion is intentionally keyboard-driven via Enter.
 
-        By using this event handler instead of an app-level Enter binding, we avoid
-        conflicts with modal screens that also use Enter for confirmation.
+        Using this event handler rather than an app-level Enter binding also keeps Enter
+        available to the DataTable itself; modal screens are already isolated from app
+        bindings by Textual's modal binding chain.
         """
         if getattr(event.data_table, "_show_hover_cursor", False):
             logger.debug("Ignoring DataTable row selection from mouse click")

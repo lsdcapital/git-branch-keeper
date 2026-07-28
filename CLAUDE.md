@@ -78,9 +78,26 @@ The TUI uses Textual framework with an event-driven design to handle keyboard in
 **Key Event Handling Pattern:**
 - Main app uses `on_data_table_row_selected()` event handler for Enter key instead of a binding
 - This is because DataTable has a built-in Enter binding that would conflict with app-level bindings
-- Modal screens (ConfirmScreen, InfoScreen) have isolated `BINDINGS` with Enter/Escape for confirm/cancel
 - No `priority=True` flags on bindings to avoid modal conflicts
 - This separation prevents Enter key conflicts between the table and modal dialogs
+
+**`ConfirmScreen` deliberately has no `enter` binding.** Textual resolves the *focused
+widget's* bindings before the screen's, and `Button` binds `enter` → `press`. Since
+`AUTO_FOCUS = "#no"` focuses the safe option, Enter activates Cancel; a screen-level
+`enter` → confirm binding would be unreachable while a button is focused but would fire
+if focus moved into the scrollable message body, making Enter mean two different things.
+Confirming is `y` (no widget in the chain binds it), Tab-then-Enter, or a click. Do not
+"restore" the Enter binding without also moving focus off the destructive button — that
+combination is what made the old dialog confirm deletion on a stray Enter.
+
+All three modals inherit shared chrome from `BaseModal` (`ui/screens.py`). Its rules
+select by CSS **class** (`.modal-dialog`, `.modal-body`, `.modal-buttons`) and subclasses
+override by **id**, so overrides win on plain specificity rather than on `DEFAULT_CSS`
+merge order. Two traps: a rule targeting the screen itself must literally start with
+`BaseModal` (Textual scopes each rule to its declaring class, so `ModalScreen { … }`
+becomes the descendant selector `BaseModal ModalScreen { … }` and matches nothing), and
+`TabbedInfoScreen` must keep `max-width: 100%` / `max-height: 100%` or the base's 90%/80%
+caps clamp its 90%x80% dialog to 81%x64%.
 
 **Background Operations:**
 - Async workers use `@work` decorator for non-blocking operations

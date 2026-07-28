@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI test coverage (pure marking-logic unit tests plus Textual `run_test` harness tests)
 
 ### Fixed
+- **TUI dialogs are legible again.** The confirmation dialog's Yes/No buttons stacked
+  vertically (the button row was a `Container`, which lays out vertically) and the dialog
+  frame was drawn in a dimmed background colour, so the dialog read as the whole screen
+  rather than a panel. All three modals now share a `BaseModal` with a visible border,
+  a border title, and a horizontal button row.
+- Long delete confirmations no longer overflow: the message body scrolls instead of
+  pushing the buttons off screen when many branches are marked.
+- Branch names and git error text are no longer parsed as Rich markup in modals, so a
+  branch such as `feature/[wip]` renders correctly instead of being swallowed as a tag.
 - **Rebase-merged branches are now detected.** Merge detection was rewritten around three
   git-native checks — reachability (`merge-base --is-ancestor`), patch-equivalence
   (`git cherry`), and combined-diff for multi-commit squashes. The previous diff-only
@@ -27,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interpolated branch names into a regex unescaped) and two redundant reachability checks.
 
 ### Changed
+- **TUI confirmation dialogs now focus the safe option, so Enter cancels.** Previously
+  focus landed on the destructive button, so Enter confirmed. Confirming is now `y`, or
+  Tab to the confirm button and press Enter, or click it. This changes the
+  mark-all-then-Enter-Enter flow: the second Enter cancels (marks are kept, so `y`
+  still deletes). The dialog shows the keys on its bottom border.
 - Fuzzy squash-merge matches are now advisory only: a high-similarity (non-exact) patch
   match surfaces a "possible squash-merge - verify before deleting" note instead of
   marking the branch merged/deletable (prevents deleting unmerged work). Exact diff
