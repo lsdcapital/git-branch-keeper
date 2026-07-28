@@ -9,6 +9,7 @@ from pathlib import Path
 
 import git
 import pytest
+from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 
@@ -51,6 +52,15 @@ def _branch(
     )
 
 
+def _status_text(app):
+    """Return the three logical status rows as plain text."""
+    rows = []
+    for row_id in ("status-scope", "status-summary", "status-dynamic"):
+        content = app.query_one(f"#{row_id}").content
+        rows.append(content.plain if isinstance(content, Text) else str(content))
+    return "\n".join(rows)
+
+
 @pytest.fixture
 def isolated_home(temp_dir, monkeypatch):
     """Redirect Path.home() so undo journals do not touch the real home dir."""
@@ -78,10 +88,31 @@ async def test_app_mounts_and_renders_rows(make_app):
         table = app.query_one(DataTable)
         assert table.row_count == 2
         # Status bar reflects the totals
-        status = app.query_one("#status-bar").render()
-        assert "Delete scope: LOCAL ONLY — remotes kept [d]" in str(status)
-        assert "Total: 2" in str(status)
+        status = _status_text(app)
+        assert "Delete scope: LOCAL ONLY — remotes kept [d]" in status
+        assert "Total: 2" in status
         await pilot.pause()
+
+
+async def test_status_feedback_stays_on_fixed_third_line(make_app):
+    app = make_app([_branch("feature/a")])
+
+    async with app.run_test(size=(55, 24)) as pilot:
+        status = app.query_one("#status-bar")
+        await pilot.pause()
+        initial_height = status.region.height
+
+        app._set_status_message("Branch data refreshed", severity="success")
+        await pilot.pause()
+
+        content = app.query_one("#status-dynamic").content
+        assert isinstance(content, Text)
+        lines = _status_text(app).split("\n")
+        assert len(lines) == 3
+        assert lines[0] == "Delete scope: LOCAL ONLY — remotes kept [d]"
+        assert lines[1].startswith("Total: 1 | Protected:")
+        assert lines[2] == "✓ Branch data refreshed"
+        assert status.region.height == initial_height == 5
 
 
 async def test_delete_scope_binding_toggles_remote_deletion(make_app):
@@ -92,7 +123,7 @@ async def test_delete_scope_binding_toggles_remote_deletion(make_app):
         await pilot.pause()
 
         assert app.keeper.delete_remote is True
-        status = str(app.query_one("#status-bar").render())
+        status = _status_text(app)
         assert "Delete scope: LOCAL + REMOTE [d]" in status
         assert "undo restores local branches only" in status
 
@@ -100,7 +131,7 @@ async def test_delete_scope_binding_toggles_remote_deletion(make_app):
         await pilot.pause()
 
         assert app.keeper.delete_remote is False
-        status = str(app.query_one("#status-bar").render())
+        status = _status_text(app)
         assert "Delete scope: LOCAL ONLY — remotes kept [d]" in status
 
 
@@ -197,8 +228,8 @@ async def test_initial_load_uses_table_loader_when_no_cached_rows(make_app, monk
         assert called is True
         assert app.is_refreshing is True
         assert table.loading is True
-        status = app.query_one("#status-bar").render()
-        assert "Refreshing" in str(status)
+        status = _status_text(app)
+        assert "Refreshing" in status
 
 
 async def test_refresh_binding_shows_immediate_feedback(make_app, monkeypatch):
@@ -219,23 +250,29 @@ async def test_refresh_binding_shows_immediate_feedback(make_app, monkeypatch):
         assert called is True
         assert app.is_refreshing is True
         assert table.loading is False
-        status = app.query_one("#status-bar").render()
-        assert "Refreshing" in str(status)
-        assert "Starting" in str(status)
-        assert "actions paused" in str(status)
+        status = _status_text(app)
+        assert "Refreshing" in status
+        assert "Starting" in status
+        assert "actions paused" in status
 
 
 async def test_marking_is_paused_while_refreshing(make_app):
     app = make_app([_branch("feature/a")])
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(55, 24)) as pilot:
         app._set_refreshing(True)
         await pilot.press("space")
         await pilot.pause()
 
         assert app.marked_branches == set()
-        status = app.query_one("#status-bar").render()
-        assert "marking paused" in str(status)
+        status = _status_text(app)
+        assert "marking paused" in status
+        dynamic_status = app.query_one("#status-dynamic")
+        content = dynamic_status.content
+        assert isinstance(content, Text)
+        assert content.plain.startswith("⚠ Refreshing in progress")
+        assert "⟳" not in content.plain
+        assert "marking paused" in dynamic_status.render_line(0).text
 
 
 async def test_refresh_progress_shows_counts_and_percent(make_app):
@@ -252,8 +289,8 @@ async def test_refresh_progress_shows_counts_and_percent(make_app):
         )
         await pilot.pause()
 
-        status = app.query_one("#status-bar").render()
-        assert "Processing branches 3/10 (30%)" in str(status)
+        status = _status_text(app)
+        assert "Processing branches 3/10 (30%)" in status
 
 
 async def test_deletion_progress_uses_delete_label(make_app):
@@ -271,9 +308,9 @@ async def test_deletion_progress_uses_delete_label(make_app):
         )
         await pilot.pause()
 
-        status = app.query_one("#status-bar").render()
-        assert "Deleting" in str(status)
-        assert "Deleted feature/a 1/2 (50%)" in str(status)
+        status = _status_text(app)
+        assert "Deleting" in status
+        assert "Deleted feature/a 1/2 (50%)" in status
 
 
 async def test_apply_refresh_result_preserves_scroll_position(make_app):
@@ -457,7 +494,7 @@ async def test_status_bar_deletable_excludes_the_checked_out_branch(make_app, gi
         await pilot.press("a")
         await pilot.pause()
 
-        status = str(app.query_one("#status-bar").render())
+        status = _status_text(app)
         assert "Deletable: 0" in status
         assert "Marked: 0" in status
         assert app.marked_branches == set()
@@ -476,7 +513,7 @@ async def test_status_bar_counts_a_branch_and_its_worktree_as_one_candidate(make
         await pilot.press("a")
         await pilot.pause()
 
-        status = str(app.query_one("#status-bar").render())
+        status = _status_text(app)
         assert "Total: 3" in status  # rows
         assert "Deletable: 1" in status  # names
         assert "Marked: 1" in status
@@ -495,7 +532,7 @@ async def test_status_bar_reports_blocked_candidates(make_app):
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        status = str(app.query_one("#status-bar").render())
+        status = _status_text(app)
         assert "Deletable: 0" in status
         assert "Blocked: 2" in status
 
@@ -507,7 +544,7 @@ async def test_status_bar_omits_blocked_when_there_is_nothing_to_explain(make_ap
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        status = str(app.query_one("#status-bar").render())
+        status = _status_text(app)
         assert "Deletable: 1" in status
         assert "Blocked:" not in status
 
@@ -524,7 +561,7 @@ async def test_blocked_and_deletable_do_not_double_count(make_app):
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        status = str(app.query_one("#status-bar").render())
+        status = _status_text(app)
         assert "Deletable: 1" in status
         assert "Blocked:" not in status
 

@@ -11,6 +11,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.containers import Container
 from textual.coordinate import Coordinate
 from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
@@ -85,9 +86,14 @@ class BranchKeeperApp(App):
 
     #status-bar {
         dock: bottom;
-        height: auto;
+        height: 5;
         background: $panel;
         padding: 1;
+    }
+
+    .status-row {
+        height: 1;
+        overflow: hidden;
     }
 
     .deletable {
@@ -149,7 +155,12 @@ class BranchKeeperApp(App):
         """Create child widgets."""
         yield NonExpandingHeader(show_clock=True, icon="")
         yield DataTable(id="branch-table", cursor_type="row", zebra_stripes=True)
-        yield Static(id="status-bar")
+        yield Container(
+            Static(id="status-scope", classes="status-row"),
+            Static(id="status-summary", classes="status-row"),
+            Static(id="status-dynamic", classes="status-row"),
+            id="status-bar",
+        )
         yield Footer()
 
     def _auto_mark_deletable(self, deletable_branches: list[BranchDetails] | None = None) -> None:
@@ -607,7 +618,9 @@ class BranchKeeperApp(App):
 
     def _update_status(self) -> None:
         """Update status bar with current stats."""
-        status = self.query_one("#status-bar", Static)
+        scope_status = self.query_one("#status-scope", Static)
+        summary_status = self.query_one("#status-summary", Static)
+        dynamic_status = self.query_one("#status-dynamic", Static)
 
         # Total counts table rows; every other figure counts branch names, because
         # that is what a mark applies to. A branch and its worktree are two rows
@@ -643,14 +656,18 @@ class BranchKeeperApp(App):
         sort_order = "desc" if self.sort_reverse else "asc"
         force_marked = len(self.force_marked_branches)
 
-        status_text = Text()
+        scope_text = Text(no_wrap=True, overflow="ellipsis")
         if self.keeper.delete_remote:
-            status_text.append("Delete scope: LOCAL + REMOTE [d]", style="bold yellow")
+            scope_text.append("Delete scope: LOCAL + REMOTE [d]", style="bold yellow")
         else:
-            status_text.append("Delete scope: LOCAL ONLY — remotes kept [d]", style="bold green")
+            scope_text.append(
+                "Delete scope: LOCAL ONLY — remotes kept [d]",
+                style="bold green",
+            )
 
-        status_text.append(
-            f" | Total: {total} | "
+        summary_text = Text(no_wrap=True, overflow="ellipsis")
+        summary_text.append(
+            f"Total: {total} | "
             f"Protected: {protected} | "
             f"Deletable: {deletable} | "
             + (f"Blocked: {blocked} | " if blocked else "")
@@ -659,18 +676,18 @@ class BranchKeeperApp(App):
             f"Sort: {self.sort_column} ({sort_order})"
         )
 
-        if self.is_refreshing:
-            status_text.append(" | ")
-            status_text.append(self._format_operation_progress(), style="cyan")
-
+        dynamic_text = Text(no_wrap=True, overflow="ellipsis")
         if self.status_message:
             severity = self.status_message_severity
             prefix = self.STATUS_MESSAGE_PREFIXES.get(severity, "ℹ")
             style = self.STATUS_MESSAGE_STYLES.get(severity, "cyan")
-            status_text.append(" | ")
-            status_text.append(f"{prefix} {self.status_message}", style=style)
+            dynamic_text.append(f"{prefix} {self.status_message}", style=style)
+        elif self.is_refreshing:
+            dynamic_text.append(self._format_operation_progress(), style="cyan")
 
-        status.update(status_text)
+        scope_status.update(scope_text)
+        summary_status.update(summary_text)
+        dynamic_status.update(dynamic_text)
 
     def action_toggle_delete_scope(self) -> None:
         """Toggle whether deleting a local branch also deletes its remote branch."""
