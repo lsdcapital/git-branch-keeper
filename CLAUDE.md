@@ -348,7 +348,7 @@ Configuration follows a hierarchy:
 - **GitHub integration is OPTIONAL**: The tool works on any Git repo without GitHub auth
   - Without auth: Branch analysis, merge detection, and cleanup work normally
   - With auth (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or authenticated `gh` CLI; GitHub only): Adds PR detection and protection against deleting branches with open PRs
-- Test framework: pytest (run with `make test`); CI runs the full suite on Python 3.9-3.13
+- Test framework: pytest (run with `make test`); CI runs the full suite on Python 3.10-3.13
 - TUI has tests too: pure marking/validation logic in `tests/test_tui_marking.py`, and
   Textual `run_test()` pilot harness tests in `tests/test_tui_app.py` (async, `asyncio_mode = "auto"`)
 - Branch deletions are journaled and recoverable via `git-branch-keeper undo` as long as the commit objects exist

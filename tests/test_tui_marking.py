@@ -88,14 +88,10 @@ class TestMarkWithHierarchy:
 
     @pytest.mark.parametrize("is_force", [False, True])
     def test_remote_only_branch_cannot_be_marked(self, app, is_force):
-        app.branches = [
-            _branch("feature/remote-only", has_remote=True, has_local=False)
-        ]
+        app.branches = [_branch("feature/remote-only", has_remote=True, has_local=False)]
         mark_set = app.force_marked_branches if is_force else app.marked_branches
 
-        ok, err = app._mark_with_hierarchy(
-            "feature/remote-only", mark_set, is_force=is_force
-        )
+        ok, err = app._mark_with_hierarchy("feature/remote-only", mark_set, is_force=is_force)
 
         assert ok is False
         assert "remote-only" in err.lower()

@@ -45,8 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   match surfaces a "possible squash-merge - verify before deleting" note instead of
   marking the branch merged/deletable (prevents deleting unmerged work). Exact diff
   matches still count as merged.
-- CI now runs the full pytest suite and enforces mypy; test matrix is Python 3.9-3.13
-- Minimum supported Python raised to 3.9 (was 3.8; 3.8 was already broken at import)
+- CI now runs the full pytest suite and enforces mypy; test matrix is Python 3.10-3.13
+- Minimum supported Python raised to 3.10, allowing all locked dependencies to receive
+  current security fixes
 - README clarified: branch/merge analysis works on any Git host; PR detection is GitHub-only
 
 ### Added (original release scope)

@@ -474,9 +474,7 @@ class CacheService:
 
             # Stable, but only trustworthy if the branch still points where it did.
             cached_tip = branch_data.get("tip_sha")
-            current_state = (
-                branch_states.get(branch_name) if branch_states is not None else None
-            )
+            current_state = branch_states.get(branch_name) if branch_states is not None else None
             current_tip = current_state.tip_sha if current_state else None
 
             if current_state is not None:

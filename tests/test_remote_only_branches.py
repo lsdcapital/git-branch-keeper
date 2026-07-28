@@ -279,9 +279,7 @@ def test_remote_only_reachable_tip_does_not_overstate_branch_provenance(repo_wit
     branch = {b.name: b for b in result.branches}["bookmark/after-merge"]
 
     assert branch.status == BranchStatus.MERGED
-    assert keeper.git_service.remote_history_is_unverifiable(
-        "bookmark/after-merge"
-    ) is True
+    assert keeper.git_service.remote_history_is_unverifiable("bookmark/after-merge") is True
     assert branch.notes and "branch name" in branch.notes
 
 
@@ -408,12 +406,7 @@ def test_git_operation_refuses_remote_only_branch_before_remote_delete(repo_with
     _push_and_drop_local(repo, "feat/gone")
     keeper = _keeper(path)
 
-    assert (
-        keeper.git_service.delete_branch(
-            "feat/gone", dry_run=True, delete_remote=True
-        )
-        is False
-    )
+    assert keeper.git_service.delete_branch("feat/gone", dry_run=True, delete_remote=True) is False
     assert "origin/feat/gone" in [ref.name for ref in repo.remote("origin").refs]
 
 

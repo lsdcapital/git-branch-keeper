@@ -32,7 +32,7 @@ This project and everyone participating in it is governed by our commitment to p
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.10 or higher
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Git
 - A GitHub account
