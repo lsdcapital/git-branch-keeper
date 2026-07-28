@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, ScrollableContainer, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TabbedContent, TabPane
 
@@ -21,57 +21,124 @@ if TYPE_CHECKING:
     from git_branch_keeper.core import BranchKeeper
 
 
-class ConfirmScreen(ModalScreen[bool]):
-    """Modal confirmation dialog."""
+ScreenResultT = TypeVar("ScreenResultT")
+
+
+class BaseModal(ModalScreen[ScreenResultT]):
+    """Shared chrome for every git-branch-keeper modal dialog.
+
+    Subclasses compose a ``Vertical(classes="modal-dialog")`` root containing a
+    ``.modal-body`` scroll region and a ``.modal-buttons`` row. The shared rules below
+    select by CSS *class* and subclasses override by *id*, so overrides win on plain
+    specificity (id beats class) rather than on DEFAULT_CSS merge order.
+
+    Note that a rule targeting the screen itself must literally start with ``BaseModal``.
+    Textual scopes each rule to the declaring class, so ``ModalScreen { ... }`` would
+    become the descendant selector ``BaseModal ModalScreen { ... }`` and match nothing.
+    """
 
     DEFAULT_CSS = """
-    ConfirmScreen {
+    BaseModal {
         align: center middle;
     }
 
-    #confirm-dialog {
-        width: 80%;
+    BaseModal .modal-dialog {
+        width: 72;
+        max-width: 90%;
         height: auto;
-        border: thick $background 80%;
-        background: $surface;
+        max-height: 80%;
         padding: 1 2;
+        background: $surface;
+        border: round $primary;
+        border-title-align: left;
+        border-title-color: $text;
+        border-title-background: $surface;
+        border-subtitle-align: right;
+        border-subtitle-color: $text-muted;
     }
 
-    #confirm-message {
+    BaseModal .modal-dialog.-danger {
+        border: round $error;
+        border-title-color: $error;
+    }
+
+    BaseModal .modal-body {
         width: 100%;
         height: auto;
+        max-height: 16;
         padding: 1 0;
+        scrollbar-size-vertical: 1;
     }
 
-    #button-container {
+    BaseModal .modal-buttons {
+        layout: horizontal;
         width: 100%;
         height: auto;
-        align: center middle;
-        padding: 1 0;
+        align-horizontal: right;
+        padding-top: 1;
     }
 
-    Button {
-        margin: 0 1;
+    BaseModal .modal-buttons Button {
+        margin-left: 2;
+        min-width: 12;
     }
     """
 
+
+class ConfirmScreen(BaseModal[bool]):
+    """Modal confirmation dialog."""
+
+    DEFAULT_CSS = """
+    ConfirmScreen #confirm-dialog {
+        min-width: 48;
+    }
+    """
+
+    AUTO_FOCUS = "#no"
+
+    # No "enter" binding: Enter activates whatever is focused (Cancel by default), so it
+    # means exactly one thing. Confirming is "y", or Tab to the confirm button first.
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("enter", "confirm_yes", "Confirm", show=False),
         Binding("y", "confirm_yes", "Yes", show=False),
         Binding("escape", "confirm_no", "Cancel", show=False),
         Binding("n", "confirm_no", "No", show=False),
     ]
 
-    def __init__(self, message: str):
+    def __init__(
+        self,
+        message: str,
+        dialog_title: str = "Confirm",
+        confirm_label: str = "Yes",
+        cancel_label: str = "Cancel",
+        danger: bool = True,
+    ):
+        # Not "title": Screen.title is a reactive that overrides App.title while active.
         super().__init__()
         self.message = message
+        self.dialog_title = dialog_title
+        self.confirm_label = confirm_label
+        self.cancel_label = cancel_label
+        self.danger = danger
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-dialog"):
-            yield Static(self.message, id="confirm-message")
-            with Container(id="button-container"):
-                yield Button("Yes", variant="error", id="yes")
-                yield Button("No", variant="primary", id="no")
+        classes = "modal-dialog -danger" if self.danger else "modal-dialog"
+        with Vertical(id="confirm-dialog", classes=classes):
+            with ScrollableContainer(id="confirm-message", classes="modal-body"):
+                # markup=False: the message embeds raw branch names, so "feature/[wip]"
+                # would otherwise be parsed as Rich markup.
+                yield Static(self.message, markup=False)
+            with Horizontal(id="button-container", classes="modal-buttons"):
+                yield Button(self.cancel_label, variant="default", id="no")
+                yield Button(
+                    self.confirm_label,
+                    variant="error" if self.danger else "primary",
+                    id="yes",
+                )
+
+    def on_mount(self) -> None:
+        dialog = self.query_one("#confirm-dialog", Vertical)
+        dialog.border_title = self.dialog_title
+        dialog.border_subtitle = f" y = {self.confirm_label}   esc = {self.cancel_label} "
 
     def action_confirm_yes(self) -> None:
         """Confirm action (Yes)."""
@@ -86,50 +153,33 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
-class InfoScreen(ModalScreen):
+class InfoScreen(BaseModal[None]):
     """Modal info display dialog (legacy, kept for error messages)."""
 
-    DEFAULT_CSS = """
-    InfoScreen {
-        align: center middle;
-    }
+    AUTO_FOCUS = "#close"
 
-    #info-dialog {
-        width: 80%;
-        height: auto;
-        border: thick $background 80%;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #info-content {
-        width: 100%;
-        height: auto;
-        padding: 1 0;
-    }
-
-    #info-button-container {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0;
-    }
-    """
-
+    # Enter is kept here: the focused Close button and the screen binding do the same
+    # thing, so unlike ConfirmScreen there is no ambiguity to remove.
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "close", "Close", show=False),
         Binding("escape", "close", "Close", show=False),
     ]
 
-    def __init__(self, info: str):
+    def __init__(self, info: str, dialog_title: str = "Info"):
         super().__init__()
         self.info = info
+        self.dialog_title = dialog_title
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="info-dialog"):
-            yield Static(self.info, id="info-content")
-            with Container(id="info-button-container"):
+        with Vertical(id="info-dialog", classes="modal-dialog"):
+            with ScrollableContainer(id="info-content", classes="modal-body"):
+                # markup=False: callers pass raw git/OS error text.
+                yield Static(self.info, markup=False)
+            with Horizontal(id="info-button-container", classes="modal-buttons"):
                 yield Button("Close", variant="primary", id="close")
+
+    def on_mount(self) -> None:
+        self.query_one("#info-dialog", Vertical).border_title = self.dialog_title
 
     def action_close(self) -> None:
         """Close the dialog."""
@@ -140,40 +190,31 @@ class InfoScreen(ModalScreen):
         self.dismiss()
 
 
-class TabbedInfoScreen(ModalScreen):
+class TabbedInfoScreen(BaseModal[None]):
     """Modal info dialog with dynamic tabs based on branch status."""
 
+    # max-width/max-height are load-bearing: without them BaseModal's 90%/80% caps would
+    # clamp this dialog to 81%x64%. No AUTO_FOCUS either - the default focuses the tab
+    # bar, which is what makes left/right arrow tab switching work.
     DEFAULT_CSS = """
-    TabbedInfoScreen {
-        align: center middle;
-    }
-
-    #tabbed-info-dialog {
+    TabbedInfoScreen #tabbed-info-dialog {
         width: 90%;
+        max-width: 100%;
         height: 80%;
-        border: thick $background 80%;
-        background: $surface;
-        padding: 1 2;
+        max-height: 100%;
     }
 
-    #tab-content {
+    TabbedInfoScreen #tab-content {
         width: 100%;
         height: 1fr;
         padding: 1 0;
     }
 
-    #info-button-container {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0;
-    }
-
-    TabbedContent {
+    TabbedInfoScreen TabbedContent {
         height: 1fr;
     }
 
-    TabPane {
+    TabbedInfoScreen TabPane {
         padding: 1;
     }
     """
@@ -195,7 +236,7 @@ class TabbedInfoScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         """Build the dialog with dynamic tabs based on branch status."""
-        with Vertical(id="tabbed-info-dialog"):
+        with Vertical(id="tabbed-info-dialog", classes="modal-dialog"):
             with TabbedContent(id="tab-content"):
                 # Always include Info tab
                 with TabPane("Info", id="tab-info"):
@@ -240,7 +281,7 @@ class TabbedInfoScreen(ModalScreen):
                     with TabPane("Comparison", id="tab-comparison"):
                         yield self._build_comparison_tab()
 
-            with Container(id="info-button-container"):
+            with Horizontal(id="info-button-container", classes="modal-buttons"):
                 yield Button("Close", variant="primary", id="close")
 
     def _worktree_path_for_branch(self) -> str | None:
@@ -628,6 +669,11 @@ class TabbedInfoScreen(ModalScreen):
             content = f"[red]Error getting comparison: {e}[/red]"
 
         return ScrollableContainer(Static(content, markup=True))
+
+    def on_mount(self) -> None:
+        dialog = self.query_one("#tabbed-info-dialog", Vertical)
+        dialog.border_title = self.branch.name
+        dialog.border_subtitle = " esc = close "
 
     def action_switch_tab(self, index: int) -> None:
         """Switch to a specific tab by index."""

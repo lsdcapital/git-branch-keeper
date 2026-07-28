@@ -10,7 +10,7 @@ from pathlib import Path
 import git
 import pytest
 from textual.coordinate import Coordinate
-from textual.widgets import DataTable
+from textual.widgets import Button, DataTable
 
 from git_branch_keeper.config import Config
 from git_branch_keeper.core import BranchKeeper
@@ -21,6 +21,7 @@ from git_branch_keeper.models.branch import (
     BranchStatus,
 )
 from git_branch_keeper.ui.app import BranchKeeperApp
+from git_branch_keeper.ui.screens import ConfirmScreen
 
 
 def _branch(name, status=BranchStatus.MERGED):
@@ -289,3 +290,45 @@ async def test_quit_binding_exits(make_app):
         await pilot.press("q")
         await pilot.pause()
     # Exiting cleanly (no exception raised on context exit) is the assertion here.
+
+
+async def test_confirm_screen_focuses_the_safe_option(make_app):
+    """Focus starts on Cancel, never on the destructive button."""
+    app = make_app([_branch("feature/a")])
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen("Delete 1 branch?", dialog_title="Confirm deletion"))
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen)
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "no"
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [("escape", False), ("enter", False), ("n", False), ("y", True)],
+)
+async def test_confirm_screen_key_semantics(make_app, key, expected):
+    """Enter activates the focused (Cancel) button; "y" is the only confirm key."""
+    app = make_app([_branch("feature/a")])
+    results: list[bool] = []
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen("Delete 1 branch?"), results.append)
+        await pilot.pause()
+        await pilot.press(key)
+        await pilot.pause()
+
+    assert results == [expected]
+
+
+async def test_confirm_screen_buttons_share_one_row_with_cancel_first(make_app):
+    """Guards against the button container reverting to a vertical layout."""
+    app = make_app([_branch("feature/a")])
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen("Delete 1 branch?", confirm_label="Delete"))
+        await pilot.pause()
+
+        cancel = app.screen.query_one("#no", Button)
+        delete = app.screen.query_one("#yes", Button)
+        assert cancel.region.y == delete.region.y  # side by side, not stacked
+        assert cancel.region.x < delete.region.x  # Cancel left of Delete
