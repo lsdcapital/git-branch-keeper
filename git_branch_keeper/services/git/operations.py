@@ -12,6 +12,7 @@ from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.services.deletion_journal import DeletionJournal
 from git_branch_keeper.services.git.branch_queries import BranchQueries
 from git_branch_keeper.services.git.merge_detector import MergeDetector
+from git_branch_keeper.services.git.refs import BranchRefResolver
 from git_branch_keeper.services.git.worktrees import WorktreeService
 from git_branch_keeper.utils.logging import get_logger
 from git_branch_keeper.utils.remotes import detect_remote_name
@@ -47,7 +48,10 @@ class GitOperations:
         self.in_git_operation = False  # Track if operation is in progress
 
         # Compose specialized services (Dependency Injection pattern)
-        self.merge_detector = MergeDetector(repo_path, config)
+        self.ref_resolver = BranchRefResolver(repo_path, self.remote_name)
+        self.merge_detector = MergeDetector(
+            repo_path, config, remote_name=self.remote_name, ref_resolver=self.ref_resolver
+        )
         # One WorktreeService for the whole facade: it caches Git's worktree list,
         # and a second instance would keep its own copy, so a cache refresh taken
         # before a deletion would not be seen by branch queries.
@@ -58,6 +62,7 @@ class GitOperations:
             self.merge_detector,
             remote_name=self.remote_name,
             worktree_service=self.worktree_service,
+            ref_resolver=self.ref_resolver,
         )
         self.deletion_journal = DeletionJournal(repo_path)
 
@@ -119,9 +124,32 @@ class GitOperations:
         """
         return self.merge_detector.get_partial_merge(branch_name)
 
+    def unstarted_is_unverifiable(self, branch_name: str) -> bool:
+        """Whether an UNSTARTED verdict lacks reflog proof. Delegates to MergeDetector.
+
+        Only meaningful after is_unstarted_branch() has run for the branch.
+        """
+        return self.merge_detector.unstarted_is_unverifiable(branch_name)
+
+    def remote_history_is_unverifiable(self, branch_name: str) -> bool:
+        """Whether remote branch-name provenance cannot be proved."""
+        return self.merge_detector.remote_history_is_unverifiable(branch_name)
+
     def get_merge_detection_info(self, branch_name: str) -> dict:
         """Get structured merge-detection details for display/JSON output."""
         return self.merge_detector.get_merge_detection_info(branch_name)
+
+    # ============================================================================
+    # Delegation methods to BranchRefResolver
+    # ============================================================================
+
+    def has_local_branch(self, branch_name: str, *, refresh: bool = False) -> bool:
+        """Whether refs/heads/<branch_name> exists. Delegates to BranchRefResolver."""
+        return self.ref_resolver.has_local(branch_name, refresh=refresh)
+
+    def get_remote_only_branches(self) -> list[str]:
+        """Plain names of branches on the remote with no local head."""
+        return self.ref_resolver.remote_only_branch_names()
 
     # ============================================================================
     # Delegation methods to BranchQueries
@@ -131,9 +159,9 @@ class GitOperations:
         """Return local branch tip SHA. Delegates to BranchQueries."""
         return self.branch_queries.get_branch_tip_sha(branch_name)
 
-    def has_remote_branch(self, branch_name: str) -> bool:
+    def has_remote_branch(self, branch_name: str, *, refresh: bool = False) -> bool:
         """Check if branch has a remote. Delegates to BranchQueries."""
-        return self.branch_queries.has_remote_branch(branch_name)
+        return self.branch_queries.has_remote_branch(branch_name, refresh=refresh)
 
     def get_branch_age(self, branch_name: str) -> int:
         """Get branch age. Delegates to BranchQueries."""
@@ -277,16 +305,23 @@ class GitOperations:
             try:
                 repo = self._get_repo()
 
-                # Check if remote branch exists before deletion
-                has_remote = self.has_remote_branch(branch_name)
+                # Resolve the local head immediately before acting. Planning and the
+                # TUI may have been sitting on a cached row while refs changed.
+                try:
+                    local_head = repo.heads[branch_name]
+                except GIT_ERRORS:
+                    logger.warning(
+                        f"Refusing to delete {branch_name}: no local branch exists "
+                        "(remote-only branches are read-only)"
+                    )
+                    return False
+
+                # Refresh remote state at the same execution boundary.
+                has_remote = self.has_remote_branch(branch_name, refresh=True)
                 should_delete_remote = has_remote and delete_remote
 
                 # Capture the tip SHA before deletion so the branch is recoverable
-                deleted_sha = None
-                try:
-                    deleted_sha = repo.heads[branch_name].commit.hexsha
-                except GIT_ERRORS:
-                    logger.warning(f"Could not resolve tip SHA for {branch_name} before deletion")
+                deleted_sha = local_head.commit.hexsha
 
                 # Delete local branch. Prefer `-d` so git independently confirms the
                 # branch is reachable before anything is discarded; fall back to `-D`
@@ -373,3 +408,5 @@ class GitOperations:
                 # letting anything unexpected propagate mid-way through a cleanup run.
                 console.print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
                 return False
+            finally:
+                self.ref_resolver.invalidate()

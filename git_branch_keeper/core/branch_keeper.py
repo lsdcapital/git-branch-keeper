@@ -171,7 +171,13 @@ class BranchKeeper:
             self.repo_path, self.config, self.git_service, self.github_service, self.verbose
         )
         self.display_service = DisplayService(verbose=self.verbose, debug=self.debug_mode)
-        self.cache_service = CacheService(self.repo_path)
+        # include_remote must match _get_filtered_branches(), or cache pruning and
+        # branch discovery disagree about which names are legitimate.
+        self.cache_service = CacheService(
+            self.repo_path,
+            remote_name=self.remote_name,
+            include_remote=self.config.get("include_remote_branches", True),
+        )
 
         # Initialize statistics
         self.stats = {"deleted": 0, "skipped_pr": 0, "skipped_protected": 0, "skipped_pattern": 0}
@@ -208,6 +214,14 @@ class BranchKeeper:
             Tuple of (success, error_message). error_message is None on success.
         """
         try:
+            # Deletion always starts from a local ref. Refresh at the execution
+            # boundary so cached analysis rows and long-lived TUI sessions cannot
+            # turn a remote-only branch into a dry-run "success" or deletion attempt.
+            if not self.git_service.has_local_branch(branch_name, refresh=True):
+                error_msg = "No local branch exists (remote-only branches are read-only)"
+                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                return False, error_msg
+
             # Check for open PRs first
             if self.github_service.has_open_pr(branch_name):
                 error_msg = "Has open pull request"
@@ -787,15 +801,33 @@ class BranchKeeper:
         return True
 
     def _get_filtered_branches(self) -> list:
-        """Get local branch heads excluding ignored patterns.
+        """Get branch names to analyze, excluding ignored patterns.
 
-        Branch rows must come only from ``refs/heads/*``. ``repo.refs`` also contains tags,
-        remote-tracking refs, stash refs, and arbitrary custom refs (for example
-        ``refs/conductor-checkpoints/*``), none of which are deletable local branches.
-        Worktrees are discovered separately from ``git worktree list --porcelain`` and then
-        attached to these local branch rows.
+        Local rows come only from ``refs/heads/*``. Never iterate ``repo.refs`` for
+        this: it also contains tags, stash refs, and arbitrary custom refs (for example
+        ``refs/conductor-checkpoints/*``), none of which are branches. Worktrees are
+        discovered separately from ``git worktree list --porcelain`` and then attached
+        to these branch rows.
+
+        Remote-only branches (on ``refs/remotes/<remote>/*`` with no local head) are
+        appended unless ``include_remote_branches`` is off. They are the larger and more
+        interesting population - a branch you deleted locally but left on the remote is
+        invisible to a local-only listing, which is exactly how remotes accumulate
+        hundreds of them. They are analyzed read-only and are never deletable; see
+        ``BranchValidationService.is_deletable``.
+
+        Names are plain (``feat/mermaid``, not ``origin/feat/mermaid``) so ignore and
+        protection patterns, cache keys, and TUI marks work identically for both.
         """
         branches = [head.name for head in self.repo.heads]
+
+        if self.config.get("include_remote_branches", True):
+            local = set(branches)
+            branches.extend(
+                name
+                for name in self.git_service.get_remote_only_branches()
+                if name not in local and name != self.main_branch
+            )
 
         # Only filter out ignored branches, keep protected ones
         return [b for b in branches if not self.branch_status_service.should_ignore_branch(b)]
@@ -1180,6 +1212,12 @@ class BranchKeeper:
             if current_branch and branch.name == current_branch:
                 continue
 
+            # Remote-only branches are never deletable. is_deletable() already
+            # refuses them, but the force_mode path below bypasses it entirely -
+            # so the guard has to sit here too, not only there.
+            if not branch.has_local:
+                continue
+
             # Check if deletable using validation service
             if force_mode:
                 # In force mode, allow branches with uncommitted changes
@@ -1381,6 +1419,25 @@ class BranchKeeper:
 
         return (deleted_branches, failed_branches, removed_worktrees, failed_worktrees)
 
+    def _print_blocked_summary(self, branch_details: list) -> None:
+        """Account for merged/stale branches that were shown but not offered.
+
+        `--filter merged` on a repo full of remote-only branches printed 36 merged
+        rows followed by "No branches to clean up!" - two true statements that read
+        as a contradiction, because nothing connected them.
+        """
+        blocked = BranchValidationService.summarize_blocked(
+            branch_details, self.protected_branches, self._current_branch_name()
+        )
+        if not blocked:
+            return
+
+        total = sum(count for count, _ in blocked)
+        noun = "branch" if total == 1 else "branches"
+        self._console_print(f"[dim]{total} merged/stale {noun} shown above, none deletable:[/dim]")
+        for count, reason in blocked:
+            self._console_print(f"[dim]  {count} {reason}[/dim]")
+
     def _perform_cleanup(
         self,
         branch_details: list,
@@ -1410,6 +1467,7 @@ class BranchKeeper:
 
         if not branches_to_delete and not worktrees_to_remove:
             self._console_print("\n[green]No branches or worktrees to clean up![/green]")
+            self._print_blocked_summary(branch_details)
             return
 
         if self.dry_run:
@@ -1592,6 +1650,24 @@ class BranchKeeper:
                     f"{total - landed} not landed"
                 )
 
+        # An UNSTARTED label normally rests on positive reflog proof. A remote-only
+        # branch has no local reflog to consult (`git reflog show origin/foo` records
+        # fetches, not the branch's own history), so never-started and
+        # fast-forward-merged are indistinguishable. Say so rather than let the label
+        # read as a confident claim.
+        if status == BranchStatus.UNSTARTED and self.git_service.unstarted_is_unverifiable(branch):
+            append_note(
+                "remote-only: no local reflog, cannot confirm never-started "
+                "vs fast-forward merged"
+            )
+        elif status == BranchStatus.MERGED and self.git_service.remote_history_is_unverifiable(
+            branch
+        ):
+            append_note(
+                "remote-only: tip is reachable from main, but no local reflog "
+                "can verify when the branch name was created or merged"
+            )
+
         if status != BranchStatus.MERGED and merge_detection.get("truncated"):
             scan_limit = merge_detection.get("scan_limit") or "configured limit"
             append_note(f"squash scan truncated at {scan_limit} commits")
@@ -1746,6 +1822,7 @@ class BranchKeeper:
             untracked_files=untracked_files,
             staged_files=staged_files,
             has_remote=self.git_service.has_remote_branch(branch),
+            has_local=self.git_service.has_local_branch(branch),
             sync_status=sync_status,
             pr_status=pr_status_str,
             pr_details=(

@@ -21,9 +21,19 @@ from git_branch_keeper.models.branch import (
     BranchStatus,
 )
 from git_branch_keeper.ui.app import BranchKeeperApp
+from git_branch_keeper.ui.screens import ConfirmScreen
 
 
-def _branch(name, status=BranchStatus.MERGED, *, is_worktree=False, in_worktree=False, wt=None):
+def _branch(
+    name,
+    status=BranchStatus.MERGED,
+    *,
+    is_worktree=False,
+    in_worktree=False,
+    wt=None,
+    has_remote=False,
+    has_local=True,
+):
     return BranchDetails(
         name=name,
         last_commit_date="2024-01-01",
@@ -32,7 +42,8 @@ def _branch(name, status=BranchStatus.MERGED, *, is_worktree=False, in_worktree=
         modified_files=False,
         untracked_files=False,
         staged_files=False,
-        has_remote=False,
+        has_remote=has_remote,
+        has_local=has_local,
         sync_status="local-only",
         is_worktree=is_worktree,
         in_worktree=in_worktree,
@@ -68,8 +79,80 @@ async def test_app_mounts_and_renders_rows(make_app):
         assert table.row_count == 2
         # Status bar reflects the totals
         status = app.query_one("#status-bar").render()
+        assert "Delete scope: LOCAL ONLY — remotes kept [d]" in str(status)
         assert "Total: 2" in str(status)
         await pilot.pause()
+
+
+async def test_delete_scope_binding_toggles_remote_deletion(make_app):
+    app = make_app([_branch("feature/a", has_remote=True)])
+
+    async with app.run_test() as pilot:
+        await pilot.press("d")
+        await pilot.pause()
+
+        assert app.keeper.delete_remote is True
+        status = str(app.query_one("#status-bar").render())
+        assert "Delete scope: LOCAL + REMOTE [d]" in status
+        assert "undo restores local branches only" in status
+
+        await pilot.press("d")
+        await pilot.pause()
+
+        assert app.keeper.delete_remote is False
+        status = str(app.query_one("#status-bar").render())
+        assert "Delete scope: LOCAL ONLY — remotes kept [d]" in status
+
+
+async def test_delete_confirmation_explains_local_only_scope(make_app):
+    app = make_app([_branch("feature/a", has_remote=True)])
+
+    async with app.run_test() as pilot:
+        app.marked_branches.add("feature/a")
+        app.action_delete_marked()
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen)
+        message = app.screen.message
+        assert "Deletion scope: LOCAL ONLY" in message
+        assert "Matching branches on origin will be kept" in message
+        assert "remain visible as remote-only rows" in message
+        assert "Cancel and press d to delete local and remote branches together" in message
+
+
+async def test_delete_confirmation_warns_remote_undo_is_manual(make_app):
+    app = make_app([_branch("feature/a", has_remote=True)])
+    app.keeper.delete_remote = True
+
+    async with app.run_test() as pilot:
+        app.marked_branches.add("feature/a")
+        app.action_delete_marked()
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen)
+        message = app.screen.message
+        assert "Deletion scope: LOCAL + REMOTE" in message
+        assert "Matching branches on origin will also be deleted" in message
+        assert "Undo restores local branches only" in message
+        assert "deleted remote branches must be pushed back manually" in message
+
+
+async def test_delete_scope_cannot_change_behind_confirmation(make_app):
+    """The confirmed scope and the scope used for deletion must not diverge."""
+    app = make_app([_branch("feature/a", has_remote=True)])
+
+    async with app.run_test() as pilot:
+        app.marked_branches.add("feature/a")
+        app.action_delete_marked()
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+
+        await pilot.press("d")
+        await pilot.pause()
+
+        assert app.keeper.delete_remote is False
+        assert isinstance(app.screen, ConfirmScreen)
+        assert "Deletion scope: LOCAL ONLY" in app.screen.message
 
 
 async def test_clear_marks_binding_empties_marks(make_app):
@@ -398,6 +481,52 @@ async def test_status_bar_counts_a_branch_and_its_worktree_as_one_candidate(make
         assert "Deletable: 1" in status  # names
         assert "Marked: 1" in status
         assert app.marked_branches == {"feature/wt"}
+
+
+async def test_status_bar_reports_blocked_candidates(make_app):
+    """`Deletable: 0` under a screen of `merged` rows reads as a bug without this."""
+    rows = [
+        _branch("main", status=BranchStatus.ACTIVE),
+        _branch("feature/gone", has_remote=True, has_local=False),
+        _branch("feature/also-gone", has_remote=True, has_local=False),
+    ]
+    app = make_app(rows)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        status = str(app.query_one("#status-bar").render())
+        assert "Deletable: 0" in status
+        assert "Blocked: 2" in status
+
+
+async def test_status_bar_omits_blocked_when_there_is_nothing_to_explain(make_app):
+    """The figure earns its width only when it resolves a contradiction."""
+    app = make_app([_branch("main", status=BranchStatus.ACTIVE), _branch("feature/a")])
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        status = str(app.query_one("#status-bar").render())
+        assert "Deletable: 1" in status
+        assert "Blocked:" not in status
+
+
+async def test_blocked_and_deletable_do_not_double_count(make_app):
+    """A branch the planner unblocks by removing its worktree is not also blocked."""
+    rows = [
+        _branch("main", status=BranchStatus.ACTIVE),
+        _branch("feature/wt", in_worktree=True, wt="/tmp/wt"),
+        _branch("feature/wt", is_worktree=True, wt="/tmp/wt"),
+    ]
+    app = make_app(rows)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        status = str(app.query_one("#status-bar").render())
+        assert "Deletable: 1" in status
+        assert "Blocked:" not in status
 
 
 async def test_quit_binding_exits(make_app):

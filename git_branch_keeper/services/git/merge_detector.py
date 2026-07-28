@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 import git
 
 from git_branch_keeper.exceptions import GIT_ERRORS
+from git_branch_keeper.services.git.refs import BranchRefResolver
 from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -34,15 +35,25 @@ logger = get_logger(__name__)
 class MergeDetector:
     """Service for detecting if branches have been merged."""
 
-    def __init__(self, repo_path: str, config: Config | dict):
+    def __init__(
+        self,
+        repo_path: str,
+        config: Config | dict,
+        remote_name: str = "origin",
+        ref_resolver: BranchRefResolver | None = None,
+    ):
         """Initialize the merge detector.
 
         Args:
             repo_path: Path to the git repository
             config: Configuration dictionary or Config object
+            remote_name: Remote to resolve remote-only branch names against
+            ref_resolver: Shared resolver; one is built if not supplied
         """
         self.repo_path = repo_path
         self.config = config
+        self.remote_name = remote_name
+        self.refs = ref_resolver or BranchRefResolver(repo_path, remote_name)
         self.debug_mode = config.get("debug", False)
         self._merge_status_cache: dict[str, bool] = {}  # Cache for merge status checks
         self._cache_lock = Lock()  # Thread safety for cache access
@@ -61,6 +72,16 @@ class MergeDetector:
         # definition not a merge, so this never makes a branch deletable.
         self._partial_merge: dict[str, tuple[int, int]] = {}
         self._partial_lock = Lock()
+        # Branches called UNSTARTED without the reflog proof is_unstarted_branch()
+        # normally demands, because they are remote-only and have no local reflog.
+        # Surfaced as a note so the label is not read as a confident claim.
+        self._unstarted_unverifiable: set = set()
+        self._unstarted_lock = Lock()
+        # Any remote-only ref with zero unique commits lacks the branch reflog needed
+        # to prove when that name was created. Reachability can prove its content is
+        # on main, but not that this branch name existed when the content landed.
+        self._remote_history_unverifiable: set = set()
+        self._remote_history_lock = Lock()
         self._merge_detection_info: dict[str, dict[str, Any]] = {}
         self._merge_info_lock = Lock()
         # (patch-id, diff length) per first-parent commit on main, shared by every
@@ -69,6 +90,11 @@ class MergeDetector:
         # O(branches x main commits) - the dominant cost on large repos.
         self._main_commit_signatures: dict[str, tuple[str | None, int]] = {}
         self._signature_lock = Lock()
+        # SHAs on main's first-parent line, keyed by main's tip so it is rebuilt when
+        # main moves. Used only by the remote-only unstarted path; built lazily so
+        # repos without remote-only branches never pay for the walk.
+        self._main_first_parent: dict[str, set[str]] = {}
+        self._first_parent_lock = Lock()
         # Add counters for merge detection methods
         self.merge_detection_stats = {
             "reachable": 0,  # merge commit / fast-forward (tip reachable from main)
@@ -328,6 +354,27 @@ class MergeDetector:
             self._set_in_cache(cache_key, False)
             return False
 
+    def _is_on_main_first_parent(self, repo, main_branch: str, rev: str) -> bool:
+        """Whether ``rev`` sits on main's first-parent line.
+
+        Main's first-parent line is the sequence of positions the main ref has held,
+        so a branch cut from main points somewhere on it. A branch merged with a merge
+        commit does not: its tip is that merge's *second* parent, reachable from main
+        but off the line. That is what separates "never started" from "merged with a
+        merge commit" when neither has commits of its own.
+
+        A fast-forward merge does land on the line, which is exactly why it stays
+        indistinguishable from never-started - see :meth:`is_unstarted_branch`.
+        """
+        main_sha = repo.rev_parse(main_branch).hexsha
+        with self._first_parent_lock:
+            cached = self._main_first_parent.get(main_sha)
+        if cached is None:
+            cached = set(repo.git.rev_list("--first-parent", main_branch).split())
+            with self._first_parent_lock:
+                self._main_first_parent[main_sha] = cached
+        return repo.rev_parse(rev).hexsha in cached
+
     def is_unstarted_branch(self, branch_name: str, main_branch: str) -> bool:
         """Whether the branch was created from main and never moved since.
 
@@ -354,15 +401,57 @@ class MergeDetector:
         which the existing deletion guards already re-verify; being wrong in the other
         direction would hide a genuinely merged branch behind a label that is never a
         cleanup candidate.
+
+        A **remote-only** branch has no local reflog at all - ``git reflog show
+        origin/foo`` records this clone's *fetches*, not the branch's own history - so
+        the branch name's provenance cannot be proved. A tip off main's first-parent
+        line is still reported merged because reachability proves its content entered
+        main through a merge commit, but it is recorded by
+        :meth:`remote_history_is_unverifiable` so callers do not overstate that the
+        branch name itself existed at the time. A tip on the first-parent line remains
+        the more conservative UNSTARTED case because never-started and fast-forward-
+        merged are indistinguishable there.
         """
         if branch_name == main_branch:
             return False
 
+        with self._unstarted_lock:
+            self._unstarted_unverifiable.discard(branch_name)
+        with self._remote_history_lock:
+            self._remote_history_unverifiable.discard(branch_name)
+
         try:
             repo = self._get_repo()
-            count = repo.git.rev_list("--count", f"{main_branch}..{branch_name}").strip()
+            rev = self.refs.resolve(branch_name, repo)
+            count = repo.git.rev_list("--count", f"{main_branch}..{rev}").strip()
             if int(count) != 0:
                 return False
+
+            if rev != branch_name:
+                # Content reachability does not prove when the branch *name* was
+                # created. Record that uncertainty for both outcomes below.
+                with self._remote_history_lock:
+                    self._remote_history_unverifiable.add(branch_name)
+
+                # Off main's first-parent line means a merge commit put the content
+                # there. Report that reachability result as merged, while the note
+                # above keeps branch-name provenance explicitly uncertain.
+                if not self._is_on_main_first_parent(repo, main_branch, rev):
+                    logger.debug(
+                        f"[unstarted] {branch_name} is remote-only but off main's "
+                        "first-parent line; its tip reached main via a merge commit, "
+                        "but branch-name history is unavailable"
+                    )
+                    return False
+
+                logger.debug(
+                    f"[unstarted] {branch_name} is remote-only with no unique commits "
+                    "on main's first-parent line; never-started and fast-forward-merged "
+                    "are indistinguishable here"
+                )
+                with self._unstarted_lock:
+                    self._unstarted_unverifiable.add(branch_name)
+                return True
 
             # %gs is the reflog subject, newest first.
             reflog = repo.git.reflog("show", "--format=%gs", branch_name).strip()
@@ -377,6 +466,21 @@ class MergeDetector:
         logger.debug(f"[unstarted] {branch_name} was created from main and never moved")
         return True
 
+    def unstarted_is_unverifiable(self, branch_name: str) -> bool:
+        """Whether an UNSTARTED verdict rests on zero unique commits alone.
+
+        True only for remote-only branches, where no local reflog exists to separate
+        "never committed to" from "fast-forward merged". Only meaningful after
+        :meth:`is_unstarted_branch` has run for the branch.
+        """
+        with self._unstarted_lock:
+            return branch_name in self._unstarted_unverifiable
+
+    def remote_history_is_unverifiable(self, branch_name: str) -> bool:
+        """Whether a zero-unique-commit remote ref lacks branch-name provenance."""
+        with self._remote_history_lock:
+            return branch_name in self._remote_history_unverifiable
+
     def _check_reachable(self, branch_name: str, main_branch: str) -> bool:
         """Reachability: the branch tip is an ancestor of main.
 
@@ -387,7 +491,7 @@ class MergeDetector:
         logger.debug("[reachable] Checking if branch tip is an ancestor of main...")
         try:
             repo = self._get_repo()
-            branch_tip = repo.refs[branch_name].commit
+            branch_tip = repo.refs[self.refs.resolve(branch_name, repo)].commit
             main_tip = repo.refs[main_branch].commit
             if repo.is_ancestor(branch_tip, main_tip):
                 logger.debug(f"[reachable] {branch_name} tip is reachable from {main_branch}")
@@ -425,7 +529,7 @@ class MergeDetector:
             # `git cherry <upstream> <head>`: one line per commit in head not reachable
             # from upstream, prefixed '-' (a patch-equivalent commit exists in upstream)
             # or '+' (no equivalent). All '-' => every unique commit is already applied.
-            output = repo.git.cherry(main_branch, branch_name).strip()
+            output = repo.git.cherry(main_branch, self.refs.resolve(branch_name, repo)).strip()
             if not output:
                 # No commits unique to the branch - the reachable case, which is owned
                 # by _check_reachable. Don't double-count it here.
@@ -483,17 +587,18 @@ class MergeDetector:
         scan_limit = self._get_squash_scan_limit()
         try:
             repo = self._get_repo()
-            branch_commits = list(repo.iter_commits(f"{main_branch}..{branch_name}"))
+            rev = self.refs.resolve(branch_name, repo)
+            branch_commits = list(repo.iter_commits(f"{main_branch}..{rev}"))
             if not branch_commits:
                 return False
 
-            merge_bases = repo.merge_base(main_branch, branch_name)
+            merge_bases = repo.merge_base(main_branch, rev)
             if not merge_bases:
                 return False
             base_sha = merge_bases[0].hexsha
 
             branch_diff = repo.git.diff(
-                f"{base_sha}..{branch_name}",
+                f"{base_sha}..{rev}",
                 "--no-color",
                 "--ignore-space-change",
                 "--ignore-blank-lines",

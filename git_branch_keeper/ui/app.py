@@ -114,6 +114,7 @@ class BranchKeeperApp(App):
         Binding("l", "show_legend", "Legend"),
         Binding("s", "cycle_sort", "Change Sort"),
         Binding("r", "refresh", "Refresh"),
+        Binding("d", "toggle_delete_scope", "Delete Scope"),
         Binding("u", "undo_recent_deletion", "Undo Delete"),
     ]
 
@@ -471,7 +472,7 @@ class BranchKeeperApp(App):
         changes = Text(changes_indicator, justify="center")
 
         # Remote column - using shared formatter
-        remote_symbol = format_remote_status(branch.has_remote)
+        remote_symbol = format_remote_status(branch.has_remote, branch.has_local)
         remote = Text(remote_symbol, justify="center")
 
         # PR column - using shared formatter
@@ -561,6 +562,10 @@ class BranchKeeperApp(App):
         # Validate ALL related items before marking any
         issues = []
         for branch in matching:
+            if not branch.is_worktree and not branch.has_local:
+                logger.debug(f"[MARK_WITH_HIERARCHY] {branch.name} is remote-only")
+                return False, "Cannot mark a remote-only branch for deletion"
+
             # Check protected branches (always enforced)
             if BranchValidationService.is_protected(branch.name, self.keeper.protected_branches):
                 logger.debug(f"[MARK_WITH_HIERARCHY] {branch.name} is protected")
@@ -609,7 +614,8 @@ class BranchKeeperApp(App):
         # but one name, one mark, and one cleanup decision.
         total = len(self.branches)
         marked = len(self.marked_branches)
-        deletable = len({branch.name for branch in self._plan_deletable()})
+        deletable_names = {branch.name for branch in self._plan_deletable()}
+        deletable = len(deletable_names)
         protected = len(
             {
                 branch.name
@@ -618,14 +624,37 @@ class BranchKeeperApp(App):
             }
         )
 
+        # Merged/stale branches that are visible but can never be marked. Without
+        # this, `Deletable: 0` alongside a screen of `merged` rows looks like a bug.
+        # The per-branch reason lives in the detail pane's deletion blockers.
+        # Subtract the plan: it unblocks branches whose only obstacle is a clean
+        # worktree, and the two figures must not contradict each other.
+        blocked = len(
+            {
+                branch.name
+                for branch in self.branches
+                if BranchValidationService.blocking_reason(
+                    branch, self.keeper.protected_branches, self._current_branch_name()
+                )
+            }
+            - deletable_names
+        )
+
         sort_order = "desc" if self.sort_reverse else "asc"
         force_marked = len(self.force_marked_branches)
 
-        status_text = Text(
-            f"Total: {total} | "
+        status_text = Text()
+        if self.keeper.delete_remote:
+            status_text.append("Delete scope: LOCAL + REMOTE [d]", style="bold yellow")
+        else:
+            status_text.append("Delete scope: LOCAL ONLY — remotes kept [d]", style="bold green")
+
+        status_text.append(
+            f" | Total: {total} | "
             f"Protected: {protected} | "
             f"Deletable: {deletable} | "
-            f"Marked: {marked} | "
+            + (f"Blocked: {blocked} | " if blocked else "")
+            + f"Marked: {marked} | "
             f"Force: {force_marked} | "
             f"Sort: {self.sort_column} ({sort_order})"
         )
@@ -642,6 +671,23 @@ class BranchKeeperApp(App):
             status_text.append(f"{prefix} {self.status_message}", style=style)
 
         status.update(status_text)
+
+    def action_toggle_delete_scope(self) -> None:
+        """Toggle whether deleting a local branch also deletes its remote branch."""
+        if self._block_if_refreshing("changing deletion scope"):
+            return
+
+        self.keeper.delete_remote = not self.keeper.delete_remote
+        if self.keeper.delete_remote:
+            self._set_status_message(
+                f"Remote deletion enabled for {self.keeper.remote_name} — "
+                "undo restores local branches only",
+                severity="warning",
+            )
+        else:
+            self._set_status_message(
+                "Remote deletion disabled — matching remote branches will be kept"
+            )
 
     def action_toggle_mark(self) -> None:
         """Toggle mark on current row."""
@@ -817,14 +863,34 @@ class BranchKeeperApp(App):
             branches_to_delete, self.keeper.delete_remote
         )
 
+        if self.keeper.delete_remote:
+            scope_message = (
+                "Deletion scope: LOCAL + REMOTE\n"
+                f"Matching branches on {self.keeper.remote_name} will also be deleted. "
+                "Undo restores local branches only; deleted remote branches must be "
+                "pushed back manually.\n"
+                "Cancel and press d to keep remote branches instead."
+            )
+        else:
+            scope_message = (
+                "Deletion scope: LOCAL ONLY\n"
+                f"Matching branches on {self.keeper.remote_name} will be kept and may "
+                "remain visible as remote-only rows.\n"
+                "Cancel and press d to delete local and remote branches together."
+            )
+
         if force_count > 0:
             message = (
                 f"Delete {total_marked} marked branch{'es' if total_marked > 1 else ''}?\n"
                 f"({normal_count} normal, {force_count} force-marked)\n\n"
+                f"{scope_message}\n\n"
                 f"{branches_list}"
             )
         else:
-            message = f"Delete {total_marked} marked branch{'es' if total_marked > 1 else ''}?\n\n{branches_list}"
+            message = (
+                f"Delete {total_marked} marked branch{'es' if total_marked > 1 else ''}?"
+                f"\n\n{scope_message}\n\n{branches_list}"
+            )
 
         # Show confirmation screen
         self.push_screen(ConfirmScreen(message), self._handle_delete_confirmation)

@@ -14,6 +14,10 @@ class Config:
     ignore_patterns: list[str] = field(default_factory=list)
     main_branch: str = "main"
     status_filter: str = "all"  # all, merged, stale
+    # Analyze branches that exist only on the remote. On by default: branch
+    # accumulation is a remote problem, and the local set is a biased sample of it.
+    # Read-only regardless - remote-only branches are never deletable.
+    include_remote_branches: bool = True
 
     # Stale branch threshold
     stale_days: int = 30
@@ -104,6 +108,7 @@ class Config:
             "ignore_patterns": self.ignore_patterns,
             "main_branch": self.main_branch,
             "status_filter": self.status_filter,
+            "include_remote_branches": self.include_remote_branches,
             "stale_days": self.stale_days,
             "interactive": self.interactive,
             "dry_run": self.dry_run,
@@ -134,6 +139,7 @@ class Config:
             "ignore_patterns",
             "main_branch",
             "status_filter",
+            "include_remote_branches",
             "stale_days",
             "interactive",
             "dry_run",

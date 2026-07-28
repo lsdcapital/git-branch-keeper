@@ -26,7 +26,7 @@ def test_analysis_to_dict_is_json_serializable(git_repo, mock_config, temp_dir, 
     assert decoded["ok"] is True
     assert decoded["operation"] == "branch.scan"
     assert decoded["mode"] == "read-only"
-    assert decoded["schema_version"] == 3
+    assert decoded["schema_version"] == 4
     assert decoded["branches"]
     branch = decoded["branches"][0]
     assert "is_current_branch" in branch
@@ -79,7 +79,7 @@ def test_schema_to_dict_is_json_serializable():
     decoded = json.loads(json.dumps(payload))
 
     assert decoded["ok"] is True
-    assert decoded["schema_version"] == 3
+    assert decoded["schema_version"] == 4
     assert decoded["application"] == "git-branch-keeper"
     assert "branch.scan" in {command["name"] for command in decoded["capabilities"]["commands"]}
     assert "is_current_branch" in decoded["branch_scan_result"]["branch_fields"]

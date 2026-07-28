@@ -21,6 +21,17 @@ if TYPE_CHECKING:
     from git_branch_keeper.core import BranchKeeper
 
 
+def _format_location(branch: BranchDetails) -> str:
+    """Describe where a branch lives, for the detail pane's Remote row.
+
+    A plain "Yes"/"No" cannot say "remote only", which is the one case the user
+    needs told: those branches are analyzed but can never be deleted here.
+    """
+    if branch.has_remote and not branch.has_local:
+        return "Remote only (no local branch; not deletable)"
+    return "Yes" if branch.has_remote else "No"
+
+
 class ConfirmScreen(ModalScreen[bool]):
     """Modal confirmation dialog."""
 
@@ -282,6 +293,13 @@ class TabbedInfoScreen(ModalScreen):
         if BranchValidationService.is_protected(self.branch.name, self.keeper.protected_branches):
             blockers.append("Branch is protected")
 
+        # Listed first among the status reasons because it holds regardless of
+        # status: a remote-only branch reported as merged is still not deletable.
+        if self.branch.has_remote and not self.branch.has_local:
+            blockers.append(
+                "Branch exists only on the remote - git-branch-keeper does not delete remote branches"
+            )
+
         if self.branch.status == BranchStatus.UNSTARTED:
             blockers.append("Branch has no commits of its own - nothing was merged")
         elif self.branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
@@ -365,7 +383,7 @@ class TabbedInfoScreen(ModalScreen):
 [bold]Last Commit:[/bold] {self.branch.last_commit_date}
 [bold]Branch State:[/bold] {changes_text}
 [bold]Sync:[/bold] {self.branch.sync_status}
-[bold]Remote:[/bold] {"Yes" if self.branch.has_remote else "No"}
+[bold]Remote:[/bold] {_format_location(self.branch)}
 [bold]PRs:[/bold] {pr_display}
 [bold]Notes:[/bold] {notes_text}
 [bold]Protected:[/bold] {"Yes" if BranchValidationService.is_protected(self.branch.name, self.keeper.protected_branches) else "No"}

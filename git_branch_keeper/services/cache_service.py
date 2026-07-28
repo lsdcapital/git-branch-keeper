@@ -13,6 +13,7 @@ import git
 
 from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.services.git.refs import BranchRefResolver, BranchRefState
 
 # Import fcntl for POSIX file locking (Unix/Linux/macOS)
 try:
@@ -28,13 +29,20 @@ logger = logging.getLogger(__name__)
 class CacheService:
     """Manages caching of branch analysis results."""
 
-    def __init__(self, repo_path: str):
+    def __init__(self, repo_path: str, remote_name: str = "origin", include_remote: bool = True):
         """Initialize cache service for a repository.
 
         Args:
             repo_path: Path to the git repository
+            remote_name: Remote whose refs share the branch-name namespace
+            include_remote: Whether branch discovery includes remote-only branches.
+                Must match ``Config.include_remote_branches`` - see
+                :meth:`_get_current_branch_tips`.
         """
         self.repo_path = Path(repo_path).resolve()
+        self.remote_name = remote_name
+        self.include_remote = include_remote
+        self.ref_resolver = BranchRefResolver(str(self.repo_path), remote_name)
         self.cache_dir = Path.home() / ".git-branch-keeper" / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file = self.cache_dir / f"{self._get_repo_hash()}.json"
@@ -72,28 +80,45 @@ class CacheService:
             except OSError as e:
                 logger.debug(f"Error releasing lock: {e}")
 
-    def _get_current_branch_tips(self) -> dict[str, str] | None:
-        """Return {branch name: tip SHA} for this repository's local branches.
+    def _get_current_branch_states(self) -> dict[str, BranchRefState] | None:
+        """Return live tip and location state for every branch this repository analyzes.
 
-        Cache entries are keyed by branch name, so pruning must use the same namespace as
-        branch discovery: local heads only (``refs/heads/*``). The tip SHA is what makes a
-        cached entry verifiable - without it a "merged" row stays trusted even after the
-        branch grows new, unmerged commits. If the repository cannot be opened, return
-        None so callers can preserve existing cache data instead of risking accidental
-        data loss.
+        Cache entries are keyed by branch name, so pruning must use the same namespace
+        as branch discovery (``BranchKeeper._get_filtered_branches``). That means local
+        heads *and*, when ``include_remote`` is set, remote-only branches under
+        ``refs/remotes/<remote>/*`` mapped back to their plain names. Narrowing this to
+        local heads while discovery includes remotes would prune every remote row on
+        each run, so the cache could never warm up.
+
+        Both tip and location are required to verify a cached row. A local+remote branch
+        can become remote-only without changing its SHA, and the reverse transition is
+        possible too. Reusing ``has_local`` across that transition can turn a read-only
+        remote row into a deletion candidate. If the repository cannot be opened, return
+        None so callers preserve existing cache data instead of risking data loss.
         """
         try:
             repo = git.Repo(self.repo_path)
             try:
-                return {head.name: head.commit.hexsha for head in repo.heads}
+                states = self.ref_resolver.snapshot(repo, refresh=True)
+                if self.include_remote:
+                    return states
+                return {name: state for name, state in states.items() if state.has_local}
             finally:
                 repo.close()
         except GIT_ERRORS as e:
-            logger.debug(f"Could not read local branch tips for cache: {e}")
+            logger.debug(f"Could not read branch states for cache: {e}")
             return None
 
+    def _get_current_branch_tips(self) -> dict[str, str] | None:
+        """Backward-compatible tip-only view over :meth:`_get_current_branch_states`."""
+        states = self._get_current_branch_states()
+        return None if states is None else {name: state.tip_sha for name, state in states.items()}
+
     def _get_current_local_branch_names(self) -> set[str] | None:
-        """Return the current local branch names, or None if the repo cannot be opened."""
+        """Return the names of branches currently analyzed, or None if the repo cannot
+        be opened. Kept as a name-set view over :meth:`_get_current_branch_tips` so both
+        stay in the same namespace.
+        """
         tips = self._get_current_branch_tips()
         return None if tips is None else set(tips)
 
@@ -208,8 +233,8 @@ class CacheService:
             # Load existing cache to preserve data for branches that still exist locally.
             existing_cache = self.load_cache()
 
-            branch_tips = self._get_current_branch_tips()
-            current_local_branches = None if branch_tips is None else set(branch_tips)
+            branch_states = self._get_current_branch_states()
+            current_local_branches = None if branch_states is None else set(branch_states)
             if current_local_branches is not None:
                 before_count = len(existing_cache)
                 existing_cache = {
@@ -231,7 +256,8 @@ class CacheService:
                     logger.debug(f"Skipping cache for non-local branch ref '{branch.name}'")
                     continue
 
-                tip_sha = branch_tips.get(branch.name) if branch_tips else None
+                state = branch_states.get(branch.name) if branch_states else None
+                tip_sha = state.tip_sha if state else None
                 serialized = self._serialize_branch(branch, tip_sha)
                 # Skip if branch has invalid data
                 if serialized.get("last_commit_date") == "unknown":
@@ -318,6 +344,7 @@ class CacheService:
             "untracked_files": branch.untracked_files,
             "staged_files": branch.staged_files,
             "has_remote": branch.has_remote,
+            "has_local": branch.has_local,
             "sync_status": branch.sync_status,
             "pr_status": branch.pr_status,
             "pr_details": branch.pr_details,
@@ -351,6 +378,9 @@ class CacheService:
                 untracked_files=data["untracked_files"],
                 staged_files=data["staged_files"],
                 has_remote=data["has_remote"],
+                # Entries written before remote enumeration existed have no
+                # has_local key, and every branch they described was local.
+                has_local=data.get("has_local", True),
                 sync_status=data["sync_status"],
                 pr_status=data.get("pr_status"),
                 pr_details=data.get("pr_details"),
@@ -415,7 +445,7 @@ class CacheService:
         cache = self.load_cache()
         # None means the repo could not be read; then nothing can be validated, so
         # every cached entry has to be treated as stale.
-        branch_tips = self._get_current_branch_tips()
+        branch_states = self._get_current_branch_states()
         # Resolved lazily - only legacy entries need it, so repos with a current
         # cache never pay for the extra git call.
         reachable_from_main: set[str] | None = None
@@ -444,7 +474,26 @@ class CacheService:
 
             # Stable, but only trustworthy if the branch still points where it did.
             cached_tip = branch_data.get("tip_sha")
-            current_tip = branch_tips.get(branch_name) if branch_tips is not None else None
+            current_state = (
+                branch_states.get(branch_name) if branch_states is not None else None
+            )
+            current_tip = current_state.tip_sha if current_state else None
+
+            if current_state is not None:
+                cached_has_local = branch_data.get("has_local", True)
+                cached_has_remote = branch_data.get("has_remote", False)
+                if (
+                    cached_has_local != current_state.has_local
+                    or cached_has_remote != current_state.has_remote
+                ):
+                    logger.debug(
+                        f"Branch '{branch_name}' location changed since caching "
+                        f"(local={cached_has_local}, remote={cached_has_remote} -> "
+                        f"local={current_state.has_local}, remote={current_state.has_remote}), "
+                        "needs refresh"
+                    )
+                    stale_branches.append(branch_name)
+                    continue
 
             if cached_tip:
                 if cached_tip != current_tip:

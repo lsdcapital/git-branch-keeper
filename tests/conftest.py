@@ -203,7 +203,16 @@ def mock_git_service(mock_config, mock_git_repo):
     service.is_unstarted_branch = Mock(return_value=False)
     service.is_likely_squash_merged = Mock(return_value=False)
     service.get_partial_merge = Mock(return_value=None)
+    service.unstarted_is_unverifiable = Mock(return_value=False)
+    service.remote_history_is_unverifiable = Mock(return_value=False)
     service.is_tag = Mock(return_value=False)
+    # Default to the local-only world these tests were written for. Left as real
+    # values rather than bare Mocks because a Mock is truthy and iterable-hostile:
+    # has_local_branch() would report every branch local, and
+    # get_remote_only_branches() would break the list extend in
+    # _get_filtered_branches().
+    service.has_local_branch = Mock(return_value=True)
+    service.get_remote_only_branches = Mock(return_value=[])
 
     return service
 

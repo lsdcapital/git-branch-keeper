@@ -29,6 +29,9 @@ COLUMNS: list[ColumnDefinition] = [
 # Symbol constants
 SYMBOL_HAS_REMOTE = "✓"
 SYMBOL_NO_REMOTE = "✗"
+# On the remote with no local head. Distinct from ✓ because the two behave
+# differently: a remote-only branch is analysed but never deletable.
+SYMBOL_REMOTE_ONLY = "☁"
 SYMBOL_MARKED = "✓"
 SYMBOL_UNMARKED = " "
 SYMBOL_CURRENT_BRANCH = " *"

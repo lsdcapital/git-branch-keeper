@@ -11,6 +11,7 @@ import git
 
 from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.models.branch import SyncStatus
+from git_branch_keeper.services.git.refs import BranchRefResolver
 from git_branch_keeper.services.git.worktrees import WorktreeService
 from git_branch_keeper.utils.logging import get_logger
 
@@ -31,6 +32,7 @@ class BranchQueries:
         merge_detector: MergeDetector,
         remote_name: str = "origin",
         worktree_service: WorktreeService | None = None,
+        ref_resolver: BranchRefResolver | None = None,
     ):
         """Initialize the branch queries service.
 
@@ -43,12 +45,14 @@ class BranchQueries:
                 instance used elsewhere - WorktreeService caches Git's worktree
                 list, and two instances would drift apart, so a refresh taken
                 before a deletion would not be visible here.
+            ref_resolver: Shared BranchRefResolver; one is built if not supplied.
         """
         self.repo_path = repo_path
         self.config = config
         self.merge_detector = merge_detector
         self.remote_name = remote_name
         self.worktree_service = worktree_service or WorktreeService(repo_path)
+        self.refs = ref_resolver or BranchRefResolver(repo_path, remote_name)
         self.in_git_operation = False
 
         logger.debug("Branch queries service initialized")
@@ -65,40 +69,27 @@ class BranchQueries:
         return git.Repo(self.repo_path)
 
     def get_branch_tip_sha(self, branch_name: str) -> str | None:
-        """Return the tip SHA for a local branch, or None if it cannot be resolved."""
+        """Return the branch's tip SHA, or None if it cannot be resolved.
+
+        For a remote-only branch this is the remote-tracking tip, which is what the
+        cache must key on: it is the only tip that exists, and it moves on fetch.
+        """
         try:
             repo = self._get_repo()
-            return repo.refs[branch_name].commit.hexsha
+            return repo.refs[self.refs.resolve(branch_name, repo)].commit.hexsha
         except GIT_ERRORS as e:
             logger.debug(f"Error getting branch tip SHA for {branch_name}: {e}")
             return None
 
-    def has_remote_branch(self, branch_name: str) -> bool:
+    def has_remote_branch(self, branch_name: str, *, refresh: bool = False) -> bool:
         """Check if the branch has a remote tracking branch."""
-        try:
-            repo = self._get_repo()
-            remote = repo.remote(self.remote_name)
-
-            # First check if the remote ref exists
-            remote_ref_name = f"{self.remote_name}/{branch_name}"
-            if remote_ref_name not in [ref.name for ref in remote.refs]:
-                return False
-
-            # Then try to get the remote branch
-            try:
-                repo.refs[f"{self.remote_name}/{branch_name}"]
-                return True
-            except (IndexError, KeyError):
-                return False
-        except GIT_ERRORS as e:
-            logger.debug(f"Error checking remote branch {branch_name}: {e}")
-            return False
+        return self.refs.has_remote(branch_name, refresh=refresh)
 
     def get_branch_age(self, branch_name: str) -> int:
         """Get age of branch in calendar days."""
         try:
             repo = self._get_repo()
-            commit = repo.refs[branch_name].commit
+            commit = repo.refs[self.refs.resolve(branch_name, repo)].commit
             commit_time = datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
             now = datetime.now(timezone.utc)
 
@@ -167,6 +158,12 @@ class BranchQueries:
             if not self.has_remote_branch(branch_name):
                 return SyncStatus.LOCAL_ONLY.value
 
+            # The mirror image: on the remote with no local head. There is nothing to
+            # compare against, so return before the ahead/behind revs below - they
+            # would name a local ref that does not exist.
+            if not self.refs.has_local(branch_name, repo):
+                return SyncStatus.REMOTE_ONLY.value
+
             # Check ahead/behind status
             ahead = list(repo.iter_commits(f"{self.remote_name}/{branch_name}..{branch_name}"))
             behind = list(repo.iter_commits(f"{branch_name}..{self.remote_name}/{branch_name}"))
@@ -187,7 +184,7 @@ class BranchQueries:
         """Get the full timestamp of the last commit on a branch."""
         try:
             repo = self._get_repo()
-            commit = repo.refs[branch_name].commit
+            commit = repo.refs[self.refs.resolve(branch_name, repo)].commit
             return commit.committed_datetime.isoformat()
         except GIT_ERRORS as e:
             logger.debug(f"Error getting last commit timestamp for {branch_name}: {e}")
@@ -197,7 +194,7 @@ class BranchQueries:
         """Get the date of the last commit on a branch."""
         try:
             repo = self._get_repo()
-            commit = repo.refs[branch_name].commit
+            commit = repo.refs[self.refs.resolve(branch_name, repo)].commit
             dt = datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
             return dt.strftime("%Y-%m-%d")
         except GIT_ERRORS as e:
@@ -217,6 +214,13 @@ class BranchQueries:
         self.in_git_operation = True
         try:
             repo = self._get_repo()
+
+            # A remote-only branch has no local checkout, so it cannot have uncommitted
+            # work - and building a temporary worktree to discover that would cost a
+            # checkout per branch, which is what makes this method expensive.
+            if not self.refs.has_local(branch_name, repo):
+                logger.debug(f"Branch {branch_name} is remote-only; skipping worktree probe")
+                return {"modified": False, "untracked": False, "staged": False}
 
             # Check if this is the current branch
             try:
@@ -365,6 +369,13 @@ class BranchQueries:
                     return {"modified": [], "untracked": [], "staged": []}
                 status = repo.git.execute(["git", "-C", worktree_path, "status", "--porcelain"])
             elif branch_name:
+                # A branch with no local head has no working tree anywhere, so it
+                # cannot have uncommitted files. Return before the temp-worktree
+                # probe below, which would try to check out a ref that does not
+                # exist locally.
+                if not self.refs.has_local(branch_name, repo):
+                    return {"modified": [], "untracked": [], "staged": []}
+
                 # Check if this is the current branch
                 try:
                     current_branch = repo.active_branch.name
@@ -456,6 +467,11 @@ class BranchQueries:
                 return diff or "No changes"
 
             elif branch_name:
+                # No local head means no working tree to diff. Same reasoning as
+                # get_file_status_detailed: return before the temp-worktree probe.
+                if not self.refs.has_local(branch_name, repo):
+                    return "Branch exists only on the remote (no working tree to diff)"
+
                 # Check if this is the current branch
                 try:
                     current_branch = repo.active_branch.name
@@ -507,8 +523,9 @@ class BranchQueries:
             repo = self._get_repo()
 
             # Get commits on branch not on main
+            rev = self.refs.resolve(branch_name, repo)
             commits = []
-            for commit in repo.iter_commits(f"{main_branch}..{branch_name}", max_count=limit):
+            for commit in repo.iter_commits(f"{main_branch}..{rev}", max_count=limit):
                 commits.append(
                     {
                         "sha": commit.hexsha[:7],
@@ -585,11 +602,12 @@ class BranchQueries:
         """
         try:
             repo = self._get_repo()
-            ahead = sum(1 for _ in repo.iter_commits(f"{main_branch}..{branch_name}"))
-            behind = sum(1 for _ in repo.iter_commits(f"{branch_name}..{main_branch}"))
+            rev = self.refs.resolve(branch_name, repo)
+            ahead = sum(1 for _ in repo.iter_commits(f"{main_branch}..{rev}"))
+            behind = sum(1 for _ in repo.iter_commits(f"{rev}..{main_branch}"))
 
             try:
-                repo.git.merge_base("--is-ancestor", branch_name, main_branch)
+                repo.git.merge_base("--is-ancestor", rev, main_branch)
                 tip_reachable_from_main = True
             except git.exc.GitCommandError as e:
                 if getattr(e, "status", None) == 1:
@@ -604,7 +622,7 @@ class BranchQueries:
                 "tip_reachable_from_main": tip_reachable_from_main,
             }
 
-            merge_base = repo.git.merge_base(branch_name, main_branch).strip()
+            merge_base = repo.git.merge_base(rev, main_branch).strip()
             if merge_base:
                 comparison["merge_base"] = merge_base
 
@@ -631,8 +649,9 @@ class BranchQueries:
             repo = self._get_repo()
 
             # Get commits ahead (on branch but not on main)
+            rev = self.refs.resolve(branch_name, repo)
             ahead_commits = []
-            for commit in repo.iter_commits(f"{main_branch}..{branch_name}", max_count=10):
+            for commit in repo.iter_commits(f"{main_branch}..{rev}", max_count=10):
                 ahead_commits.append(
                     {
                         "sha": commit.hexsha[:7],
@@ -645,7 +664,7 @@ class BranchQueries:
 
             # Get commits behind (on main but not on branch)
             behind_commits = []
-            for commit in repo.iter_commits(f"{branch_name}..{main_branch}", max_count=10):
+            for commit in repo.iter_commits(f"{rev}..{main_branch}", max_count=10):
                 behind_commits.append(
                     {
                         "sha": commit.hexsha[:7],
