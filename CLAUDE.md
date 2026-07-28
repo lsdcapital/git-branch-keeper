@@ -82,6 +82,26 @@ The TUI uses Textual framework with an event-driven design to handle keyboard in
 - DataTable has a built-in loading indicator for async data fetching
 - Cache service enables fast initial load with background refresh
 
+**Marks are keyed by branch name; rows are not.** `_row_key_for_branch()` keys
+worktree rows as `name:path` so the DataTable can tell them apart, but
+`marked_branches` / `force_marked_branches` hold plain names. That is deliberate -
+marking a branch lights up its worktree row too, and deletion removes the worktree
+and then the branch as one operation. It also means anything *counting* candidates
+must count names, and must ask `_plan_deletable()` rather than filtering rows with
+`is_deletable()`: the planner additionally drops the checked-out branch and adds
+branches unblocked by removing a clean worktree. Counting rows made the status bar
+advertise `Deletable: 1 | Marked: 0` for a current branch nothing could ever mark -
+routine when GBK runs from a linked worktree, where the checked-out branch is a
+feature branch. See `tests/test_tui_app.py::test_status_bar_*`.
+
+**Cached rows are painted before the real analysis lands**, so startup applies two
+results in a row. The second apply preserves marks (the user may have marked
+something meanwhile) but passes `mark_newly_deletable=True`, which auto-marks only
+branches that were *not* candidates in the first pass. Without it, a branch merged
+since the previous run renders as `merged` yet stays unmarked until the next
+launch, because the cached pass never offered it. `action_refresh` (`r`) preserves
+marks unconditionally - an unmark there is a deliberate choice.
+
 ## Important Patterns
 
 ### Merge Detection Strategy
@@ -127,6 +147,25 @@ merged — diff-text containment doesn't prove the work is in main (it may have 
 reverted). Instead it sets `MergeDetector._likely_squash_merged` (exposed via
 `is_likely_squash_merged()`), which surfaces a "possible squash-merge - verify before
 deleting" note. A heuristic guess must never make a branch auto-deletable.
+
+**A partial result from check 2 is kept, not discarded.** `git cherry` answers per
+commit, but merging requires *all* of them to be `-`. When the answer is mixed, the
+branch is correctly not merged — and the mix is itself the finding: work reached main
+and a commit was left behind. That is the ordinary shape of an orphan in a squash-merge
+repo, where a commit pushed moments after the PR merges never lands. `_check_patch_equivalent`
+records `(landed, total)` in `MergeDetector._partial_merge` (exposed via
+`get_partial_merge()`), surfaced as a "partially merged: 1/2 commits in main, 1 not
+landed" note. Advisory only — a partial merge is not a merge, and nothing about this
+makes a branch deletable.
+
+Recorded only when `landed > 0`. "0/N commits in main" is true of every in-progress
+branch in every repo, so emitting it would put a note on every active branch and cost
+the Notes column the scannability that makes the partial case stand out. The distinction
+matters because `active` is GBK's *no-signal* bucket, not a "someone is working on this"
+claim: without this note a 1-of-2-landed branch renders exactly like a branch cut an hour
+ago. Note that the git-native path is the only one that reports this when GitHub auth is
+absent — the PR-derived "merged but local tip differs from PR head" note covers a similar
+case but requires a token. See `tests/test_partial_merge_note.py`.
 
 When GitHub auth is available (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or
 authenticated `gh` CLI), PR metadata is fetched inside each branch processing worker

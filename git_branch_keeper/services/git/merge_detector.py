@@ -54,6 +54,13 @@ class MergeDetector:
         # never treated as merged (a fuzzy guess must not trigger deletion).
         self._likely_squash_merged: set = set()
         self._squash_lock = Lock()
+        # (landed, total) unique-commit counts for branches where `git cherry` found
+        # *some* but not all commits already applied to main - the signature of work
+        # that landed while a straggler commit did not (e.g. a changeset pushed
+        # seconds after the PR squash-merged). Advisory only: a partial merge is by
+        # definition not a merge, so this never makes a branch deletable.
+        self._partial_merge: dict[str, tuple[int, int]] = {}
+        self._partial_lock = Lock()
         self._merge_detection_info: dict[str, dict[str, Any]] = {}
         self._merge_info_lock = Lock()
         # (patch-id, diff length) per first-parent commit on main, shared by every
@@ -281,6 +288,8 @@ class MergeDetector:
         self._set_merge_detection_info(branch_name, self._default_merge_detection_info("none"))
         with self._squash_lock:
             self._likely_squash_merged.discard(branch_name)
+        with self._partial_lock:
+            self._partial_merge.pop(branch_name, None)
 
         try:
             # Skip if it's a tag
@@ -441,6 +450,20 @@ class MergeDetector:
                 )
                 self._increment_stat("patch_equivalent")
                 return True
+
+            # Not all applied - so not merged, and the branch falls through to the
+            # squash check. But `git cherry` has already told us *how much* landed,
+            # and a mix of '-' and '+' is exactly the orphaned-commit case: the work
+            # reached main and one commit was left behind. Recording it here is free;
+            # recomputing it later would mean running `git cherry` a second time.
+            landed = sum(1 for line in lines if line.startswith("-"))
+            if landed:
+                logger.debug(
+                    f"[patch-equivalent] {branch_name}: {landed}/{len(lines)} unique "
+                    f"commit(s) applied to {main_branch} - partial, not merged"
+                )
+                with self._partial_lock:
+                    self._partial_merge[branch_name] = (landed, len(lines))
         except GIT_ERRORS as e:
             logger.debug(f"[patch-equivalent] Error: {e}")
 
@@ -578,3 +601,14 @@ class MergeDetector:
         """
         with self._squash_lock:
             return branch_name in self._likely_squash_merged
+
+    def get_partial_merge(self, branch_name: str) -> tuple[int, int] | None:
+        """``(landed, total)`` unique commits when some - but not all - of the branch
+        is already in main, else None.
+
+        Only populated when ``landed > 0``: a branch with nothing applied is just an
+        ordinary unmerged branch, which is the normal state of anything in progress
+        and would put a note on every active branch.
+        """
+        with self._partial_lock:
+            return self._partial_merge.get(branch_name)

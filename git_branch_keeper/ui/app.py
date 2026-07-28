@@ -158,20 +158,39 @@ class BranchKeeperApp(App):
 
         branches = deletable_branches
         if branches is None:
-            branches = self.keeper.get_deletable_branches(self.branches, force_mode=False)
+            branches = self._plan_deletable()
 
         for branch in branches:
             self.marked_branches.add(branch.name)
             self.force_marked_branches.discard(branch.name)
+
+    def _currently_deletable_names(self) -> set[str]:
+        """Names the last applied analysis considered cleanup candidates."""
+        if self.analysis is not None:
+            return {branch.name for branch in self.analysis.deletable_branches}
+        return {branch.name for branch in self._plan_deletable()}
 
     def _apply_analysis_result(
         self,
         analysis: BranchAnalysisResult,
         preserve_marks: bool = False,
         preserve_view: bool = False,
+        mark_newly_deletable: bool = False,
     ) -> None:
-        """Apply shared branch analysis output to the TUI widgets."""
+        """Apply shared branch analysis output to the TUI widgets.
+
+        `preserve_marks` keeps whatever the user has marked (and, just as
+        importantly, deliberately unmarked). `mark_newly_deletable` is for the
+        startup path, where rows are painted from cache and then replaced by a
+        background analysis: a branch that only becomes a cleanup candidate in
+        that second pass was never offered to the user, so it still needs its
+        auto-mark. Without it a branch merged since the previous run shows up as
+        `merged` but stays unmarked until the next launch.
+        """
         table_view = self._capture_table_view() if preserve_view else None
+        previously_deletable = (
+            self._currently_deletable_names() if preserve_marks and mark_newly_deletable else set()
+        )
 
         self.analysis = analysis
         self.branches = analysis.branches
@@ -188,6 +207,14 @@ class BranchKeeperApp(App):
 
         if not preserve_marks:
             self._auto_mark_deletable(analysis.deletable_branches)
+        elif mark_newly_deletable:
+            self._auto_mark_deletable(
+                [
+                    branch
+                    for branch in analysis.deletable_branches
+                    if branch.name not in previously_deletable
+                ]
+            )
         self._populate_table()
         if table_view is not None:
             self._restore_table_view(table_view)
@@ -577,17 +604,18 @@ class BranchKeeperApp(App):
         """Update status bar with current stats."""
         status = self.query_one("#status-bar", Static)
 
+        # Total counts table rows; every other figure counts branch names, because
+        # that is what a mark applies to. A branch and its worktree are two rows
+        # but one name, one mark, and one cleanup decision.
         total = len(self.branches)
         marked = len(self.marked_branches)
-        deletable = sum(
-            1
-            for b in self.branches
-            if BranchValidationService.is_deletable(b, self.keeper.protected_branches)
-        )
-        protected = sum(
-            1
-            for b in self.branches
-            if BranchValidationService.is_protected(b.name, self.keeper.protected_branches)
+        deletable = len({branch.name for branch in self._plan_deletable()})
+        protected = len(
+            {
+                branch.name
+                for branch in self.branches
+                if BranchValidationService.is_protected(branch.name, self.keeper.protected_branches)
+            }
         )
 
         sort_order = "desc" if self.sort_reverse else "asc"
@@ -663,26 +691,36 @@ class BranchKeeperApp(App):
             new_row = min(saved_row + 1, len(self.branches) - 1)
             table.cursor_coordinate = Coordinate(new_row, 0)
 
-    def action_mark_all_deletable(self) -> None:
-        """Mark all deletable branches (normal mode only)."""
-        if self._block_if_refreshing("mark all"):
-            return
+    def _plan_deletable(self, force_mode: bool = False) -> list[BranchDetails]:
+        """The branches "mark all" would mark, via the keeper's shared planning.
 
-        # Use shared cleanup planning from keeper (normal mode). This includes
-        # merged/stale branches that become deletable after a clean worktree is
-        # removed in the same operation.
+        Never filter rows with `is_deletable` directly for this: the planner also
+        drops the checked-out branch and worktree rows, and adds branches that only
+        become deletable once a clean worktree is removed in the same operation.
+        Counting rows instead advertises candidates that cannot be marked - notably
+        the current branch, which is a merged feature branch whenever GBK runs from
+        a linked worktree.
+        """
         removable_worktrees = self.keeper.get_removable_worktrees(self.branches)
-        deletable_branches = self.keeper.get_deletable_branches(self.branches, force_mode=False)
+        deletable_branches = self.keeper.get_deletable_branches(
+            self.branches, force_mode=force_mode
+        )
         deletable_branches.extend(
             self.keeper.get_branches_unblocked_by_worktree_removal(
                 self.branches,
                 branches_to_delete=deletable_branches,
                 worktrees_to_remove=removable_worktrees,
-                force_mode=False,
+                force_mode=force_mode,
             )
         )
+        return deletable_branches
 
-        for branch in deletable_branches:
+    def action_mark_all_deletable(self) -> None:
+        """Mark all deletable branches (normal mode only)."""
+        if self._block_if_refreshing("mark all"):
+            return
+
+        for branch in self._plan_deletable():
             self.marked_branches.add(branch.name)
             # Remove from force-marked if it was there
             self.force_marked_branches.discard(branch.name)
@@ -1033,8 +1071,7 @@ class BranchKeeperApp(App):
             )
             self.push_screen(
                 InfoScreen(
-                    "Remote branches were deleted too. Restore them manually with:\n\n"
-                    f"{commands}"
+                    f"Remote branches were deleted too. Restore them manually with:\n\n{commands}"
                 )
             )
 
@@ -1141,6 +1178,7 @@ class BranchKeeperApp(App):
                     analysis,
                     preserve_marks=preserve_existing_rows,
                     preserve_view=preserve_existing_rows,
+                    mark_newly_deletable=True,
                 )
             else:
                 self._set_status_message("No branches found", severity="warning")
@@ -1184,6 +1222,7 @@ class BranchKeeperApp(App):
                     analysis,
                     preserve_marks=preserve_existing_rows,
                     preserve_view=preserve_existing_rows,
+                    mark_newly_deletable=True,
                 )
             else:
                 self._set_status_message("No branches found", severity="warning")

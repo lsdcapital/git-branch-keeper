@@ -23,7 +23,7 @@ from git_branch_keeper.models.branch import (
 from git_branch_keeper.ui.app import BranchKeeperApp
 
 
-def _branch(name, status=BranchStatus.MERGED):
+def _branch(name, status=BranchStatus.MERGED, *, is_worktree=False, in_worktree=False, wt=None):
     return BranchDetails(
         name=name,
         last_commit_date="2024-01-01",
@@ -34,6 +34,9 @@ def _branch(name, status=BranchStatus.MERGED):
         staged_files=False,
         has_remote=False,
         sync_status="local-only",
+        is_worktree=is_worktree,
+        in_worktree=in_worktree,
+        worktree_path=wt,
     )
 
 
@@ -281,6 +284,120 @@ async def test_undo_recent_deletion_binding_restores_latest_batch(
     assert restored_repo.heads["feature/deleted-one"].commit.hexsha == sha_one
     assert restored_repo.heads["feature/deleted-two"].commit.hexsha == sha_two
     restored_repo.close()
+
+
+async def test_startup_refresh_marks_branch_that_became_deletable(make_app):
+    """A branch merged since the last run must still get its auto-mark.
+
+    Startup paints cached rows first, then replaces them with a fresh analysis
+    while preserving marks. Regression guard: the branch was `active` in the
+    cache, so the first pass never offered it, and preserving marks alone would
+    leave it rendered as `merged` but unmarked until the next launch.
+    """
+    cached = [_branch("feature/x", status=BranchStatus.ACTIVE)]
+    app = make_app(cached, cleanup_mode=True)
+
+    async with app.run_test() as pilot:
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=cached, deletable_branches=[], is_complete=False)
+        )
+        assert app.marked_branches == set()
+
+        refreshed = [_branch("feature/x", status=BranchStatus.MERGED)]
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=refreshed, deletable_branches=list(refreshed)),
+            preserve_marks=True,
+            preserve_view=True,
+            mark_newly_deletable=True,
+        )
+        await pilot.pause()
+
+        assert app.marked_branches == {"feature/x"}
+
+
+async def test_startup_refresh_keeps_user_unmark_of_already_offered_branch(make_app):
+    """Re-marking must be limited to branches the user was never offered."""
+    merged = [_branch("feature/x", status=BranchStatus.MERGED)]
+    app = make_app(merged, cleanup_mode=True)
+
+    async with app.run_test() as pilot:
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=merged, deletable_branches=list(merged))
+        )
+        assert app.marked_branches == {"feature/x"}
+
+        app._unmark_with_hierarchy("feature/x")
+
+        refreshed = [_branch("feature/x", status=BranchStatus.MERGED)]
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=refreshed, deletable_branches=list(refreshed)),
+            preserve_marks=True,
+            preserve_view=True,
+            mark_newly_deletable=True,
+        )
+        await pilot.pause()
+
+        assert app.marked_branches == set()
+
+
+async def test_manual_refresh_never_re_marks(make_app):
+    """`r` preserves marks verbatim - an unmark there is a deliberate choice."""
+    cached = [_branch("feature/x", status=BranchStatus.ACTIVE)]
+    app = make_app(cached, cleanup_mode=True)
+
+    async with app.run_test() as pilot:
+        app._apply_analysis_result(BranchAnalysisResult(branches=cached, deletable_branches=[]))
+
+        refreshed = [_branch("feature/x", status=BranchStatus.MERGED)]
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=refreshed, deletable_branches=list(refreshed)),
+            preserve_marks=True,
+            preserve_view=True,
+        )
+        await pilot.pause()
+
+        assert app.marked_branches == set()
+
+
+async def test_status_bar_deletable_excludes_the_checked_out_branch(make_app, git_repo):
+    """ "Deletable" must mean "what pressing `a` would mark".
+
+    Counting rows with `is_deletable` instead of asking the planner advertised
+    the current branch as a candidate. That is not hypothetical: running GBK from
+    a linked worktree makes the checked-out branch a merged feature branch, and
+    the status bar then read `Deletable: 1 | Marked: 0` forever.
+    """
+    git_repo.git.checkout("-b", "feature/current")
+    app = make_app([_branch("main", status=BranchStatus.ACTIVE), _branch("feature/current")])
+
+    async with app.run_test() as pilot:
+        await pilot.press("a")
+        await pilot.pause()
+
+        status = str(app.query_one("#status-bar").render())
+        assert "Deletable: 0" in status
+        assert "Marked: 0" in status
+        assert app.marked_branches == set()
+
+
+async def test_status_bar_counts_a_branch_and_its_worktree_as_one_candidate(make_app):
+    """Rows are keyed by name+path, marks by name - the counts follow the marks."""
+    rows = [
+        _branch("main", status=BranchStatus.ACTIVE),
+        _branch("feature/wt", in_worktree=True, wt="/tmp/wt"),
+        _branch("feature/wt", is_worktree=True, wt="/tmp/wt"),
+    ]
+    app = make_app(rows)
+
+    async with app.run_test() as pilot:
+        await pilot.press("a")
+        await pilot.pause()
+
+        status = str(app.query_one("#status-bar").render())
+        assert "Total: 3" in status  # rows
+        assert "Deletable: 1" in status  # names
+        assert "Marked: 1" in status
+        assert app.marked_branches == {"feature/wt"}
 
 
 async def test_quit_binding_exits(make_app):

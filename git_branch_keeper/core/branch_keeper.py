@@ -1559,11 +1559,10 @@ class BranchKeeper:
 
             # If branch had PR that was closed without merging
             elif pr_info["closed"]:
-                notes = "PR closed without merging"
-                # Still need to determine if it's stale or active
-                status = self.branch_status_service.get_branch_status(
-                    branch, self.main_branch, pr_data
-                )
+                # Closing one PR does not prove the work never reached main: it may
+                # have arrived through another PR, a cherry-pick, or a rebase. Keep
+                # the provider event as context and let local Git determine status.
+                append_note("PR closed without merging")
 
         # If status not determined by PR data, use git analysis
         if status is None:
@@ -1579,6 +1578,19 @@ class BranchKeeper:
             append_note(f"squash-merged: exact patch-id match in {short_sha}")
         elif status != BranchStatus.MERGED and self.git_service.is_likely_squash_merged(branch):
             append_note("possible squash-merge - verify before deleting")
+
+        # Some commits landed, some did not. Without this the branch reports as plain
+        # `active` - indistinguishable from one being worked on - and a commit left
+        # behind after a squash-merge is invisible unless GitHub auth happens to be
+        # configured. Advisory only; a partial merge is not a merge.
+        if status != BranchStatus.MERGED:
+            partial = self.git_service.get_partial_merge(branch)
+            if partial:
+                landed, total = partial
+                append_note(
+                    f"partially merged: {landed}/{total} commits in main, "
+                    f"{total - landed} not landed"
+                )
 
         if status != BranchStatus.MERGED and merge_detection.get("truncated"):
             scan_limit = merge_detection.get("scan_limit") or "configured limit"

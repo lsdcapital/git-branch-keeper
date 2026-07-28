@@ -111,6 +111,14 @@ class GitOperations:
         """
         return self.merge_detector.is_likely_squash_merged(branch_name)
 
+    def get_partial_merge(self, branch_name: str) -> tuple[int, int] | None:
+        """``(landed, total)`` unique commits when only part of the branch is in main.
+
+        Delegates to MergeDetector. Only meaningful after is_branch_merged() has run
+        for the branch (that is when `git cherry` executes).
+        """
+        return self.merge_detector.get_partial_merge(branch_name)
+
     def get_merge_detection_info(self, branch_name: str) -> dict:
         """Get structured merge-detection details for display/JSON output."""
         return self.merge_detector.get_merge_detection_info(branch_name)

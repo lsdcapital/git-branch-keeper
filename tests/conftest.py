@@ -202,6 +202,7 @@ def mock_git_service(mock_config, mock_git_repo):
     # branches override this explicitly.
     service.is_unstarted_branch = Mock(return_value=False)
     service.is_likely_squash_merged = Mock(return_value=False)
+    service.get_partial_merge = Mock(return_value=None)
     service.is_tag = Mock(return_value=False)
 
     return service

@@ -345,6 +345,8 @@ def _confidence(
         uncertainties.append("possible_squash_merge_requires_human_verification")
     if merge_detection.get("truncated"):
         uncertainties.append("squash_merge_scan_was_truncated")
+    if branch.notes and "partially merged:" in branch.notes:
+        uncertainties.append("branch_partially_applied_to_main")
     if branch.pr_details and branch.pr_details.get("head_matches_local") is False:
         uncertainties.append("local_branch_tip_differs_from_merged_pr_head")
     if not comparison.get("checked", False):
