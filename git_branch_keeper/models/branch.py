@@ -29,8 +29,8 @@ class SyncStatus(Enum):
     BEHIND = "behind"
     DIVERGED = "diverged"
     LOCAL_ONLY = "local-only"
-    # Exists on the remote with no local head. Not deletable in this slice: deleting it
-    # means `git push origin --delete`, which the deletion journal cannot undo.
+    # Exists on the remote with no local head. Positively merged rows are remote
+    # cleanup candidates; stale/unmerged rows remain read-only.
     REMOTE_ONLY = "remote-only"
     MERGED_GIT = "merged-git"
     MERGED_PR = "merged-pr"

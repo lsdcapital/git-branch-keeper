@@ -5,27 +5,41 @@ branches while 41 existed on origin, and reporting "nothing to clean up" for a r
 carrying dozens of prunable remote branches. Branch accumulation is a *remote*
 problem - local branches are self-limiting because you notice them.
 
-These tests pin the three things that make remote-only analysis safe:
+These tests pin the three things that make remote-only analysis and cleanup safe:
 
 1. Every git call resolves the name to a rev. `GIT_ERRORS` includes `LookupError`,
    and `IndexError` subclasses it, so `repo.refs["remote-only-name"]` fails
    *silently* and degrades a row to age 0 / not-merged rather than erroring.
-2. Remote-only branches are never deletable. Deleting one means
-   `git push origin --delete`, which the deletion journal cannot undo.
+2. Only positively merged remote-only branches are deletable. Their tip is journaled
+   and the remote push uses a lease so unseen upstream commits are preserved.
 3. The temp-worktree probe is skipped. It costs a checkout per branch; running it
    for 38 remote branches would make GBK unusable.
 """
 
 import os
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import git
 import pytest
 
 from git_branch_keeper.core import BranchKeeper
+from git_branch_keeper.formatters import format_remote_status
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus, SyncStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.services.git.refs import BranchRefResolver
+
+
+@pytest.mark.parametrize(
+    ("has_remote", "has_local", "expected"),
+    [
+        (False, True, "local"),
+        (True, True, "both"),
+        (True, False, "remote"),
+    ],
+)
+def test_remote_status_uses_plain_location_labels(has_remote, has_local, expected):
+    assert format_remote_status(has_remote, has_local) == expected
 
 
 def _commit(repo, path, fname, msg, content):
@@ -334,9 +348,16 @@ def _remote_only(status: BranchStatus) -> BranchDetails:
     )
 
 
-@pytest.mark.parametrize("status", [BranchStatus.MERGED, BranchStatus.STALE])
-def test_remote_only_branch_is_never_deletable(status):
-    assert BranchValidationService.is_deletable(_remote_only(status), ["main"]) is False
+def test_merged_remote_only_branch_is_deletable():
+    assert BranchValidationService.is_deletable(
+        _remote_only(BranchStatus.MERGED), ["main"]
+    ) is True
+
+
+def test_stale_remote_only_branch_is_not_deletable_without_merge_proof():
+    assert BranchValidationService.is_deletable(
+        _remote_only(BranchStatus.STALE), ["main"]
+    ) is False
 
 
 def test_local_counterpart_of_the_same_row_stays_deletable():
@@ -347,7 +368,7 @@ def test_local_counterpart_of_the_same_row_stays_deletable():
     assert BranchValidationService.is_deletable(branch, ["main"]) is True
 
 
-def test_remote_only_merged_branch_is_absent_from_deletable_branches(repo_with_remote):
+def test_remote_only_merged_branch_is_a_deletion_candidate(repo_with_remote):
     path, repo = repo_with_remote
     repo.git.checkout("-b", "feat/merged")
     _commit(repo, path, "feat.md", "feature", BODY)
@@ -360,11 +381,10 @@ def test_remote_only_merged_branch_is_absent_from_deletable_branches(repo_with_r
     result = keeper.analyze_branches(show_progress=False)
 
     assert "feat/merged" in {b.name for b in result.branches}
-    assert "feat/merged" not in {b.name for b in result.deletable_branches}
+    assert "feat/merged" in {b.name for b in result.deletable_branches}
 
 
-def test_force_mode_does_not_bypass_the_remote_only_guard(repo_with_remote):
-    """force_mode skips is_deletable() entirely, so the guard is duplicated in the loop."""
+def test_force_mode_keeps_merged_remote_only_branch_eligible(repo_with_remote):
     path, repo = repo_with_remote
     repo.git.checkout("-b", "feat/merged")
     _commit(repo, path, "feat.md", "feature", BODY)
@@ -377,11 +397,10 @@ def test_force_mode_does_not_bypass_the_remote_only_guard(repo_with_remote):
     result = keeper.analyze_branches(show_progress=False)
     forced = keeper.get_deletable_branches(result.branches, force_mode=True)
 
-    assert "feat/merged" not in {b.name for b in forced}
+    assert "feat/merged" in {b.name for b in forced}
 
 
-def test_delete_boundary_refuses_remote_only_branch_even_in_dry_run(repo_with_remote):
-    """A stale row must not become a successful dry-run deletion plan."""
+def test_delete_boundary_plans_merged_remote_only_branch_in_dry_run(repo_with_remote):
     path, repo = repo_with_remote
     repo.git.checkout("-b", "feat/merged")
     _commit(repo, path, "feat.md", "feature", BODY)
@@ -393,9 +412,138 @@ def test_delete_boundary_refuses_remote_only_branch_even_in_dry_run(repo_with_re
 
     success, error = keeper.delete_branch("feat/merged", "merged")
 
-    assert success is False
-    assert error and "remote-only" in error
+    assert success is True
+    assert error is None
     assert "origin/feat/merged" in [ref.name for ref in repo.remote("origin").refs]
+
+
+def test_delete_boundary_accepts_live_merged_pr_proof_for_remote_only_branch(
+    repo_with_remote,
+):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/squash-pr")
+    _commit(repo, path, "feat.md", "feature", BODY)
+    head_sha = repo.head.commit.hexsha
+    _push_and_drop_local(repo, "feat/squash-pr")
+    keeper = _keeper(path)
+    keeper.github_service.has_open_pr = Mock(return_value=False)
+    keeper.github_service.get_pr_data_for_branch = Mock(
+        return_value={
+            "feat/squash-pr": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "head_sha": head_sha,
+            }
+        }
+    )
+
+    success, error = keeper.delete_branch("feat/squash-pr", "merged")
+
+    assert success is True
+    assert error is None
+    assert "origin/feat/squash-pr" in [ref.name for ref in repo.remote("origin").refs]
+
+
+def test_delete_boundary_rejects_merged_pr_when_remote_tip_no_longer_matches(
+    repo_with_remote,
+):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/continued-pr")
+    _commit(repo, path, "feat.md", "feature", BODY)
+    _push_and_drop_local(repo, "feat/continued-pr")
+    keeper = _keeper(path)
+    keeper.github_service.has_open_pr = Mock(return_value=False)
+    keeper.github_service.get_pr_data_for_branch = Mock(
+        return_value={
+            "feat/continued-pr": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "head_sha": "0" * 40,
+            }
+        }
+    )
+
+    success, error = keeper.delete_branch("feat/continued-pr", "merged")
+
+    assert success is False
+    assert error and "No longer merged" in error
+    assert "origin/feat/continued-pr" in [ref.name for ref in repo.remote("origin").refs]
+
+
+def test_delete_boundary_removes_merged_remote_only_branch_and_journals_tip(
+    repo_with_remote,
+):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/merged")
+    _commit(repo, path, "feat.md", "feature", BODY)
+    deleted_sha = repo.head.commit.hexsha
+    repo.git.push("origin", "feat/merged")
+    repo.git.checkout("main")
+    repo.git.merge("feat/merged", "--no-ff", "-m", "Merge feat/merged")
+    repo.git.branch("-D", "feat/merged")
+    keeper = _keeper(path, {"dry_run": False})
+    keeper.git_service.deletion_journal.journal_file = Path(path) / "test-remote-only.jsonl"
+
+    success, error = keeper.delete_branch("feat/merged", "merged")
+
+    assert success is True
+    assert error is None
+    repo.git.fetch("origin", prune=True)
+    assert "origin/feat/merged" not in [ref.name for ref in repo.remote("origin").refs]
+    entry = keeper.git_service.deletion_journal.deletions()[-1]
+    assert entry["sha"] == deleted_sha
+    assert entry["had_remote"] is True
+    assert entry["remote_deleted"] is True
+
+
+def test_remote_only_delete_refuses_an_upstream_tip_that_advanced(repo_with_remote):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/merged")
+    _commit(repo, path, "feat.md", "feature", BODY)
+    repo.git.push("origin", "feat/merged")
+    repo.git.checkout("main")
+    repo.git.merge("feat/merged", "--no-ff", "-m", "Merge feat/merged")
+    repo.git.branch("-D", "feat/merged")
+
+    # Advance the real remote from another clone without refreshing this repo's
+    # origin/feat/merged tracking ref. Merge revalidation sees the old merged tip;
+    # the push lease must still preserve the unseen new commit.
+    other_path = Path(path).parent / "other"
+    other = git.Repo.clone_from(str(Path(path).parent / "origin.git"), other_path)
+    other.config_writer().set_value("user", "name", "T").release()
+    other.config_writer().set_value("user", "email", "t@t.co").release()
+    other.git.checkout("feat/merged")
+    _commit(other, str(other_path), "later.md", "continued work", "not merged\n")
+    advanced_sha = other.head.commit.hexsha
+    other.git.push("origin", "feat/merged")
+    other.close()
+
+    keeper = _keeper(path, {"dry_run": False})
+    keeper.git_service.deletion_journal.journal_file = Path(path) / "test-lease.jsonl"
+
+    success, error = keeper.delete_branch("feat/merged", "merged")
+
+    assert success is False
+    assert error and "advanced" in error
+    bare = git.Repo(Path(path).parent / "origin.git")
+    assert bare.heads["feat/merged"].commit.hexsha == advanced_sha
+    bare.close()
+
+
+def test_remote_only_stale_branch_cannot_cross_the_delete_boundary(repo_with_remote):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/stale")
+    _commit(repo, path, "stale.md", "unmerged", BODY)
+    _push_and_drop_local(repo, "feat/stale")
+    keeper = _keeper(path, {"dry_run": False})
+
+    success, error = keeper.delete_branch("feat/stale", "stale")
+
+    assert success is False
+    assert error and "positive merge proof" in error
+    assert "origin/feat/stale" in [ref.name for ref in repo.remote("origin").refs]
 
 
 def test_git_operation_refuses_remote_only_branch_before_remote_delete(repo_with_remote):
@@ -549,9 +697,9 @@ def test_blocked_summary_names_the_reason(repo_with_remote):
     keeper._perform_cleanup(keeper.analyze_branches().branches)
 
     output = "\n".join(printed)
-    assert "No branches or worktrees to clean up!" in output
-    assert "2 merged/stale branches shown above, none deletable" in output
-    assert "2 remote-only" in output
+    assert "Dry run: found 2 branches" in output
+    assert "Would delete remote-only branch origin/feat/one" in output
+    assert "Would delete remote-only branch origin/feat/two" in output
 
 
 def test_blocked_summary_is_silent_when_nothing_was_held_back(repo_with_remote):
@@ -622,7 +770,7 @@ def test_cache_invalidates_when_local_branch_becomes_remote_only(repo_with_remot
 
     assert branch.has_local is False
     assert "feat/merged" in second.branches_to_process
-    assert "feat/merged" not in {b.name for b in second.deletable_branches}
+    assert "feat/merged" in {b.name for b in second.deletable_branches}
 
 
 def test_cache_invalidates_when_remote_only_branch_becomes_local(repo_with_remote):

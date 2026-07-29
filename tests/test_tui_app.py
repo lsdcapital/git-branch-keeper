@@ -89,7 +89,7 @@ async def test_app_mounts_and_renders_rows(make_app):
         assert table.row_count == 2
         # Status bar reflects the totals
         status = _status_text(app)
-        assert "Delete scope: LOCAL ONLY — remotes kept [d]" in status
+        assert "Delete scope: LOCAL + MERGED REMOTE-ONLY [d]" in status
         assert "Total: 2" in status
         await pilot.pause()
 
@@ -109,7 +109,7 @@ async def test_status_feedback_stays_on_fixed_third_line(make_app):
         assert isinstance(content, Text)
         lines = _status_text(app).split("\n")
         assert len(lines) == 3
-        assert lines[0] == "Delete scope: LOCAL ONLY — remotes kept [d]"
+        assert lines[0] == "Delete scope: LOCAL + MERGED REMOTE-ONLY [d]"
         assert lines[1].startswith("Total: 1 | Protected:")
         assert lines[2] == "✓ Branch data refreshed"
         assert status.region.height == initial_height == 5
@@ -132,7 +132,7 @@ async def test_delete_scope_binding_toggles_remote_deletion(make_app):
 
         assert app.keeper.delete_remote is False
         status = _status_text(app)
-        assert "Delete scope: LOCAL ONLY — remotes kept [d]" in status
+        assert "Delete scope: LOCAL + MERGED REMOTE-ONLY [d]" in status
 
 
 async def test_delete_confirmation_explains_local_only_scope(make_app):
@@ -146,7 +146,7 @@ async def test_delete_confirmation_explains_local_only_scope(make_app):
         assert isinstance(app.screen, ConfirmScreen)
         message = app.screen.message
         assert "Deletion scope: LOCAL ONLY" in message
-        assert "Matching branches on origin will be kept" in message
+        assert "Matching remotes for local branches on origin will be kept" in message
         assert "remain visible as remote-only rows" in message
         assert "Cancel and press d to delete local and remote branches together" in message
 
@@ -201,6 +201,18 @@ async def test_mark_all_deletable_marks_merged_branch(make_app):
         await pilot.pause()
         assert "feature/a" in app.marked_branches
         assert "feature/b" in app.marked_branches
+
+
+async def test_cleanup_mode_auto_marks_merged_remote_only_branch(make_app):
+    app = make_app(
+        [_branch("feature/remote-only", has_remote=True, has_local=False)],
+        cleanup_mode=True,
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        assert app.marked_branches == {"feature/remote-only"}
 
 
 async def test_initial_load_uses_table_loader_when_no_cached_rows(make_app, monkeypatch):
@@ -520,8 +532,7 @@ async def test_status_bar_counts_a_branch_and_its_worktree_as_one_candidate(make
         assert app.marked_branches == {"feature/wt"}
 
 
-async def test_status_bar_reports_blocked_candidates(make_app):
-    """`Deletable: 0` under a screen of `merged` rows reads as a bug without this."""
+async def test_status_bar_recommends_merged_remote_only_candidates(make_app):
     rows = [
         _branch("main", status=BranchStatus.ACTIVE),
         _branch("feature/gone", has_remote=True, has_local=False),
@@ -533,8 +544,25 @@ async def test_status_bar_reports_blocked_candidates(make_app):
         await pilot.pause()
 
         status = _status_text(app)
-        assert "Deletable: 0" in status
-        assert "Blocked: 2" in status
+        assert "Deletable: 2" in status
+        assert "Blocked:" not in status
+
+
+async def test_delete_confirmation_calls_out_remote_only_deletion(make_app):
+    app = make_app(
+        [_branch("feature/gone", has_remote=True, has_local=False)]
+    )
+
+    async with app.run_test() as pilot:
+        app.marked_branches.add("feature/gone")
+        app.action_delete_marked()
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen)
+        message = app.screen.message
+        assert "1 merged remote-only branch on origin will be deleted" in message
+        assert "delete-scope toggle does not apply" in message
+        assert "feature/gone (merged, remote only)" in message
 
 
 async def test_status_bar_omits_blocked_when_there_is_nothing_to_explain(make_app):

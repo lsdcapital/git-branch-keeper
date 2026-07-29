@@ -98,7 +98,8 @@ git-branch-keeper --cli --filter merged
 # Preview what would be deleted (RECOMMENDED before cleanup)
 git-branch-keeper --cli --filter merged --dry-run
 
-# Delete merged branches with confirmation prompts (deletes local only, keeps remote)
+# Delete merged branches with confirmation prompts
+# (local branches stay local-only; merged remote-only branches are deleted remotely)
 git-branch-keeper --cli --filter merged --delete
 
 # Also delete the remote branch (affects collaborators)
@@ -110,9 +111,9 @@ git-branch-keeper --cli --filter merged --delete --force
 
 > **⚠️ Safety Note**: Plain CLI mode (`--cli` / `--no-interactive`) is read-only by default. Pass `--delete` to clean up branches, or `--dry-run` to preview cleanup candidates.
 
-> **🌐 Remote branches**: By default, deletion is **local-only** — the remote branch is kept. In the TUI, the current scope is always shown in the status bar; press `d` to switch between **LOCAL ONLY** and **LOCAL + REMOTE** before confirming. In CLI mode, add `--remote` to also delete it on `origin`. Remote deletions affect collaborators and are harder to undo, so they are opt-in.
+> **🌐 Remote branches**: For a branch that exists both locally and remotely, deletion is **local-only** by default — the matching remote branch is kept. In the TUI, press `d` to switch between **LOCAL ONLY** and **LOCAL + REMOTE**; in CLI mode, add `--remote`. This toggle does not apply to a merged remote-only row, whose only possible cleanup action is remote deletion.
 
-> **☁️ Remote-only branches**: Branches that exist on `origin` with no local counterpart are **analyzed and shown by default**, because branch accumulation is mostly a remote problem. They are strictly read-only — git-branch-keeper never deletes a remote-only branch. Pass `--no-remote-branches` for the local-only view. Remote-tracking refs are only as fresh as your last `git fetch`.
+> **☁️ Remote-only branches**: Branches that exist on the selected remote with no local counterpart are **analyzed and shown by default**. Positively merged remote-only branches are cleanup candidates and are marked by default in the TUI; stale or unmerged remote-only branches remain protected. Before deletion, GBK re-verifies the merge and uses a force-with-lease guard so an upstream ref that advanced after analysis is preserved. Pass `--no-remote-branches` for a strictly local view. Remote-tracking refs are only as fresh as your last `git fetch`, so fetch to discover newly merged or newly created refs.
 
 ## 📖 Usage
 
@@ -134,8 +135,8 @@ git-branch-keeper [OPTIONS]
 - `--delete` - Cleanup/delete eligible branches in CLI mode (prompts unless `--force` is used)
 - `--cleanup` - Deprecated alias for `--delete`
 - `--dry-run` - Preview cleanup candidates without deleting or prompting
-- `--remote` - Also delete the remote branch (default: local-only, remote is kept)
-- `--no-remote-branches` - Only analyze branches that exist locally (default: remote-only branches are analyzed too, read-only)
+- `--remote` - Also delete the matching remote for a local branch (default: it is kept)
+- `--no-remote-branches` - Only analyze branches that exist locally (default: remote-only branches are analyzed; merged ones are cleanup candidates)
 - `--force` - Delete without confirmation (legacy behavior: also implies `--delete`; use with caution!)
 - `--refresh` - Bypass cache and refresh all data
 
@@ -171,6 +172,7 @@ git-branch-keeper [OPTIONS]
 | `behind X` | Remote has X commits not pulled |
 | `diverged` | Local and remote have different commits |
 | `local-only` | No remote branch exists |
+| `remote-only` | Remote branch has no local counterpart; deletable only when merged |
 | `merged-git` | Detected as merged by git |
 | `merged-pr` | Merged via GitHub pull request |
 
@@ -187,7 +189,8 @@ git-branch-keeper [OPTIONS]
 | **CLI Cleanup** | `--cli --delete` | Deletes eligible branches with confirmation prompts | ⚠️ **CAUTION** |
 | **Force Mode** | `--cli --delete --force` | Deletes immediately without confirmation | 🔴 **DANGEROUS** |
 | **Dry Run** | `--dry-run` flag | Preview only, no deletion or prompts | ✅ **SAFE** |
-| **Remote deletion** | TUI `d` toggle / CLI `--remote` | Off by default — deletion is local-only unless opted in | ✅ **SAFE default** |
+| **Paired remote deletion** | TUI `d` toggle / CLI `--remote` | Off by default for branches that also exist locally | ✅ **SAFE default** |
+| **Merged remote-only cleanup** | Merged row with Location `remote` | Recommended by default; deletes the remote ref after confirmation | ⚠️ **CAUTION** |
 
 ### ⚠️ Important Safety Warnings
 
@@ -195,7 +198,7 @@ git-branch-keeper [OPTIONS]
 
 2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking when cleanup is enabled. For legacy compatibility, `--force` also implies `--delete`. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
 
-   **Deletion is local-only by default**: the remote branch is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote` in CLI mode. This keeps the easily-recoverable case (local, restorable via reflog and `undo`) separate from the harder-to-undo case (remote, visible to collaborators).
+   **Deletion is local-only by default for paired branches**: when a branch exists both locally and remotely, the remote is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote`. A positively merged remote-only branch is the exception: it is a cleanup candidate by default because no local deletion is possible. It is called out in the confirmation and journaled for `undo`.
 
 3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
    ```bash
@@ -248,7 +251,7 @@ The tool automatically protects:
 - ✅ Current branch you're on
 - ✅ Branches checked out in any other worktree, including the main working tree
 - ✅ The worktree GBK is running in (never removed, even with `--force`)
-- ✅ Branches that exist only on the remote (analyzed and reported, never deleted)
+- ✅ Remote-only branches unless positively confirmed merged (stale alone is not enough)
 
 You can run GBK from inside a linked worktree. It protects whatever the *other*
 worktrees have checked out - including the main working tree, which often holds a
@@ -287,7 +290,7 @@ Create a configuration file to customize behavior. The tool looks for config fil
 | `stale_days` | integer | Days before branch is stale | `30` |
 | `github_token` | string | GitHub personal access token. If omitted, GBK also tries `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token` | `null` |
 | `squash_scan_limit` | integer | First-parent commits on main to scan for exact squash patch-id matches | `500` |
-| `include_remote_branches` | boolean | Analyze branches that exist only on the remote (read-only; they are never deleted) | `true` |
+| `include_remote_branches` | boolean | Analyze remote-only branches; positively merged ones become cleanup candidates | `true` |
 
 ### GitHub Auth Setup (Optional)
 

@@ -16,9 +16,9 @@ from git_branch_keeper.services.branch_validation_service import BranchValidatio
 if TYPE_CHECKING:
     from git_branch_keeper.core import BranchKeeper
 
-# 4: remote-only branches are analyzed. Adds remote.has_local, the
-# REMOTE_ONLY_BRANCH blocker, and the "none" deletion scope.
-SCHEMA_VERSION = 4
+# 5: positively merged remote-only branches are cleanup candidates. Adds the
+# "remote-only" deletion scope and delete_remote_branch recommended action.
+SCHEMA_VERSION = 5
 
 
 def _notes(branch: BranchDetails) -> list[str]:
@@ -70,10 +70,12 @@ def _has_uncommitted_changes(branch: BranchDetails) -> bool:
 
 def _deletion_scope(branch: BranchDetails, delete_remote: bool) -> str:
     """Describe what a branch delete action would affect."""
-    # No local ref to delete, and GBK does not delete remote branches - so unlike
-    # every case below, there is no delete action for this row to have a scope for.
     if not branch.has_local:
-        return "none"
+        return (
+            "remote-only"
+            if branch.has_remote and branch.status == BranchStatus.MERGED
+            else "none"
+        )
     if branch.has_remote and delete_remote:
         return "local-and-remote"
     if branch.has_remote:
@@ -104,13 +106,15 @@ def _branch_deletion_blockers(
                 "This row represents a worktree, not a local branch ref.",
             )
         )
-    if not branch.has_local:
+    if not branch.has_local and not (
+        branch.has_remote and branch.status == BranchStatus.MERGED
+    ):
         blockers.append(
             _blocker(
                 "REMOTE_ONLY_BRANCH",
                 (
-                    "Branch exists only on the remote. git-branch-keeper analyzes "
-                    "remote-only branches but never deletes them."
+                    "Branch exists only on the remote and is not confirmed merged. "
+                    "Only positively merged remote-only branches are cleanup candidates."
                 ),
             )
         )
@@ -464,19 +468,26 @@ def _recommended_actions(
 
     for branch in analysis.deletable_branches:
         reason = format_deletion_reason(branch.status)
-        # GBK deletes local refs with force after its own validation because branches
-        # can be merged by PR, rebase, cherry-pick, or squash without satisfying
-        # `git branch -d` reachability checks.
-        commands = [_command(["git", "branch", "-D", branch.name])]
-        if delete_remote and branch.has_remote:
+        if not branch.has_local:
+            commands = [_command(["git", "push", remote_name, "--delete", branch.name])]
+        else:
+            # GBK deletes local refs with force after its own validation because
+            # branches can be merged by PR, rebase, cherry-pick, or squash without
+            # satisfying `git branch -d` reachability checks.
+            commands = [_command(["git", "branch", "-D", branch.name])]
+        if branch.has_local and delete_remote and branch.has_remote:
             commands.append(_command(["git", "push", remote_name, "--delete", branch.name]))
 
         actions.append(
             {
                 "type": (
-                    "delete_local_and_remote_branch"
-                    if delete_remote and branch.has_remote
-                    else "delete_local_branch"
+                    "delete_remote_branch"
+                    if not branch.has_local
+                    else (
+                        "delete_local_and_remote_branch"
+                        if delete_remote and branch.has_remote
+                        else "delete_local_branch"
+                    )
                 ),
                 "branch": branch.name,
                 "reason": reason,
@@ -637,6 +648,7 @@ def schema_to_dict() -> dict[str, Any]:
             "action_types": [
                 "delete_local_branch",
                 "delete_local_and_remote_branch",
+                "delete_remote_branch",
                 "remove_worktree",
             ],
             "deletion_blockers": [

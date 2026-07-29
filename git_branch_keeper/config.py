@@ -16,7 +16,7 @@ class Config:
     status_filter: str = "all"  # all, merged, stale
     # Analyze branches that exist only on the remote. On by default: branch
     # accumulation is a remote problem, and the local set is a biased sample of it.
-    # Read-only regardless - remote-only branches are never deletable.
+    # Positively merged remote-only branches are cleanup candidates.
     include_remote_branches: bool = True
 
     # Stale branch threshold
@@ -26,7 +26,9 @@ class Config:
     interactive: bool = True
     dry_run: bool = False  # Only applies when a cleanup/delete action is requested
     force: bool = False
-    delete_remote: bool = False  # Opt-in: also delete the remote branch (use --remote)
+    # Opt-in deletion of a local branch's matching remote. Merged remote-only rows
+    # are remote cleanup candidates regardless because no local-only action exists.
+    delete_remote: bool = False
     verbose: bool = False
     debug: bool = False
     refresh: bool = False  # Force refresh, bypass cache

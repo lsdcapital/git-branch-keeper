@@ -12,10 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Deletion journal & `undo`**: every deleted branch is recorded with its tip SHA in
   `~/.git-branch-keeper/deletions.jsonl`; `git-branch-keeper undo [BRANCH]` restores it
   (and `undo --list` shows recent deletions)
-- **Opt-in remote deletion**: deletion is now local-only by default; pass `--remote` to
-  also delete the branch on the remote
+- **Opt-in paired-remote deletion**: when a branch exists locally and remotely, deletion
+  is local-only by default; pass `--remote` to also delete its matching remote ref
 - **Remote auto-detection**: the remote is no longer hardcoded to `origin` — a single
   non-`origin` remote (e.g. `upstream`) is detected and used automatically
+- **Merged remote-only cleanup**: positively merged branches that exist only on the
+  selected remote are now recommended and marked for deletion by default. Stale or
+  unmerged remote-only refs remain protected; deletion re-verifies the merge, uses an
+  exact force-with-lease guard, and journals the tip for `undo`.
 - TUI test coverage (pure marking-logic unit tests plus Textual `run_test` harness tests)
 
 ### Fixed

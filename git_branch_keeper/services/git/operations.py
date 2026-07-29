@@ -156,7 +156,7 @@ class GitOperations:
     # ============================================================================
 
     def get_branch_tip_sha(self, branch_name: str) -> str | None:
-        """Return local branch tip SHA. Delegates to BranchQueries."""
+        """Return the effective local-or-selected-remote tip SHA."""
         return self.branch_queries.get_branch_tip_sha(branch_name)
 
     def has_remote_branch(self, branch_name: str, *, refresh: bool = False) -> bool:
@@ -407,6 +407,71 @@ class GitOperations:
                 # Deliberately broad: report the failure and keep the branch rather than
                 # letting anything unexpected propagate mid-way through a cleanup run.
                 console.print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
+                return False
+            finally:
+                self.ref_resolver.invalidate()
+
+    def delete_remote_only_branch(
+        self,
+        branch_name: str,
+        *,
+        expected_sha: str,
+        dry_run: bool = False,
+        batch_id: str | None = None,
+    ) -> bool:
+        """Delete a remote-only ref if it still has the expected tip.
+
+        This deliberately differs from ``delete_branch``: there is no local head
+        to delete first. A force-with-lease expectation makes the operation fail
+        closed if the upstream branch advanced after it was analyzed.
+        """
+        with self._git_operation():
+            try:
+                repo = self._get_repo()
+                state = self.ref_resolver.snapshot(repo, refresh=True).get(branch_name)
+                if not state or not state.has_remote or state.has_local:
+                    logger.warning(
+                        f"Refusing remote-only deletion of {branch_name}: "
+                        "branch location changed"
+                    )
+                    return False
+                if state.tip_sha != expected_sha:
+                    logger.warning(
+                        f"Refusing remote-only deletion of {branch_name}: "
+                        f"tip changed from {expected_sha[:12]} to {state.tip_sha[:12]}"
+                    )
+                    return False
+
+                if dry_run:
+                    console.print(
+                        f"[yellow]Would delete remote-only branch "
+                        f"{self.remote_name}/{branch_name}[/yellow]"
+                    )
+                    return True
+
+                console.print(
+                    f"Deleting remote-only branch {self.remote_name}/{branch_name}..."
+                )
+                repo.git.push(
+                    self.remote_name,
+                    f":refs/heads/{branch_name}",
+                    force_with_lease=f"refs/heads/{branch_name}:{expected_sha}",
+                )
+                self.deletion_journal.record_deletion(
+                    branch_name,
+                    expected_sha,
+                    had_remote=True,
+                    remote_deleted=True,
+                    remote_name=self.remote_name,
+                    batch_id=batch_id,
+                )
+                console.print(
+                    f"[green]Deleted remote-only branch "
+                    f"{self.remote_name}/{branch_name}[/green]"
+                )
+                return True
+            except Exception as e:  # noqa: BLE001 - deletion must fail closed
+                console.print(f"[red]Error deleting remote branch {branch_name}: {e}[/red]")
                 return False
             finally:
                 self.ref_resolver.invalidate()

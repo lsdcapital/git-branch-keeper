@@ -74,12 +74,13 @@ class DisplayService:
                 branch.name, github_base_url, branch.is_worktree, is_current
             )
             last_commit_date = format_date(branch.last_commit_date)
-            remote_status = format_remote_status(branch.has_remote, branch.has_local)
+            location = format_remote_status(branch.has_remote, branch.has_local)
             status_text = format_display_status(branch, protected_branches)
             changes_indicator = format_changes(branch, current_branch_name)
             pr_display = format_pr_link(branch.pr_status, github_base_url)
 
-            # Match COLUMNS order: Branch, Status, Last Commit, Age, Changes, Sync, Remote, PRs, Notes
+            # Match COLUMNS order: Branch, Status, Last Commit, Age, Changes, Sync,
+            # Location, PRs, Notes
             table.add_row(
                 branch_name,
                 status_text,
@@ -87,7 +88,7 @@ class DisplayService:
                 str(branch.age_days),
                 changes_indicator,
                 branch.sync_status,
-                remote_status,
+                location,
                 pr_display,
                 branch.notes if branch.notes else "",
                 style=row_style,
@@ -98,8 +99,8 @@ class DisplayService:
         if show_summary:
             # Display legend
             console.print("\nLegend:")
-            console.print("✓ = Local and remote      ✗ = Local only")
-            console.print("☁ = Remote only (analyzed, never deleted)")
+            console.print("Location: local = local only      both = local and remote")
+            console.print("          remote = remote only (merged refs can be deleted)")
             console.print("↑ = Unpushed commits      ↓ = Commits to pull")
             console.print("* = Current branch        +M = Modified files")
             console.print("+U = Untracked files      +S = Staged files")
@@ -117,7 +118,9 @@ class DisplayService:
                 console.print("\nBranches that would be deleted:")
                 for branch in branches_to_delete:
                     reason = format_deletion_reason(branch.status)
-                    if branch.has_remote:
+                    if branch.has_remote and not branch.has_local:
+                        remote_info = "remote only"
+                    elif branch.has_remote:
                         remote_info = (
                             "local and remote" if delete_remote else "local only, remote kept"
                         )
@@ -125,10 +128,8 @@ class DisplayService:
                         remote_info = "local only"
                     console.print(f"  {branch.name} ({reason}, {remote_info})")
 
-            # Account for the rest. The counts below report how many branches are
-            # merged/stale; without this, a repo whose merged branches are all
-            # remote-only shows "Merged branches: 36" and no deletion section at
-            # all, leaving the reader to infer why.
+            # Account for merged/stale rows that remain blocked (for example,
+            # stale remote-only refs, which require positive merge proof).
             blocked = BranchValidationService.summarize_blocked(
                 branch_details, protected_branches, current_branch_name
             )

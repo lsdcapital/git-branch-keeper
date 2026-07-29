@@ -25,10 +25,10 @@ def _format_location(branch: BranchDetails) -> str:
     """Describe where a branch lives, for the detail pane's Remote row.
 
     A plain "Yes"/"No" cannot say "remote only", which is the one case the user
-    needs told: those branches are analyzed but can never be deleted here.
+    needs called out because merged remote-only refs are cleanup candidates.
     """
     if branch.has_remote and not branch.has_local:
-        return "Remote only (no local branch; not deletable)"
+        return "Remote only (merged refs are deletable)"
     return "Yes" if branch.has_remote else "No"
 
 
@@ -334,11 +334,11 @@ class TabbedInfoScreen(BaseModal[None]):
         if BranchValidationService.is_protected(self.branch.name, self.keeper.protected_branches):
             blockers.append("Branch is protected")
 
-        # Listed first among the status reasons because it holds regardless of
-        # status: a remote-only branch reported as merged is still not deletable.
-        if self.branch.has_remote and not self.branch.has_local:
+        if not self.branch.has_local and not (
+            self.branch.has_remote and self.branch.status == BranchStatus.MERGED
+        ):
             blockers.append(
-                "Branch exists only on the remote - git-branch-keeper does not delete remote branches"
+                "Remote-only branch is not confirmed merged"
             )
 
         if self.branch.status == BranchStatus.UNSTARTED:

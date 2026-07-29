@@ -22,12 +22,15 @@ class BranchValidationService:
         Returns:
             True if branch can be deleted (is stale/merged, not protected, and has no issues)
         """
-        # Remote-only branches are analysed but never deleted. Deleting one means
-        # `git push origin --delete`, which skips deletion guard 3 (letting `git
-        # branch -d` have the last word), cannot be undone by the deletion journal,
-        # and affects collaborators. That is a separate, separately-guarded change.
+        # A merged remote-only branch is a first-class cleanup candidate. There is
+        # no local ref to inspect or remove, so stale alone is deliberately not
+        # enough: remote-only cleanup requires positive merge proof.
         if not branch.has_local:
-            return False
+            return (
+                branch.has_remote
+                and branch.status == BranchStatus.MERGED
+                and branch.name not in protected_branches
+            )
 
         # Check if branch has issues preventing deletion
         has_uncommitted = (
@@ -61,8 +64,10 @@ class BranchValidationService:
         if branch.is_worktree or branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
             return None
 
-        if not branch.has_local:
-            return "remote-only (git-branch-keeper never deletes remote branches)"
+        if not branch.has_local and not (
+            branch.has_remote and branch.status == BranchStatus.MERGED
+        ):
+            return "remote-only and not confirmed merged"
         if branch.name in protected_branches:
             return "protected"
         if current_branch is not None and branch.name == current_branch:

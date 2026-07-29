@@ -20,18 +20,17 @@ COLUMNS: list[ColumnDefinition] = [
     ColumnDefinition("age", "Age", 8),
     ColumnDefinition("changes", "Branch State", 12),
     ColumnDefinition("sync", "Sync", 12),
-    ColumnDefinition("remote", "Remote", 8),
+    ColumnDefinition("location", "Location", 8),
     ColumnDefinition("prs", "PRs", 15),
     ColumnDefinition("notes", "Notes", 30),
 ]
 
 
-# Symbol constants
-SYMBOL_HAS_REMOTE = "✓"
-SYMBOL_NO_REMOTE = "✗"
-# On the remote with no local head. Distinct from ✓ because the two behave
-# differently: a remote-only branch is analysed but never deletable.
-SYMBOL_REMOTE_ONLY = "☁"
+# Branch location labels. Plain text keeps the three states understandable
+# without a legend and avoids reusing ✓ for both selection and remote presence.
+LOCATION_LOCAL = "local"
+LOCATION_BOTH = "both"
+LOCATION_REMOTE = "remote"
 SYMBOL_MARKED = "✓"
 SYMBOL_UNMARKED = " "
 SYMBOL_CURRENT_BRANCH = " *"

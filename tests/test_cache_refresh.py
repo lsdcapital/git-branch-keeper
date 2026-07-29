@@ -1,12 +1,57 @@
 """Tests for cache persistence during refresh operations."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from git_branch_keeper.core.branch_keeper import BranchKeeper
+from git_branch_keeper.models.branch import BranchDetails, BranchStatus, SyncStatus
+from git_branch_keeper.services import cache_service as cache_service_module
+
+
+class FrozenDateTime(datetime):
+    """Controllable clock for cache age rollover tests."""
+
+    current = datetime(2026, 7, 28, 23, 59, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        current = cls.current
+        return current.astimezone(tz) if tz is not None else current.replace(tzinfo=None)
 
 
 class TestCacheRefreshPersistence:
     """Test that cache is updated correctly during refresh operations."""
+
+    def test_cached_branch_age_rolls_over_at_utc_midnight(
+        self, git_repo, monkeypatch
+    ):
+        """Stable cached rows derive age from their commit date on every load."""
+        cache = cache_service_module.CacheService(git_repo.working_dir)
+        branch = BranchDetails(
+            name="nicer-yes-no-dialog",
+            last_commit_date="2026-07-28",
+            age_days=0,
+            status=BranchStatus.MERGED,
+            modified_files=False,
+            untracked_files=False,
+            staged_files=False,
+            has_remote=True,
+            has_local=False,
+            sync_status=SyncStatus.REMOTE_ONLY.value,
+            pr_status="closed:merged",
+        )
+        cached = cache._serialize_branch(branch, tip_sha="abc123")
+        assert cached["stable"] is True
+
+        monkeypatch.setattr(cache_service_module, "datetime", FrozenDateTime)
+        before_midnight = cache.deserialize_branch(cached)
+        assert before_midnight is not None
+        assert before_midnight.age_days == 0
+
+        FrozenDateTime.current = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        after_midnight = cache.deserialize_branch(cached)
+        assert after_midnight is not None
+        assert after_midnight.age_days == 1
 
     def test_cache_saved_after_refresh(self, git_repo, mock_config):
         """Test that cache is saved after refresh, preserving fresh data."""

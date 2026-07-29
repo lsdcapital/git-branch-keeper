@@ -30,6 +30,11 @@ def has_cleanup_blockers(branch: BranchDetails, protected_branches: list[str]) -
     if branch.name in protected_branches:
         return True
 
+    if not branch.has_local and not (
+        branch.has_remote and branch.status == BranchStatus.MERGED
+    ):
+        return True
+
     return (
         branch.modified_files is True
         or branch.untracked_files is True
@@ -78,7 +83,9 @@ def format_deletion_confirmation_items(
     lines = []
     for branch in branches:
         reason = format_deletion_reason(branch.status)
-        if branch.has_remote:
+        if branch.has_remote and not branch.has_local:
+            remote_info = "remote only"
+        elif branch.has_remote:
             remote_info = "local and remote" if delete_remote else "local only, remote kept"
         else:
             remote_info = "local only"
@@ -101,6 +108,13 @@ def get_branch_style_type(branch: BranchDetails, protected_branches: list[str]) 
         return BranchStyleType.PROTECTED
 
     if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]:
+        # Remote-only cleanup needs positive merge proof. A stale remote ref is
+        # visible for review but is not safe to delete automatically.
+        if not branch.has_local and not (
+            branch.has_remote and branch.status == BranchStatus.MERGED
+        ):
+            return BranchStyleType.WARNING
+
         # Check if this is an orphaned worktree (directory doesn't exist)
         is_orphaned = branch.notes and "[ORPHANED]" in branch.notes
 

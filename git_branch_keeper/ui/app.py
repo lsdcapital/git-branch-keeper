@@ -388,8 +388,8 @@ class BranchKeeperApp(App):
 
         # Add unified columns from COLUMNS constant
         for col in COLUMNS:
-            # Center-justify Remote and Changes columns for better visual alignment
-            if col.key in ["remote", "changes"]:
+            # Center-justify Location and Changes columns for better visual alignment
+            if col.key in ["location", "changes"]:
                 table.add_column(Text(col.label, justify="center"), width=None, key=col.key)
             else:
                 table.add_column(col.label, width=None, key=col.key)
@@ -482,14 +482,15 @@ class BranchKeeperApp(App):
         changes_indicator = format_changes(branch, current_branch_name)
         changes = Text(changes_indicator, justify="center")
 
-        # Remote column - using shared formatter
-        remote_symbol = format_remote_status(branch.has_remote, branch.has_local)
-        remote = Text(remote_symbol, justify="center")
+        # Location column - plain text distinguishes local, paired, and remote-only refs
+        location_label = format_remote_status(branch.has_remote, branch.has_local)
+        location = Text(location_label, justify="center")
 
         # PR column - using shared formatter
         pr_display = format_pr_link(branch.pr_status, github_base_url)
 
-        # Match COLUMNS order: Branch, Status, Last Commit, Age, Changes, Sync, Remote, PRs, Notes
+        # Match COLUMNS order: Branch, Status, Last Commit, Age, Changes, Sync,
+        # Location, PRs, Notes
         # (Plus Mark column at the beginning)
         return (
             mark,
@@ -499,7 +500,7 @@ class BranchKeeperApp(App):
             age_display,
             changes,
             branch.sync_status or "",
-            remote,
+            location,
             pr_display,
             branch.notes or "",
         )
@@ -573,9 +574,15 @@ class BranchKeeperApp(App):
         # Validate ALL related items before marking any
         issues = []
         for branch in matching:
-            if not branch.is_worktree and not branch.has_local:
+            if (
+                not branch.is_worktree
+                and not branch.has_local
+                and not (
+                    branch.has_remote and branch.status == BranchStatus.MERGED
+                )
+            ):
                 logger.debug(f"[MARK_WITH_HIERARCHY] {branch.name} is remote-only")
-                return False, "Cannot mark a remote-only branch for deletion"
+                return False, "Cannot mark a remote-only branch unless it is merged"
 
             # Check protected branches (always enforced)
             if BranchValidationService.is_protected(branch.name, self.keeper.protected_branches):
@@ -661,7 +668,7 @@ class BranchKeeperApp(App):
             scope_text.append("Delete scope: LOCAL + REMOTE [d]", style="bold yellow")
         else:
             scope_text.append(
-                "Delete scope: LOCAL ONLY — remotes kept [d]",
+                "Delete scope: LOCAL + MERGED REMOTE-ONLY [d]",
                 style="bold green",
             )
 
@@ -703,7 +710,7 @@ class BranchKeeperApp(App):
             )
         else:
             self._set_status_message(
-                "Remote deletion disabled — matching remote branches will be kept"
+                "Paired remote deletion disabled — merged remote-only cleanup is unchanged"
             )
 
     def action_toggle_mark(self) -> None:
@@ -879,20 +886,36 @@ class BranchKeeperApp(App):
         branches_list = format_deletion_confirmation_items(
             branches_to_delete, self.keeper.delete_remote
         )
+        remote_only_count = len(
+            {
+                branch.name
+                for branch in branches_to_delete
+                if branch.has_remote and not branch.has_local
+            }
+        )
+        remote_only_message = (
+            f"\n{remote_only_count} merged remote-only branch"
+            f"{'es' if remote_only_count != 1 else ''} on {self.keeper.remote_name} "
+            "will be deleted. "
+            "These have no local ref, so the delete-scope toggle does not apply."
+            if remote_only_count
+            else ""
+        )
 
         if self.keeper.delete_remote:
             scope_message = (
                 "Deletion scope: LOCAL + REMOTE\n"
                 f"Matching branches on {self.keeper.remote_name} will also be deleted. "
                 "Undo restores local branches only; deleted remote branches must be "
-                "pushed back manually.\n"
+                f"pushed back manually.{remote_only_message}\n"
                 "Cancel and press d to keep remote branches instead."
             )
         else:
             scope_message = (
                 "Deletion scope: LOCAL ONLY\n"
-                f"Matching branches on {self.keeper.remote_name} will be kept and may "
-                "remain visible as remote-only rows.\n"
+                f"Matching remotes for local branches on {self.keeper.remote_name} "
+                "will be kept and may "
+                f"remain visible as remote-only rows.{remote_only_message}\n"
                 "Cancel and press d to delete local and remote branches together."
             )
 

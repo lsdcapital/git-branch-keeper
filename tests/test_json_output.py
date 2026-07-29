@@ -6,8 +6,14 @@ from pathlib import Path
 
 from git_branch_keeper.cli.main import main
 from git_branch_keeper.core import BranchKeeper
-from git_branch_keeper.formatters.json_output import _pr_status, analysis_to_dict, schema_to_dict
-from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.formatters.json_output import (
+    _deletion_scope,
+    _pr_status,
+    _recommended_actions,
+    analysis_to_dict,
+    schema_to_dict,
+)
+from git_branch_keeper.models.branch import BranchAnalysisResult, BranchDetails, BranchStatus
 
 
 def test_analysis_to_dict_is_json_serializable(git_repo, mock_config, temp_dir, monkeypatch):
@@ -26,7 +32,7 @@ def test_analysis_to_dict_is_json_serializable(git_repo, mock_config, temp_dir, 
     assert decoded["ok"] is True
     assert decoded["operation"] == "branch.scan"
     assert decoded["mode"] == "read-only"
-    assert decoded["schema_version"] == 4
+    assert decoded["schema_version"] == 5
     assert decoded["branches"]
     branch = decoded["branches"][0]
     assert "is_current_branch" in branch
@@ -79,10 +85,56 @@ def test_schema_to_dict_is_json_serializable():
     decoded = json.loads(json.dumps(payload))
 
     assert decoded["ok"] is True
-    assert decoded["schema_version"] == 4
+    assert decoded["schema_version"] == 5
     assert decoded["application"] == "git-branch-keeper"
     assert "branch.scan" in {command["name"] for command in decoded["capabilities"]["commands"]}
     assert "is_current_branch" in decoded["branch_scan_result"]["branch_fields"]
+    assert "delete_remote_branch" in decoded["branch_scan_result"]["action_types"]
+
+
+def test_merged_remote_only_json_action_is_remote_delete_even_without_remote_flag():
+    branch = BranchDetails(
+        name="feature/remote-only",
+        last_commit_date="2024-01-01",
+        age_days=10,
+        status=BranchStatus.MERGED,
+        modified_files=False,
+        untracked_files=False,
+        staged_files=False,
+        has_remote=True,
+        has_local=False,
+        sync_status="remote-only",
+    )
+    analysis = BranchAnalysisResult(
+        branches=[branch],
+        deletable_branches=[branch],
+    )
+
+    actions = _recommended_actions(analysis, delete_remote=False, remote_name="upstream")
+
+    assert _deletion_scope(branch, delete_remote=False) == "remote-only"
+    assert actions == [
+        {
+            "type": "delete_remote_branch",
+            "branch": "feature/remote-only",
+            "reason": "merged",
+            "scope": "remote-only",
+            "destructive": True,
+            "requires_confirmation": True,
+            "commands": [
+                {
+                    "argv": [
+                        "git",
+                        "push",
+                        "upstream",
+                        "--delete",
+                        "feature/remote-only",
+                    ],
+                    "shell": "git push upstream --delete feature/remote-only",
+                }
+            ],
+        }
+    ]
 
 
 def test_cli_json_scan_outputs_clean_json(git_repo, temp_dir, monkeypatch, capsys):

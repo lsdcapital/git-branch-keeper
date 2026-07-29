@@ -3,29 +3,28 @@
 from __future__ import annotations
 
 from git_branch_keeper.constants import (
+    LOCATION_BOTH,
+    LOCATION_LOCAL,
+    LOCATION_REMOTE,
     SYMBOL_CURRENT_BRANCH,
-    SYMBOL_HAS_REMOTE,
-    SYMBOL_NO_REMOTE,
-    SYMBOL_REMOTE_ONLY,
 )
 from git_branch_keeper.models.branch import BranchDetails
 
 
 def format_remote_status(has_remote: bool, has_local: bool = True) -> str:
-    """
-    Format remote status as a symbol.
+    """Format where a branch exists as plain, scan-friendly table text.
 
     Args:
         has_remote: Whether branch has a remote
         has_local: Whether refs/heads/<name> exists. Defaults True so callers
-            predating remote enumeration keep the old two-way ✓/✗ behaviour.
+            predating remote enumeration describe an ordinary local branch.
 
     Returns:
-        Symbol for remote status
+        ``local``, ``both``, or ``remote``
     """
     if has_remote and not has_local:
-        return SYMBOL_REMOTE_ONLY
-    return SYMBOL_HAS_REMOTE if has_remote else SYMBOL_NO_REMOTE
+        return LOCATION_REMOTE
+    return LOCATION_BOTH if has_remote else LOCATION_LOCAL
 
 
 def format_branch_name(name: str, is_current: bool = False) -> str:

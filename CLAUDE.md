@@ -45,11 +45,13 @@ git-branch-keeper --debug
 **Important**:
 - CLI mode (`--cli` / `--no-interactive`) is read-only by default
 - Deletion requires explicit `--delete` (deprecated `--cleanup` remains an alias; legacy `--force` also implies delete)
-- Deletion is **local-only by default**; the remote branch is kept unless `--remote` is passed (`config.delete_remote`)
+- For branches with local and remote refs, deletion is **local-only by default**; the
+  matching remote is kept unless `--remote` is passed (`config.delete_remote`)
 - Use `--dry-run` to preview cleanup candidates without prompts or changes
-- Branches that exist only on the remote are **analyzed by default but never deleted**
-  (`--no-remote-branches` restores the local-only view). Unrelated to `--remote`, which
-  controls remote deletion of branches that also exist locally.
+- Branches that exist only on the remote are analyzed by default. Positively merged
+  remote-only refs are cleanup candidates; stale/unmerged ones are never deleted.
+  `--no-remote-branches` restores the local-only view. The `--remote` flag separately
+  controls matching-remote deletion for branches that also exist locally.
 
 ## Architecture
 
@@ -242,12 +244,18 @@ ahead/behind and a silently downgraded confidence. On one real repo that was 37 
 tabs call them directly, bypassing the analysis path, so each needs its own remote-only
 short-circuit rather than relying on the one in `get_branch_status_details`.
 
-**Remote-only branches are never deletable.** Deleting one means
-`git push origin --delete`, which skips deletion guard 3 (letting `git branch -d` have the
-last word) and cannot be undone by the deletion journal. `BranchValidationService.is_deletable()`
-refuses them, `get_deletable_branches()` repeats the check because `force_mode` bypasses
-`is_deletable`, the TUI refuses normal and force marks, and both deletion entry points
-refresh live refs and require a local head before even reporting a dry-run success.
+**Only positively merged remote-only branches are deletable.** Stale age is not enough
+when the only mutation is `git push <remote> --delete`; `BranchValidationService` and the
+force-mode planner therefore admit `MERGED` only. They are cleanup candidates regardless
+of `config.delete_remote`, because there is no local ref and hence no local-only action.
+The TUI calls this out in both the status bar and confirmation dialog.
+
+`BranchKeeper._delete_remote_only_branch()` re-runs merge detection at the destructive
+boundary and captures the remote-tracking tip. `GitOperations.delete_remote_only_branch()`
+then deletes with `--force-with-lease=<ref>:<expected-sha>`, so a ref that advanced on the
+actual remote after the last fetch is preserved. Successful deletion journals that SHA
+with `remote_deleted=true`; `undo` can recreate the local branch and optionally push the
+remote ref back.
 
 **The temp-worktree probe is skipped** for them (`get_branch_status_details`). A branch
 with no local checkout cannot have uncommitted work, and the probe costs a checkout per
@@ -301,7 +309,7 @@ immediately before the delete. See `tests/test_worktree_toctou.py` and
 
 ### Deletion Safety
 
-Three independent guards stand between "analysis said merged" and an irreversible
+Four independent guards stand between "analysis said merged" and an irreversible
 delete. They exist because analysis results are reused across time - from the
 on-disk cache between runs, and across however long the TUI waits for the user.
 
@@ -311,14 +319,20 @@ on-disk cache between runs, and across however long the TUI waits for the user.
    re-examined, so the ordinary "merge the PR, keep working on the branch" flow
    would delete the new commits.
 2. **Merge status is re-verified live.** `BranchKeeper.delete_branch()` re-runs
-   detection with `force_refresh=True` for anything being deleted as `merged`.
-   The `MergeDetector` memo is only invalidated when *main* moves, so it can
-   outlive changes to the branch itself.
+   Git detection with `force_refresh=True` for anything being deleted as `merged`.
+   If Git cannot prove a squash/rebase merge, it re-fetches PR data and accepts it
+   only when the PR is still merged and its head SHA exactly matches the current
+   effective branch tip. The `MergeDetector` memo is only invalidated when *main*
+   moves, so it can outlive changes to the branch itself.
 3. **Git gets the last word when it can.** `_git_can_verify_deletion()` uses
    `git branch -d` when the branch is an ancestor of HEAD, and only falls back to
    `-D` where `-d` structurally cannot succeed (rebase/squash merges, and stale
    branches, which are unmerged by definition). Do not "simplify" this back to an
    unconditional `-D`.
+4. **Remote-only deletion is leased to the analyzed tip.** There is no local ref for
+   `git branch -d` to verify, so the remote push carries an exact expected SHA. If
+   the upstream branch advanced after analysis or after the last fetch, deletion
+   fails instead of discarding unseen work.
 
 Deletions are journaled to `~/.git-branch-keeper/deletions.jsonl` and scoped by
 `DeletionJournal._repo_key()` - the main working tree, derived from `common_dir`,

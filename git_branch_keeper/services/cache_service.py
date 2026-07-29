@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import git
@@ -369,10 +369,16 @@ class CacheService:
                 logger.debug(f"Skipping cached branch '{data.get('name')}' with invalid date")
                 return None
 
+            last_commit_date = data["last_commit_date"]
+            commit_date = date.fromisoformat(last_commit_date)
+            age_days = (datetime.now(timezone.utc).date() - commit_date).days
+
             return BranchDetails(
                 name=data["name"],
-                last_commit_date=data["last_commit_date"],
-                age_days=data["age_days"],
+                last_commit_date=last_commit_date,
+                # Age is derived from the commit date, so its cached value becomes
+                # stale at midnight even when the rest of the branch row is stable.
+                age_days=age_days,
                 status=BranchStatus(data["status"]),
                 modified_files=data["modified_files"],
                 untracked_files=data["untracked_files"],

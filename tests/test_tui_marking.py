@@ -87,15 +87,33 @@ class TestMarkWithHierarchy:
         assert "feature/dirty" in app.force_marked_branches
 
     @pytest.mark.parametrize("is_force", [False, True])
-    def test_remote_only_branch_cannot_be_marked(self, app, is_force):
+    def test_merged_remote_only_branch_can_be_marked(self, app, is_force):
         app.branches = [_branch("feature/remote-only", has_remote=True, has_local=False)]
         mark_set = app.force_marked_branches if is_force else app.marked_branches
 
         ok, err = app._mark_with_hierarchy("feature/remote-only", mark_set, is_force=is_force)
 
+        assert ok is True
+        assert err is None
+        assert mark_set == {"feature/remote-only"}
+
+    def test_stale_remote_only_branch_cannot_be_marked(self, app):
+        app.branches = [
+            _branch(
+                "feature/remote-only",
+                status=BranchStatus.STALE,
+                has_remote=True,
+                has_local=False,
+            )
+        ]
+
+        ok, err = app._mark_with_hierarchy(
+            "feature/remote-only", app.marked_branches
+        )
+
         assert ok is False
-        assert "remote-only" in err.lower()
-        assert mark_set == set()
+        assert "unless it is merged" in err.lower()
+        assert app.marked_branches == set()
 
     def test_unknown_branch_returns_error(self, app):
         app.branches = [_branch("feature/x")]

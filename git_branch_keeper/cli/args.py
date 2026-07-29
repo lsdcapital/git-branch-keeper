@@ -69,15 +69,17 @@ def parse_args():
     parser.add_argument(
         "--remote",
         action="store_true",
-        help="Also delete the remote branch (default: local-only, remote is kept). "
-        "Remote deletions affect collaborators and are harder to undo.",
+        help="Also delete the matching remote when deleting a local branch "
+        "(default: that remote is kept). Merged remote-only candidates are deleted "
+        "regardless because they have no local ref.",
     )
     parser.add_argument(
         "--no-remote-branches",
         action="store_true",
         help="Only analyze branches that exist locally. By default branches that exist "
-        "only on the remote are analyzed too (read-only; they are never deleted). "
-        "Unrelated to --remote, which controls remote deletion.",
+        "only on the remote are analyzed too; merged ones are cleanup candidates. "
+        "--remote separately controls whether deleting a local branch also deletes "
+        "its matching remote branch.",
     )
     parser.add_argument(
         "--interactive", action="store_true", help="Launch interactive TUI mode (default for TTY)"
