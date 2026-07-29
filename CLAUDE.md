@@ -101,6 +101,14 @@ becomes the descendant selector `BaseModal ModalScreen { … }` and matches noth
 `TabbedInfoScreen` must keep `max-width: 100%` / `max-height: 100%` or the base's 90%/80%
 caps clamp its 90%x80% dialog to 81%x64%.
 
+`ConfirmScreen` renders a `ConfirmationPrompt` made of typed `ConfirmationSection`
+blocks. Delete and restore callers build the same question → scope → selection → warning
+anatomy instead of concatenating a presentation-shaped message. The structured dialog
+uses a fixed-height scrolling review region and a fixed action row so long selections
+cannot push the buttons off-screen. Keep caller-provided content on
+`Static(markup=False)`: branch names such as `feature/[wip]` must stay literal.
+Plain-string prompts remain supported for simple one-question confirmations.
+
 **Background Operations:**
 - Async workers use `@work` decorator for non-blocking operations
 - DataTable has a built-in loading indicator for async data fetching
@@ -362,7 +370,8 @@ Configuration follows a hierarchy:
 - **GitHub integration is OPTIONAL**: The tool works on any Git repo without GitHub auth
   - Without auth: Branch analysis, merge detection, and cleanup work normally
   - With auth (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or authenticated `gh` CLI; GitHub only): Adds PR detection and protection against deleting branches with open PRs
-- Test framework: pytest (run with `make test`); CI runs the full suite on Python 3.10-3.13
+- Test framework: pytest (run with `make test`); CI runs the full suite on Python
+  3.12-3.14, while formatting, linting, and type checking run once on Python 3.14
 - TUI has tests too: pure marking/validation logic in `tests/test_tui_marking.py`, and
   Textual `run_test()` pilot harness tests in `tests/test_tui_app.py` (async, `asyncio_mode = "auto"`)
 - Branch deletions are journaled and recoverable via `git-branch-keeper undo` as long as the commit objects exist

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, ClassVar, TypeVar
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -33,6 +34,37 @@ def _format_location(branch: BranchDetails) -> str:
 
 
 ScreenResultT = TypeVar("ScreenResultT")
+ConfirmationTone = Literal["default", "scope", "warning", "danger"]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmationSection:
+    """One scannable block inside a confirmation prompt."""
+
+    title: str
+    body: str
+    tone: ConfirmationTone = "default"
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmationPrompt:
+    """Presentation model shared by every confirmation dialog."""
+
+    title: str
+    question: str
+    confirm_label: str
+    sections: tuple[ConfirmationSection, ...] = ()
+    description: str | None = None
+    cancel_label: str = "Cancel"
+    danger: bool = True
+
+    def plain_text(self) -> str:
+        """Return the prompt without presentation styling for logs and tests."""
+        parts = [self.question]
+        if self.description:
+            parts.append(self.description)
+        parts.extend(f"{section.title}\n{section.body}" for section in self.sections)
+        return "\n\n".join(parts)
 
 
 class BaseModal(ModalScreen[ScreenResultT]):
@@ -97,11 +129,105 @@ class BaseModal(ModalScreen[ScreenResultT]):
 
 
 class ConfirmScreen(BaseModal[bool]):
-    """Modal confirmation dialog."""
+    """Structured, safety-first confirmation dialog."""
 
     DEFAULT_CSS = """
     ConfirmScreen #confirm-dialog {
-        min-width: 48;
+        width: 76;
+        min-width: 40;
+        max-width: 94%;
+        max-height: 90%;
+        padding: 0;
+    }
+
+    ConfirmScreen #confirm-dialog.-structured {
+        height: 26;
+    }
+
+    ConfirmScreen #confirm-dialog.-simple {
+        height: auto;
+    }
+
+    ConfirmScreen #confirm-header {
+        width: 100%;
+        height: auto;
+        padding: 1 2;
+        background: $panel;
+    }
+
+    ConfirmScreen #confirm-question {
+        width: 100%;
+        height: auto;
+        color: $text;
+        text-style: bold;
+    }
+
+    ConfirmScreen #confirm-description {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        color: $text-muted;
+    }
+
+    ConfirmScreen #confirm-message {
+        height: 1fr;
+        max-height: 100%;
+        padding: 1 2 0 2;
+    }
+
+    ConfirmScreen .confirm-section {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+        padding-bottom: 1;
+    }
+
+    ConfirmScreen .confirm-section.-scope {
+        padding: 1 2;
+        background: $primary 12%;
+    }
+
+    ConfirmScreen .confirm-section.-warning {
+        padding: 1 2;
+        background: $warning 14%;
+    }
+
+    ConfirmScreen .confirm-section.-danger {
+        padding: 1 2;
+        background: $error 14%;
+    }
+
+    ConfirmScreen .confirm-section-title {
+        width: 100%;
+        height: 1;
+        color: $text;
+        text-style: bold;
+    }
+
+    ConfirmScreen .confirm-section.-scope .confirm-section-title {
+        color: $primary;
+    }
+
+    ConfirmScreen .confirm-section.-warning .confirm-section-title {
+        color: $warning;
+    }
+
+    ConfirmScreen .confirm-section.-danger .confirm-section-title {
+        color: $error;
+    }
+
+    ConfirmScreen .confirm-section-body {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        color: $text;
+    }
+
+    ConfirmScreen #confirm-actions {
+        height: 5;
+        min-height: 5;
+        padding: 1 2;
+        background: $panel;
     }
     """
 
@@ -117,28 +243,70 @@ class ConfirmScreen(BaseModal[bool]):
 
     def __init__(
         self,
-        message: str,
+        prompt: ConfirmationPrompt | str,
         dialog_title: str = "Confirm",
         confirm_label: str = "Yes",
         cancel_label: str = "Cancel",
         danger: bool = True,
     ):
+        """Create a confirmation screen.
+
+        A plain string remains supported for callers that only need a question. New
+        flows should pass ``ConfirmationPrompt`` so impact, scope, and selections
+        remain visually distinct.
+        """
         # Not "title": Screen.title is a reactive that overrides App.title while active.
         super().__init__()
-        self.message = message
-        self.dialog_title = dialog_title
-        self.confirm_label = confirm_label
-        self.cancel_label = cancel_label
-        self.danger = danger
+        self.prompt = (
+            prompt
+            if isinstance(prompt, ConfirmationPrompt)
+            else ConfirmationPrompt(
+                title=dialog_title,
+                question=prompt,
+                confirm_label=confirm_label,
+                cancel_label=cancel_label,
+                danger=danger,
+            )
+        )
+        # Preserve a plain representation for diagnostics and compatibility with callers
+        # that inspect the message while the modal is open.
+        self.message = self.prompt.plain_text()
+        self.dialog_title = self.prompt.title
+        self.confirm_label = self.prompt.confirm_label
+        self.cancel_label = self.prompt.cancel_label
+        self.danger = self.prompt.danger
 
     def compose(self) -> ComposeResult:
-        classes = "modal-dialog -danger" if self.danger else "modal-dialog"
+        structure_class = "-structured" if self.prompt.sections else "-simple"
+        danger_class = " -danger" if self.danger else ""
+        classes = f"modal-dialog {structure_class}{danger_class}"
         with Vertical(id="confirm-dialog", classes=classes):
-            with ScrollableContainer(id="confirm-message", classes="modal-body"):
-                # markup=False: the message embeds raw branch names, so "feature/[wip]"
-                # would otherwise be parsed as Rich markup.
-                yield Static(self.message, markup=False)
-            with Horizontal(id="button-container", classes="modal-buttons"):
+            with Vertical(id="confirm-header"):
+                yield Static(self.prompt.question, id="confirm-question", markup=False)
+                if self.prompt.description:
+                    yield Static(
+                        self.prompt.description,
+                        id="confirm-description",
+                        markup=False,
+                    )
+            if self.prompt.sections:
+                with ScrollableContainer(id="confirm-message", classes="modal-body"):
+                    for section in self.prompt.sections:
+                        section_classes = f"confirm-section -{section.tone}"
+                        with Vertical(classes=section_classes):
+                            yield Static(
+                                section.title,
+                                classes="confirm-section-title",
+                                markup=False,
+                            )
+                            # Raw branch names and git metadata may contain Rich markup
+                            # delimiters, so every caller-provided value stays literal.
+                            yield Static(
+                                section.body,
+                                classes="confirm-section-body",
+                                markup=False,
+                            )
+            with Horizontal(id="confirm-actions", classes="modal-buttons"):
                 yield Button(self.cancel_label, variant="default", id="no")
                 yield Button(
                     self.confirm_label,
@@ -149,7 +317,7 @@ class ConfirmScreen(BaseModal[bool]):
     def on_mount(self) -> None:
         dialog = self.query_one("#confirm-dialog", Vertical)
         dialog.border_title = self.dialog_title
-        dialog.border_subtitle = f" y = {self.confirm_label}   esc = {self.cancel_label} "
+        dialog.border_subtitle = f" Esc {self.cancel_label}  ·  Y {self.confirm_label} "
 
     def action_confirm_yes(self) -> None:
         """Confirm action (Yes)."""
@@ -337,9 +505,7 @@ class TabbedInfoScreen(BaseModal[None]):
         if not self.branch.has_local and not (
             self.branch.has_remote and self.branch.status == BranchStatus.MERGED
         ):
-            blockers.append(
-                "Remote-only branch is not confirmed merged"
-            )
+            blockers.append("Remote-only branch is not confirmed merged")
 
         if self.branch.status == BranchStatus.UNSTARTED:
             blockers.append("Branch has no commits of its own - nothing was merged")
@@ -624,9 +790,9 @@ class TabbedInfoScreen(BaseModal[None]):
                             "sha": commit.hexsha[:7],
                             "message": commit.message.strip().split("\n")[0],
                             "author": commit.author.name,
-                            "date": datetime.fromtimestamp(
-                                commit.committed_date, tz=timezone.utc
-                            ).strftime("%Y-%m-%d %H:%M"),
+                            "date": datetime.fromtimestamp(commit.committed_date, tz=UTC).strftime(
+                                "%Y-%m-%d %H:%M"
+                            ),
                         }
                     )
                 content_title = f"[bold]Recent commits on {self.main_branch}[/bold]\n\n"

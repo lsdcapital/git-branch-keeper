@@ -449,9 +449,7 @@ class GitOperations:
                     )
                     return True
 
-                console.print(
-                    f"Deleting remote-only branch {self.remote_name}/{branch_name}..."
-                )
+                console.print(f"Deleting remote-only branch {self.remote_name}/{branch_name}...")
                 repo.git.push(
                     self.remote_name,
                     f":refs/heads/{branch_name}",

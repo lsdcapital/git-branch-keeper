@@ -44,7 +44,13 @@ from git_branch_keeper.models.branch import (
 )
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.services.undo_service import pick_latest_batch, restore_entries
-from git_branch_keeper.ui.screens import ConfirmScreen, InfoScreen, TabbedInfoScreen
+from git_branch_keeper.ui.screens import (
+    ConfirmationPrompt,
+    ConfirmationSection,
+    ConfirmScreen,
+    InfoScreen,
+    TabbedInfoScreen,
+)
 from git_branch_keeper.ui.widgets import NonExpandingHeader
 from git_branch_keeper.utils.logging import get_logger
 
@@ -577,9 +583,7 @@ class BranchKeeperApp(App):
             if (
                 not branch.is_worktree
                 and not branch.has_local
-                and not (
-                    branch.has_remote and branch.status == BranchStatus.MERGED
-                )
+                and not (branch.has_remote and branch.status == BranchStatus.MERGED)
             ):
                 logger.debug(f"[MARK_WITH_HIERARCHY] {branch.name} is remote-only")
                 return False, "Cannot mark a remote-only branch unless it is merged"
@@ -880,7 +884,16 @@ class BranchKeeperApp(App):
         all_marked_names = self.marked_branches | self.force_marked_branches
         branches_to_delete = [branch for branch in self.branches if branch.name in all_marked_names]
 
-        # Build confirmation message
+        self.push_screen(
+            ConfirmScreen(self._build_delete_confirmation_prompt(branches_to_delete)),
+            self._handle_delete_confirmation,
+        )
+
+    def _build_delete_confirmation_prompt(
+        self, branches_to_delete: list[BranchDetails]
+    ) -> ConfirmationPrompt:
+        """Build one structured review of deletion scope, risk, and selection."""
+        total_marked = len(self.marked_branches) + len(self.force_marked_branches)
         force_count = len(self.force_marked_branches)
         normal_count = len(self.marked_branches)
         branches_list = format_deletion_confirmation_items(
@@ -893,53 +906,65 @@ class BranchKeeperApp(App):
                 if branch.has_remote and not branch.has_local
             }
         )
-        remote_only_message = (
-            f"\n{remote_only_count} merged remote-only branch"
-            f"{'es' if remote_only_count != 1 else ''} on {self.keeper.remote_name} "
-            "will be deleted. "
-            "These have no local ref, so the delete-scope toggle does not apply."
-            if remote_only_count
-            else ""
-        )
 
         if self.keeper.delete_remote:
-            scope_message = (
-                "Deletion scope: LOCAL + REMOTE\n"
+            scope_section = ConfirmationSection(
+                "Deletion scope: LOCAL + REMOTE",
                 f"Matching branches on {self.keeper.remote_name} will also be deleted. "
                 "Undo restores local branches only; deleted remote branches must be "
-                f"pushed back manually.{remote_only_message}\n"
-                "Cancel and press d to keep remote branches instead."
+                "pushed back manually.\n"
+                "Cancel and press d to keep remote branches instead.",
+                tone="danger",
             )
         else:
-            scope_message = (
-                "Deletion scope: LOCAL ONLY\n"
+            scope_section = ConfirmationSection(
+                "Deletion scope: LOCAL ONLY",
                 f"Matching remotes for local branches on {self.keeper.remote_name} "
-                "will be kept and may "
-                f"remain visible as remote-only rows.{remote_only_message}\n"
-                "Cancel and press d to delete local and remote branches together."
+                "will be kept and may remain visible as remote-only rows.\n"
+                "Cancel and press d to delete local and remote branches together.",
+                tone="scope",
             )
 
-        if force_count > 0:
-            message = (
-                f"Delete {total_marked} marked branch{'es' if total_marked > 1 else ''}?\n"
-                f"({normal_count} normal, {force_count} force-marked)\n\n"
-                f"{scope_message}\n\n"
-                f"{branches_list}"
-            )
-        else:
-            message = (
-                f"Delete {total_marked} marked branch{'es' if total_marked > 1 else ''}?"
-                f"\n\n{scope_message}\n\n{branches_list}"
-            )
-
-        # Show confirmation screen
-        self.push_screen(
-            ConfirmScreen(
-                message,
-                dialog_title="Confirm deletion",
-                confirm_label="Delete",
+        sections = [
+            scope_section,
+            ConfirmationSection(
+                f"Selected branches ({total_marked})",
+                branches_list,
             ),
-            self._handle_delete_confirmation,
+        ]
+        if remote_only_count:
+            sections.append(
+                ConfirmationSection(
+                    "Remote-only selection",
+                    f"{remote_only_count} merged remote-only branch"
+                    f"{'es' if remote_only_count != 1 else ''} on "
+                    f"{self.keeper.remote_name} will be deleted. "
+                    "Remote-only branches have no local ref, so the "
+                    "delete-scope toggle does not apply.",
+                    tone="warning",
+                )
+            )
+        if force_count:
+            sections.append(
+                ConfirmationSection(
+                    "Force-marked selection",
+                    f"{force_count} branch{'es are' if force_count != 1 else ' is'} "
+                    "force-marked and may contain uncommitted work. Review before deleting.",
+                    tone="danger",
+                )
+            )
+
+        description = (
+            f"{normal_count} standard · {force_count} force-marked"
+            if force_count
+            else "Review the scope and selected branches before continuing."
+        )
+        return ConfirmationPrompt(
+            title="Confirm deletion",
+            question=f"Delete {total_marked} marked branch" f"{'es' if total_marked != 1 else ''}?",
+            description=description,
+            confirm_label="Delete",
+            sections=tuple(sections),
         )
 
     def _handle_delete_confirmation(self, confirmed: bool | None) -> None:
@@ -1129,35 +1154,54 @@ class BranchKeeperApp(App):
             self._set_status_message("No deleted branches to restore", severity="warning")
             return
 
+        self.push_screen(
+            ConfirmScreen(self._build_restore_confirmation_prompt(entries)),
+            lambda confirmed: self._handle_undo_confirmation(confirmed, entries),
+        )
+
+    def _build_restore_confirmation_prompt(self, entries: list[dict]) -> ConfirmationPrompt:
+        """Build the restore variant with the same confirmation anatomy."""
         if len(entries) == 1:
             entry = entries[0]
-            message = (
-                f"Restore branch {entry['branch']} at {entry['sha'][:12]}?\n"
-                f"Deleted: {entry.get('timestamp', 'unknown time')}\n\n"
-                "This restores the local branch only."
-            )
+            question = f"Restore branch {entry['branch']}?"
+            description = f"Deleted {entry.get('timestamp', 'unknown time')}"
+            selection = f"{entry['branch']}\nRestore point: {entry['sha'][:12]}"
         else:
-            branch_list = "\n".join(
+            question = f"Restore {len(entries)} branches from the last deletion batch?"
+            description = "Review the restore points before continuing."
+            selection = "\n".join(
                 f"  • {entry['branch']} at {entry['sha'][:12]}" for entry in entries
             )
-            message = (
-                f"Restore {len(entries)} branches from the last deletion batch?\n\n"
-                f"{branch_list}\n\n"
-                "This restores local branches only."
-            )
 
+        sections = [
+            ConfirmationSection(
+                f"Restore selection ({len(entries)})",
+                selection,
+            ),
+            ConfirmationSection(
+                "Restore scope: LOCAL ONLY",
+                "This restores local branches only. No remote branches will be pushed.",
+                tone="scope",
+            ),
+        ]
         remote_deleted_entries = [entry for entry in entries if entry.get("remote_deleted")]
         if remote_deleted_entries:
-            message += "\n\nOne or more remote branches were also deleted; the TUI will not push them back."
+            sections.append(
+                ConfirmationSection(
+                    "Remote branches stay deleted",
+                    "One or more remote branches were also deleted; "
+                    "the TUI will not push them back.",
+                    tone="warning",
+                )
+            )
 
-        self.push_screen(
-            ConfirmScreen(
-                message,
-                dialog_title="Restore branches",
-                confirm_label="Restore",
-                danger=False,
-            ),
-            lambda confirmed: self._handle_undo_confirmation(confirmed, entries),
+        return ConfirmationPrompt(
+            title="Restore branches",
+            question=question,
+            description=description,
+            confirm_label="Restore",
+            sections=tuple(sections),
+            danger=False,
         )
 
     def _handle_undo_confirmation(self, confirmed: bool | None, entries: list[dict]) -> None:

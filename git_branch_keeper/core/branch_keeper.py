@@ -1637,9 +1637,7 @@ class BranchKeeper:
 
     def _has_current_merge_proof(self, branch: str) -> bool:
         """Revalidate Git or authoritative merged-PR proof at deletion time."""
-        if self.git_service.is_branch_merged(
-            branch, self.main_branch, force_refresh=True
-        ):
+        if self.git_service.is_branch_merged(branch, self.main_branch, force_refresh=True):
             return True
 
         # A squash/rebase PR may be authoritative even when Git's local content
@@ -1651,10 +1649,7 @@ class BranchKeeper:
         if not pr_info:
             return False
         self._annotate_pr_head_match(branch, pr_info)
-        return bool(
-            pr_info.get("merged")
-            and pr_info.get("head_matches_local") is True
-        )
+        return bool(pr_info.get("merged") and pr_info.get("head_matches_local") is True)
 
     def _determine_branch_status(self, branch: str, pr_data: dict | None = None) -> tuple:
         """

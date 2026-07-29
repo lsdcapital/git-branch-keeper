@@ -1,6 +1,6 @@
 """Tests for cache persistence during refresh operations."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from git_branch_keeper.core.branch_keeper import BranchKeeper
@@ -11,7 +11,7 @@ from git_branch_keeper.services import cache_service as cache_service_module
 class FrozenDateTime(datetime):
     """Controllable clock for cache age rollover tests."""
 
-    current = datetime(2026, 7, 28, 23, 59, tzinfo=timezone.utc)
+    current = datetime(2026, 7, 28, 23, 59, tzinfo=UTC)
 
     @classmethod
     def now(cls, tz=None):
@@ -22,9 +22,7 @@ class FrozenDateTime(datetime):
 class TestCacheRefreshPersistence:
     """Test that cache is updated correctly during refresh operations."""
 
-    def test_cached_branch_age_rolls_over_at_utc_midnight(
-        self, git_repo, monkeypatch
-    ):
+    def test_cached_branch_age_rolls_over_at_utc_midnight(self, git_repo, monkeypatch):
         """Stable cached rows derive age from their commit date on every load."""
         cache = cache_service_module.CacheService(git_repo.working_dir)
         branch = BranchDetails(
@@ -48,7 +46,7 @@ class TestCacheRefreshPersistence:
         assert before_midnight is not None
         assert before_midnight.age_days == 0
 
-        FrozenDateTime.current = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        FrozenDateTime.current = datetime(2026, 7, 29, tzinfo=UTC)
         after_midnight = cache.deserialize_branch(cached)
         assert after_midnight is not None
         assert after_midnight.age_days == 1

@@ -1,7 +1,7 @@
 # 🌿 git-branch-keeper
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 A smart Git branch management tool that helps keep your repository clean and organized. Branch and merge analysis works on **any Git repository** — GitHub, GitLab, Bitbucket, or purely local. Pull-request detection and protection are an optional extra that currently work with **GitHub only**. Stop manually tracking which branches are safe to delete—let `git-branch-keeper` do the heavy lifting.

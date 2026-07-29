@@ -30,9 +30,7 @@ def has_cleanup_blockers(branch: BranchDetails, protected_branches: list[str]) -
     if branch.name in protected_branches:
         return True
 
-    if not branch.has_local and not (
-        branch.has_remote and branch.status == BranchStatus.MERGED
-    ):
+    if not branch.has_local and not (branch.has_remote and branch.status == BranchStatus.MERGED):
         return True
 
     return (

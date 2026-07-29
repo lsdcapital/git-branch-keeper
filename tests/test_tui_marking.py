@@ -107,9 +107,7 @@ class TestMarkWithHierarchy:
             )
         ]
 
-        ok, err = app._mark_with_hierarchy(
-            "feature/remote-only", app.marked_branches
-        )
+        ok, err = app._mark_with_hierarchy("feature/remote-only", app.marked_branches)
 
         assert ok is False
         assert "unless it is merged" in err.lower()

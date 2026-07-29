@@ -11,7 +11,7 @@ import git
 import pytest
 from rich.text import Text
 from textual.coordinate import Coordinate
-from textual.widgets import Button, DataTable
+from textual.widgets import Button, DataTable, Static
 
 from git_branch_keeper.config import Config
 from git_branch_keeper.core import BranchKeeper
@@ -149,6 +149,11 @@ async def test_delete_confirmation_explains_local_only_scope(make_app):
         assert "Matching remotes for local branches on origin will be kept" in message
         assert "remain visible as remote-only rows" in message
         assert "Cancel and press d to delete local and remote branches together" in message
+        assert [section.title for section in app.screen.prompt.sections] == [
+            "Deletion scope: LOCAL ONLY",
+            "Selected branches (1)",
+        ]
+        assert app.screen.prompt.sections[0].tone == "scope"
 
 
 async def test_delete_confirmation_warns_remote_undo_is_manual(make_app):
@@ -166,6 +171,7 @@ async def test_delete_confirmation_warns_remote_undo_is_manual(make_app):
         assert "Matching branches on origin will also be deleted" in message
         assert "Undo restores local branches only" in message
         assert "deleted remote branches must be pushed back manually" in message
+        assert app.screen.prompt.sections[0].tone == "danger"
 
 
 async def test_delete_scope_cannot_change_behind_confirmation(make_app):
@@ -549,9 +555,7 @@ async def test_status_bar_recommends_merged_remote_only_candidates(make_app):
 
 
 async def test_delete_confirmation_calls_out_remote_only_deletion(make_app):
-    app = make_app(
-        [_branch("feature/gone", has_remote=True, has_local=False)]
-    )
+    app = make_app([_branch("feature/gone", has_remote=True, has_local=False)])
 
     async with app.run_test() as pilot:
         app.marked_branches.add("feature/gone")
@@ -563,6 +567,8 @@ async def test_delete_confirmation_calls_out_remote_only_deletion(make_app):
         assert "1 merged remote-only branch on origin will be deleted" in message
         assert "delete-scope toggle does not apply" in message
         assert "feature/gone (merged, remote only)" in message
+        assert app.screen.prompt.sections[2].title == "Remote-only selection"
+        assert app.screen.prompt.sections[2].tone == "warning"
 
 
 async def test_status_bar_omits_blocked_when_there_is_nothing_to_explain(make_app):
@@ -642,3 +648,55 @@ async def test_confirm_screen_buttons_share_one_row_with_cancel_first(make_app):
         delete = app.screen.query_one("#yes", Button)
         assert cancel.region.y == delete.region.y  # side by side, not stacked
         assert cancel.region.x < delete.region.x  # Cancel left of Delete
+        assert cancel.region.bottom <= app.screen.size.height
+        assert delete.region.bottom <= app.screen.size.height
+
+
+async def test_confirm_screen_renders_sections_as_literal_structured_content(make_app):
+    """Raw branch names stay literal while scope and selection remain separate."""
+    app = make_app([_branch("feature/[wip]", has_remote=True)])
+    async with app.run_test() as pilot:
+        app.marked_branches.add("feature/[wip]")
+        app.action_delete_marked()
+        await pilot.pause()
+
+        titles = [
+            str(widget.content)
+            for widget in app.screen.query(".confirm-section-title").results(Static)
+        ]
+        bodies = [
+            str(widget.content)
+            for widget in app.screen.query(".confirm-section-body").results(Static)
+        ]
+
+        assert titles == ["Deletion scope: LOCAL ONLY", "Selected branches (1)"]
+        assert "feature/[wip]" in bodies[-1]
+
+
+async def test_restore_confirmation_reuses_structure_with_safe_action_variant(make_app):
+    """Restore gets the same anatomy without inheriting deletion's danger styling."""
+    app = make_app([_branch("feature/a")])
+    entries = [
+        {
+            "branch": "feature/a",
+            "sha": "a" * 40,
+            "timestamp": "2026-07-29T10:00:00Z",
+            "remote_deleted": True,
+        }
+    ]
+
+    async with app.run_test() as pilot:
+        prompt = app._build_restore_confirmation_prompt(entries)
+        app.push_screen(ConfirmScreen(prompt))
+        await pilot.pause()
+
+        confirm = app.screen.query_one("#yes", Button)
+        assert prompt.danger is False
+        assert confirm.variant == "primary"
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "no"
+        assert [section.title for section in prompt.sections] == [
+            "Restore selection (1)",
+            "Restore scope: LOCAL ONLY",
+            "Remote branches stay deleted",
+        ]

@@ -41,7 +41,7 @@ Describe how you tested these changes:
 ### Test Environment
 
 - OS: [e.g. macOS 14.0]
-- Python version: [e.g. 3.11.5]
+- Python version: [e.g. 3.14.x]
 - Git version: [e.g. 2.42.0]
 
 ## Screenshots (if applicable)

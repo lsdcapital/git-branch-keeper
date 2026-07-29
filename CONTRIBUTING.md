@@ -32,7 +32,7 @@ This project and everyone participating in it is governed by our commitment to p
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.12 or higher
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Git
 - A GitHub account
@@ -310,7 +310,7 @@ If applicable, add screenshots or terminal output.
 
 **Environment:**
 - OS: [e.g. macOS 14.0, Ubuntu 22.04]
-- Python version: [e.g. 3.11.5]
+- Python version: [e.g. 3.14.x]
 - git-branch-keeper version: [e.g. 0.1.0]
 - Git version: [e.g. 2.42.0]
 

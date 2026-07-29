@@ -349,15 +349,11 @@ def _remote_only(status: BranchStatus) -> BranchDetails:
 
 
 def test_merged_remote_only_branch_is_deletable():
-    assert BranchValidationService.is_deletable(
-        _remote_only(BranchStatus.MERGED), ["main"]
-    ) is True
+    assert BranchValidationService.is_deletable(_remote_only(BranchStatus.MERGED), ["main"]) is True
 
 
 def test_stale_remote_only_branch_is_not_deletable_without_merge_proof():
-    assert BranchValidationService.is_deletable(
-        _remote_only(BranchStatus.STALE), ["main"]
-    ) is False
+    assert BranchValidationService.is_deletable(_remote_only(BranchStatus.STALE), ["main"]) is False
 
 
 def test_local_counterpart_of_the_same_row_stays_deletable():

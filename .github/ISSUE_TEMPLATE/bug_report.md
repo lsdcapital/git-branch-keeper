@@ -37,7 +37,7 @@ If applicable, add screenshots or terminal output to help explain your problem.
 ## Environment
 
 - **OS:** [e.g. macOS 14.0, Ubuntu 22.04, Windows 11]
-- **Python version:** [e.g. 3.11.5]
+- **Python version:** [e.g. 3.14.x]
 - **git-branch-keeper version:** [run `git-branch-keeper --version`]
 - **Git version:** [run `git --version`]
 - **Installation method:** [e.g. pipx, pip, from source]

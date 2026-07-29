@@ -72,9 +72,7 @@ def _deletion_scope(branch: BranchDetails, delete_remote: bool) -> str:
     """Describe what a branch delete action would affect."""
     if not branch.has_local:
         return (
-            "remote-only"
-            if branch.has_remote and branch.status == BranchStatus.MERGED
-            else "none"
+            "remote-only" if branch.has_remote and branch.status == BranchStatus.MERGED else "none"
         )
     if branch.has_remote and delete_remote:
         return "local-and-remote"
@@ -106,9 +104,7 @@ def _branch_deletion_blockers(
                 "This row represents a worktree, not a local branch ref.",
             )
         )
-    if not branch.has_local and not (
-        branch.has_remote and branch.status == BranchStatus.MERGED
-    ):
+    if not branch.has_local and not (branch.has_remote and branch.status == BranchStatus.MERGED):
         blockers.append(
             _blocker(
                 "REMOTE_ONLY_BRANCH",

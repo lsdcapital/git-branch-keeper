@@ -74,7 +74,7 @@ Update CHANGELOG.md with the new version:
 - [ ] Test installation from source: `uv sync && uv run git-branch-keeper --version`
 - [ ] Test in TUI mode: `uv run git-branch-keeper`
 - [ ] Test in CLI mode: `uv run git-branch-keeper --cli`
-- [ ] Test on different Python versions (3.10, 3.11, 3.12, 3.13)
+- [ ] Test on supported Python versions (3.12, 3.13, 3.14)
 - [ ] Test on different operating systems (if possible)
 - [ ] Test with different repository scenarios:
   - [ ] Small repo (< 10 branches)

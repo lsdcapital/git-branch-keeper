@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interpolated branch names into a regex unescaped) and two redundant reachability checks.
 
 ### Changed
+- **TUI confirmations now use one structured dialog system.** Delete and restore prompts
+  share typed question, scope, selection, and warning sections instead of assembling
+  dense blocks of prose. The review body scrolls independently while the safe-first
+  action row stays visible.
 - **TUI confirmation dialogs now focus the safe option, so Enter cancels.** Previously
   focus landed on the destructive button, so Enter confirmed. Confirming is now `y`, or
   Tab to the confirm button and press Enter, or click it. This changes the
@@ -49,9 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   match surfaces a "possible squash-merge - verify before deleting" note instead of
   marking the branch merged/deletable (prevents deleting unmerged work). Exact diff
   matches still count as merged.
-- CI now runs the full pytest suite and enforces mypy; test matrix is Python 3.10-3.13
-- Minimum supported Python raised to 3.10, allowing all locked dependencies to receive
-  current security fixes
+- CI now runs the full pytest suite on Python 3.12-3.14 and runs formatting, linting,
+  and mypy once on Python 3.14.
+- Minimum supported Python raised to 3.12, allowing all locked dependencies to receive
+  current security fixes.
 - README clarified: branch/merge analysis works on any Git host; PR detection is GitHub-only
 
 ### Added (original release scope)

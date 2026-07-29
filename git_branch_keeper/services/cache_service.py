@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import git
@@ -270,7 +270,7 @@ class CacheService:
             cache_data = {
                 "repo_path": str(self.repo_path),
                 "main_branch": main_branch,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "last_updated": datetime.now(UTC).isoformat(),
                 "branches": existing_cache,
             }
 
@@ -351,7 +351,7 @@ class CacheService:
             "notes": branch.notes,
             "merge_detection": branch.merge_detection,
             "stable": self.is_stable(branch),
-            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "cached_at": datetime.now(UTC).isoformat(),
         }
 
     def deserialize_branch(self, data: dict) -> BranchDetails | None:
@@ -371,7 +371,7 @@ class CacheService:
 
             last_commit_date = data["last_commit_date"]
             commit_date = date.fromisoformat(last_commit_date)
-            age_days = (datetime.now(timezone.utc).date() - commit_date).days
+            age_days = (datetime.now(UTC).date() - commit_date).days
 
             return BranchDetails(
                 name=data["name"],
@@ -575,7 +575,7 @@ class CacheService:
 
             # Update the branches section
             full_cache_data["branches"] = cache
-            full_cache_data["last_updated"] = datetime.now(timezone.utc).isoformat()
+            full_cache_data["last_updated"] = datetime.now(UTC).isoformat()
 
             # Atomic write: write to temp file, then rename
             temp_file = self.cache_file.with_suffix(".tmp")
@@ -637,7 +637,7 @@ class CacheService:
 
             # Update the branches section
             full_cache_data["branches"] = cache
-            full_cache_data["last_updated"] = datetime.now(timezone.utc).isoformat()
+            full_cache_data["last_updated"] = datetime.now(UTC).isoformat()
 
             # Atomic write: write to temp file, then rename
             temp_file = self.cache_file.with_suffix(".tmp")

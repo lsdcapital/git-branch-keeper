@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import git
@@ -90,8 +90,8 @@ class BranchQueries:
         try:
             repo = self._get_repo()
             commit = repo.refs[self.refs.resolve(branch_name, repo)].commit
-            commit_time = datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
-            now = datetime.now(timezone.utc)
+            commit_time = datetime.fromtimestamp(commit.committed_date, tz=UTC)
+            now = datetime.now(UTC)
 
             # Calculate age based on calendar dates for consistent results
             commit_date = commit_time.date()
@@ -195,7 +195,7 @@ class BranchQueries:
         try:
             repo = self._get_repo()
             commit = repo.refs[self.refs.resolve(branch_name, repo)].commit
-            dt = datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
+            dt = datetime.fromtimestamp(commit.committed_date, tz=UTC)
             return dt.strftime("%Y-%m-%d")
         except GIT_ERRORS as e:
             logger.debug(f"Error getting last commit date for {branch_name}: {e}")
@@ -531,9 +531,9 @@ class BranchQueries:
                         "sha": commit.hexsha[:7],
                         "message": commit.message.strip().split("\n")[0],  # First line only
                         "author": commit.author.name,
-                        "date": datetime.fromtimestamp(
-                            commit.committed_date, tz=timezone.utc
-                        ).strftime("%Y-%m-%d %H:%M"),
+                        "date": datetime.fromtimestamp(commit.committed_date, tz=UTC).strftime(
+                            "%Y-%m-%d %H:%M"
+                        ),
                     }
                 )
 
@@ -578,7 +578,7 @@ class BranchQueries:
                             "merge_message": message.strip().split("\n")[0],
                             "merge_author": commit.author.name,
                             "merge_date": datetime.fromtimestamp(
-                                commit.committed_date, tz=timezone.utc
+                                commit.committed_date, tz=UTC
                             ).strftime("%Y-%m-%d %H:%M"),
                         }
 
@@ -656,9 +656,9 @@ class BranchQueries:
                     {
                         "sha": commit.hexsha[:7],
                         "message": commit.message.strip().split("\n")[0],
-                        "date": datetime.fromtimestamp(
-                            commit.committed_date, tz=timezone.utc
-                        ).strftime("%Y-%m-%d"),
+                        "date": datetime.fromtimestamp(commit.committed_date, tz=UTC).strftime(
+                            "%Y-%m-%d"
+                        ),
                     }
                 )
 
@@ -669,9 +669,9 @@ class BranchQueries:
                     {
                         "sha": commit.hexsha[:7],
                         "message": commit.message.strip().split("\n")[0],
-                        "date": datetime.fromtimestamp(
-                            commit.committed_date, tz=timezone.utc
-                        ).strftime("%Y-%m-%d"),
+                        "date": datetime.fromtimestamp(commit.committed_date, tz=UTC).strftime(
+                            "%Y-%m-%d"
+                        ),
                     }
                 )
 
