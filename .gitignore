@@ -69,3 +69,4 @@ dmypy.json
 
 # Generated version file
 git_branch_keeper/_version.py
+.impeccable

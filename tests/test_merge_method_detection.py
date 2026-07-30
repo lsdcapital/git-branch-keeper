@@ -9,6 +9,35 @@ from git_branch_keeper.models.branch import BranchStatus, SyncStatus
 class TestMergeMethodDetection:
     """Test that branches merged via PR show 'merged-pr' and git merges show 'merged-git'."""
 
+    def test_open_pr_displays_selected_number_instead_of_open_count(self, git_repo, mock_config):
+        """The PR cell links to a real PR even when the branch has multiple open PRs."""
+        repo = git_repo
+        repo_path = Path(repo.working_dir)
+
+        repo.git.checkout("-b", "feature/open-pr")
+        test_file = repo_path / "open_pr.txt"
+        test_file.write_text("Open PR content\n")
+        repo.index.add(["open_pr.txt"])
+        repo.index.commit("Add open PR feature")
+        repo.git.checkout("main")
+
+        keeper = BranchKeeper(str(repo_path), mock_config)
+        pr_data = {
+            "feature/open-pr": {
+                "count": 2,
+                "merged": False,
+                "closed": False,
+                "number": 91,
+            }
+        }
+
+        status, _sync_status, pr_status, _notes = keeper._determine_branch_status(
+            "feature/open-pr", pr_data
+        )
+
+        assert status == BranchStatus.ACTIVE
+        assert pr_status == "91"
+
     def test_branch_merged_via_pr_shows_merged_pr(self, git_repo, mock_config):
         """Test that a branch merged via GitHub PR shows 'merged-pr' status."""
         # Setup: Create a branch and merge it into main
@@ -71,12 +100,13 @@ class TestMergeMethodDetection:
             }
         }
 
-        status, sync_status, _, notes = keeper._determine_branch_status(
+        status, sync_status, pr_status, notes = keeper._determine_branch_status(
             "feature/pr-head-match", pr_data
         )
 
         assert status == BranchStatus.MERGED
         assert sync_status == SyncStatus.MERGED_PR.value
+        assert pr_status == "42"
         assert notes is None
         assert pr_data["feature/pr-head-match"]["head_matches_local"] is True
 
@@ -246,11 +276,12 @@ class TestMergeMethodDetection:
                 "count": 0,  # No open PRs
                 "merged": False,  # NOT merged
                 "closed": True,  # But was closed
+                "number": 73,
             }
         }
 
         # Test: Determine branch status
-        status, _sync_status, _pr_status, _notes = keeper._determine_branch_status(
+        status, _sync_status, pr_status, _notes = keeper._determine_branch_status(
             "feature/closed-unmerged", pr_data
         )
 
@@ -258,6 +289,7 @@ class TestMergeMethodDetection:
         assert status != BranchStatus.MERGED
         # Should be active (has closed PR but not merged)
         assert status == BranchStatus.ACTIVE
+        assert pr_status == "73"
 
     def test_closed_unmerged_pr_can_still_be_detected_as_merged_via_git(
         self, git_repo, mock_config

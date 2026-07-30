@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 
 from git_branch_keeper.config import Config
@@ -24,6 +25,16 @@ def _branch(name: str, status: BranchStatus = BranchStatus.MERGED) -> BranchDeta
         has_remote=False,
         sync_status="local-only",
     )
+
+
+def _pr_branch(name: str, number: int) -> BranchDetails:
+    branch = _branch(name)
+    branch.pr_status = str(number)
+    branch.pr_details = {
+        "number": number,
+        "url": f"https://github.com/test/test-repo/pull/{number}",
+    }
+    return branch
 
 
 @pytest.fixture
@@ -102,3 +113,24 @@ async def test_enter_after_mouse_click_still_triggers_delete_action(make_app):
         await pilot.pause()
 
         delete_mock.assert_called_once_with()
+
+
+async def test_clicking_pr_number_opens_default_browser(make_app):
+    app = make_app([_pr_branch("feature/pr-link", 42)])
+    open_url_mock = Mock()
+    app.open_url = open_url_mock
+
+    async with app.run_test(size=(160, 30)) as pilot:
+        table = app.query_one(DataTable)
+        await pilot.pause()
+
+        pr_column = 8  # Mark + the seven columns before PRs.
+        pr_region = table._get_cell_region(Coordinate(0, pr_column))
+        clicked = await pilot.click(
+            table,
+            offset=(pr_region.x + table.cell_padding, pr_region.y),
+        )
+        await pilot.pause()
+
+        assert clicked is True
+        open_url_mock.assert_called_once_with("https://github.com/test/test-repo/pull/42")

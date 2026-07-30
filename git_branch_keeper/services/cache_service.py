@@ -314,12 +314,13 @@ class CacheService:
         if branch.status != BranchStatus.MERGED:
             return False
 
-        # If there's no PR status (None or empty string), the branch is merged and stable
+        # If there is no PR display value, the branch is merged and stable.
         if not branch.pr_status:
             return True
 
-        # If the PR is closed (not open), it's stable
-        # pr_status format is like "open" or "closed:merged" or "closed:unmerged"
+        # Current rows store a PR number here and cannot be MERGED while that PR is
+        # open. Keep recognizing the old "open..." cache format so existing caches
+        # are not promoted to stable during an upgrade.
         return not branch.pr_status.startswith("open")
 
     def _serialize_branch(self, branch: BranchDetails, tip_sha: str | None = None) -> dict:
@@ -372,6 +373,16 @@ class CacheService:
             last_commit_date = data["last_commit_date"]
             commit_date = date.fromisoformat(last_commit_date)
             age_days = (datetime.now(UTC).date() - commit_date).days
+            pr_details = data.get("pr_details")
+            pr_status = data.get("pr_status")
+
+            # Stable rows written before PR numbers were shown can already contain
+            # complete provider metadata while their display value is null. Derive
+            # it during load so users do not need to clear or bypass a valid cache.
+            if not pr_status and isinstance(pr_details, dict):
+                pr_number = pr_details.get("number")
+                if isinstance(pr_number, int) and not isinstance(pr_number, bool):
+                    pr_status = str(pr_number)
 
             return BranchDetails(
                 name=data["name"],
@@ -388,8 +399,8 @@ class CacheService:
                 # has_local key, and every branch they described was local.
                 has_local=data.get("has_local", True),
                 sync_status=data["sync_status"],
-                pr_status=data.get("pr_status"),
-                pr_details=data.get("pr_details"),
+                pr_status=pr_status,
+                pr_details=pr_details,
                 notes=data.get("notes"),
                 in_worktree=False,  # Don't cache worktree status - it's dynamic
                 merge_detection=data.get("merge_detection"),

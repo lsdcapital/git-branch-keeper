@@ -165,7 +165,7 @@ def _branch_deletion_blockers(
                 f"Branch is checked out in another worktree{location}.",
             )
         )
-    if branch.pr_status and branch.status == BranchStatus.ACTIVE:
+    if _open_pr_count(branch) > 0 and branch.status == BranchStatus.ACTIVE:
         blockers.append(
             _blocker(
                 "HAS_OPEN_PULL_REQUEST",
@@ -199,6 +199,19 @@ def _parse_pr_count(value: str | None, prefix: str = "") -> int:
         return int(value)
     except ValueError:
         return 0
+
+
+def _open_pr_count(branch: BranchDetails) -> int:
+    """Return the provider's open PR count, with legacy display-data fallback."""
+    if branch.pr_details:
+        count = branch.pr_details.get("count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            return max(0, count)
+    if branch.pr_status and branch.pr_status.startswith("target:"):
+        return _parse_pr_count(branch.pr_status, "target:")
+    # Older cached rows stored the source open count in pr_status. New rows store
+    # the selected PR number and always carry the real count in pr_details.
+    return _parse_pr_count(branch.pr_status)
 
 
 def _attach_pr_details(pr: dict[str, Any], details: dict[str, Any] | None) -> dict[str, Any]:
@@ -298,7 +311,7 @@ def _pr_status(
                 "checked": True,
                 "status": "open",
                 "role": "source",
-                "open_count": _parse_pr_count(branch.pr_status),
+                "open_count": _open_pr_count(branch),
                 "merged": False,
                 "closed_unmerged": False,
             },

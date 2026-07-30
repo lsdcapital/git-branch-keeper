@@ -55,14 +55,18 @@ class ConfirmationPrompt:
     confirm_label: str
     sections: tuple[ConfirmationSection, ...] = ()
     description: str | None = None
+    warning: str | None = None
     cancel_label: str = "Cancel"
     danger: bool = True
+    default_confirm: bool = False
 
     def plain_text(self) -> str:
         """Return the prompt without presentation styling for logs and tests."""
         parts = [self.question]
         if self.description:
             parts.append(self.description)
+        if self.warning:
+            parts.append(self.warning)
         parts.extend(f"{section.title}\n{section.body}" for section in self.sections)
         return "\n\n".join(parts)
 
@@ -122,7 +126,7 @@ class BaseModal(ModalScreen[ScreenResultT]):
     }
 
     BaseModal .modal-buttons Button {
-        margin-left: 2;
+        margin-left: 1;
         min-width: 12;
     }
     """
@@ -141,7 +145,7 @@ class ConfirmScreen(BaseModal[bool]):
     }
 
     ConfirmScreen #confirm-dialog.-structured {
-        height: 26;
+        height: auto;
     }
 
     ConfirmScreen #confirm-dialog.-simple {
@@ -151,8 +155,8 @@ class ConfirmScreen(BaseModal[bool]):
     ConfirmScreen #confirm-header {
         width: 100%;
         height: auto;
-        padding: 1 2;
-        background: $panel;
+        padding: 1 2 0 2;
+        background: $surface;
     }
 
     ConfirmScreen #confirm-question {
@@ -165,21 +169,28 @@ class ConfirmScreen(BaseModal[bool]):
     ConfirmScreen #confirm-description {
         width: 100%;
         height: auto;
-        margin-top: 1;
         color: $text-muted;
     }
 
+    ConfirmScreen #confirm-warning {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        color: $warning;
+        text-style: bold;
+    }
+
     ConfirmScreen #confirm-message {
-        height: 1fr;
-        max-height: 100%;
+        height: auto;
+        max-height: 10;
         padding: 1 2 0 2;
     }
 
     ConfirmScreen .confirm-section {
         width: 100%;
         height: auto;
-        margin-bottom: 1;
-        padding-bottom: 1;
+        margin-bottom: 0;
+        padding-bottom: 0;
     }
 
     ConfirmScreen .confirm-section.-scope {
@@ -200,7 +211,7 @@ class ConfirmScreen(BaseModal[bool]):
     ConfirmScreen .confirm-section-title {
         width: 100%;
         height: 1;
-        color: $text;
+        color: $text-muted;
         text-style: bold;
     }
 
@@ -219,22 +230,22 @@ class ConfirmScreen(BaseModal[bool]):
     ConfirmScreen .confirm-section-body {
         width: 100%;
         height: auto;
-        margin-top: 1;
+        margin-top: 0;
         color: $text;
     }
 
     ConfirmScreen #confirm-actions {
-        height: 5;
-        min-height: 5;
-        padding: 1 2;
-        background: $panel;
+        height: 3;
+        min-height: 3;
+        padding: 0 2;
+        background: $surface;
     }
     """
 
     AUTO_FOCUS = "#no"
 
-    # No "enter" binding: Enter activates whatever is focused (Cancel by default), so it
-    # means exactly one thing. Confirming is "y", or Tab to the confirm button first.
+    # No "enter" binding: Enter activates the focused button. Generic confirmations
+    # focus Cancel; intentionally initiated batch deletions can opt into confirm focus.
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("y", "confirm_yes", "Yes", show=False),
         Binding("escape", "confirm_no", "Cancel", show=False),
@@ -289,6 +300,12 @@ class ConfirmScreen(BaseModal[bool]):
                         id="confirm-description",
                         markup=False,
                     )
+                if self.prompt.warning:
+                    yield Static(
+                        self.prompt.warning,
+                        id="confirm-warning",
+                        markup=False,
+                    )
             if self.prompt.sections:
                 with ScrollableContainer(id="confirm-message", classes="modal-body"):
                     for section in self.prompt.sections:
@@ -307,9 +324,15 @@ class ConfirmScreen(BaseModal[bool]):
                                 markup=False,
                             )
             with Horizontal(id="confirm-actions", classes="modal-buttons"):
-                yield Button(self.cancel_label, variant="default", id="no")
+                cancel_keys = "Esc" if self.prompt.default_confirm else "Esc/Enter"
+                confirm_keys = "Enter/Y" if self.prompt.default_confirm else "Y"
                 yield Button(
-                    self.confirm_label,
+                    f"{cancel_keys}  {self.cancel_label}",
+                    variant="default",
+                    id="no",
+                )
+                yield Button(
+                    f"{confirm_keys}  {self.confirm_label}",
                     variant="error" if self.danger else "primary",
                     id="yes",
                 )
@@ -317,7 +340,8 @@ class ConfirmScreen(BaseModal[bool]):
     def on_mount(self) -> None:
         dialog = self.query_one("#confirm-dialog", Vertical)
         dialog.border_title = self.dialog_title
-        dialog.border_subtitle = f" Esc {self.cancel_label}  ·  Y {self.confirm_label} "
+        if self.prompt.default_confirm:
+            self.query_one("#yes", Button).focus()
 
     def action_confirm_yes(self) -> None:
         """Confirm action (Yes)."""

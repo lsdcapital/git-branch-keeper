@@ -22,6 +22,37 @@ class FrozenDateTime(datetime):
 class TestCacheRefreshPersistence:
     """Test that cache is updated correctly during refresh operations."""
 
+    def test_cached_pr_metadata_backfills_missing_display_number(self, git_repo):
+        """Stable pre-upgrade rows show their retained PR number without a refresh."""
+        cache = cache_service_module.CacheService(git_repo.working_dir)
+        branch = BranchDetails(
+            name="nicer-yes-no-dialog",
+            last_commit_date="2026-07-28",
+            age_days=2,
+            status=BranchStatus.MERGED,
+            modified_files=False,
+            untracked_files=False,
+            staged_files=False,
+            has_remote=True,
+            has_local=False,
+            sync_status=SyncStatus.MERGED_PR.value,
+            pr_status=None,
+            pr_details={
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "number": 1,
+                "url": "https://github.com/lsdcapital/git-branch-keeper/pull/1",
+            },
+        )
+
+        cached = cache._serialize_branch(branch, tip_sha="abc123")
+        restored = cache.deserialize_branch(cached)
+
+        assert restored is not None
+        assert restored.pr_status == "1"
+        assert restored.pr_details == branch.pr_details
+
     def test_cached_branch_age_rolls_over_at_utc_midnight(self, git_repo, monkeypatch):
         """Stable cached rows derive age from their commit date on every load."""
         cache = cache_service_module.CacheService(git_repo.working_dir)

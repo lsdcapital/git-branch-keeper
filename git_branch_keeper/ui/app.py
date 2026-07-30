@@ -30,9 +30,8 @@ from git_branch_keeper.formatters import (
     format_branch_name_with_indent,
     format_changes,
     format_date,
-    format_deletion_confirmation_items,
     format_display_status,
-    format_pr_link,
+    format_pr_text,
     format_remote_status,
     get_branch_style_type,
 )
@@ -152,10 +151,28 @@ class BranchKeeperApp(App):
         self.status_message_severity = "information"
         self._status_message_timer: Timer | None = None
 
-        # Set subtitle to show repository name (version displays on right via clock)
-        repo_path = self.keeper.repo.working_dir
-        repo_name = os.path.basename(repo_path) if repo_path else "unknown"
-        self.sub_title = repo_name
+        # Keep the repository location visible: the basename alone is ambiguous when
+        # similarly named clones or worktrees are open in different folders. Use "~"
+        # under the home directory so the useful end of the path survives narrow TUIs.
+        repo_path = self.keeper.repo.working_dir or self.keeper.repo_path
+        absolute_path = os.path.abspath(repo_path) if repo_path else None
+        home_path = os.path.abspath(os.path.expanduser("~"))
+        if absolute_path:
+            try:
+                relative_to_home = os.path.relpath(absolute_path, home_path)
+            except ValueError:
+                relative_to_home = absolute_path
+            if relative_to_home == ".":
+                self.repository_display_path = "~"
+            elif relative_to_home != os.pardir and not relative_to_home.startswith(
+                os.pardir + os.sep
+            ):
+                self.repository_display_path = os.path.join("~", relative_to_home)
+            else:
+                self.repository_display_path = absolute_path
+        else:
+            self.repository_display_path = "unknown"
+        self.sub_title = self.repository_display_path
 
     def compose(self) -> ComposeResult:
         """Create child widgets."""
@@ -493,7 +510,7 @@ class BranchKeeperApp(App):
         location = Text(location_label, justify="center")
 
         # PR column - using shared formatter
-        pr_display = format_pr_link(branch.pr_status, github_base_url)
+        pr_display = format_pr_text(branch.pr_status, github_base_url)
 
         # Match COLUMNS order: Branch, Status, Last Commit, Age, Changes, Sync,
         # Location, PRs, Notes
@@ -717,6 +734,11 @@ class BranchKeeperApp(App):
                 "Paired remote deletion disabled — merged remote-only cleanup is unchanged"
             )
 
+    def action_open_pr(self, url: str) -> None:
+        """Open a PR link from the branch table in the default browser."""
+        self.open_url(url)
+        self._set_status_message("Opening pull request in browser…")
+
     def action_toggle_mark(self) -> None:
         """Toggle mark on current row."""
         if self._block_if_refreshing("marking"):
@@ -892,79 +914,49 @@ class BranchKeeperApp(App):
     def _build_delete_confirmation_prompt(
         self, branches_to_delete: list[BranchDetails]
     ) -> ConfirmationPrompt:
-        """Build one structured review of deletion scope, risk, and selection."""
+        """Build a compact checkpoint for an intentionally selected deletion batch."""
         total_marked = len(self.marked_branches) + len(self.force_marked_branches)
         force_count = len(self.force_marked_branches)
-        normal_count = len(self.marked_branches)
-        branches_list = format_deletion_confirmation_items(
-            branches_to_delete, self.keeper.delete_remote
-        )
-        remote_only_count = len(
-            {
-                branch.name
-                for branch in branches_to_delete
-                if branch.has_remote and not branch.has_local
-            }
-        )
+        branches_by_name: dict[str, list[BranchDetails]] = {}
+        for branch in branches_to_delete:
+            branches_by_name.setdefault(branch.name, []).append(branch)
 
-        if self.keeper.delete_remote:
-            scope_section = ConfirmationSection(
-                "Deletion scope: LOCAL + REMOTE",
-                f"Matching branches on {self.keeper.remote_name} will also be deleted. "
-                "Undo restores local branches only; deleted remote branches must be "
-                "pushed back manually.\n"
-                "Cancel and press d to keep remote branches instead.",
-                tone="danger",
-            )
+        selected_names = list(branches_by_name)
+        local_count = 0
+        remote_count = 0
+        for matching_rows in branches_by_name.values():
+            has_local = any(branch.has_local for branch in matching_rows)
+            has_remote = any(branch.has_remote for branch in matching_rows)
+            local_count += int(has_local)
+            remote_count += int(has_remote and (self.keeper.delete_remote or not has_local))
+
+        impact = []
+        if local_count:
+            impact.append(f"{local_count} local")
+        if remote_count:
+            impact.append(f"{remote_count} on {self.keeper.remote_name}")
+            impact.append("remote deletion is permanent")
         else:
-            scope_section = ConfirmationSection(
-                "Deletion scope: LOCAL ONLY",
-                f"Matching remotes for local branches on {self.keeper.remote_name} "
-                "will be kept and may remain visible as remote-only rows.\n"
-                "Cancel and press d to delete local and remote branches together.",
-                tone="scope",
-            )
+            impact.append("recoverable with Undo")
 
-        sections = [
-            scope_section,
-            ConfirmationSection(
-                f"Selected branches ({total_marked})",
-                branches_list,
-            ),
-        ]
-        if remote_only_count:
-            sections.append(
-                ConfirmationSection(
-                    "Remote-only selection",
-                    f"{remote_only_count} merged remote-only branch"
-                    f"{'es' if remote_only_count != 1 else ''} on "
-                    f"{self.keeper.remote_name} will be deleted. "
-                    "Remote-only branches have no local ref, so the "
-                    "delete-scope toggle does not apply.",
-                    tone="warning",
-                )
-            )
+        branches_list = "\n".join(f"• {name}" for name in selected_names)
+        warning = None
         if force_count:
-            sections.append(
-                ConfirmationSection(
-                    "Force-marked selection",
-                    f"{force_count} branch{'es are' if force_count != 1 else ' is'} "
-                    "force-marked and may contain uncommitted work. Review before deleting.",
-                    tone="danger",
-                )
-            )
+            warning = f"{force_count} force-marked · may contain uncommitted work"
 
-        description = (
-            f"{normal_count} standard · {force_count} force-marked"
-            if force_count
-            else "Review the scope and selected branches before continuing."
-        )
         return ConfirmationPrompt(
             title="Confirm deletion",
-            question=f"Delete {total_marked} marked branch" f"{'es' if total_marked != 1 else ''}?",
-            description=description,
-            confirm_label="Delete",
-            sections=tuple(sections),
+            question=f"Delete {total_marked} branch" f"{'es' if total_marked != 1 else ''}?",
+            description=" · ".join(impact),
+            warning=warning,
+            confirm_label=f"Delete {total_marked}",
+            sections=(
+                ConfirmationSection(
+                    f"Branches ({total_marked})",
+                    branches_list,
+                ),
+            ),
+            default_confirm=True,
         )
 
     def _handle_delete_confirmation(self, confirmed: bool | None) -> None:

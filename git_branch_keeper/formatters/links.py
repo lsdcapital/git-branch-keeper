@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
+from rich.style import Style
+from rich.text import Text
+
 from git_branch_keeper.formatters.branch import format_branch_name
+
+
+def _pr_display_and_url(
+    pr_status: str | None, github_base_url: str | None
+) -> tuple[str, str | None]:
+    """Return compact PR text and its destination URL."""
+    if not pr_status:
+        return "", None
+
+    if pr_status.startswith("target:"):
+        count = pr_status.split(":", 1)[1]
+        url = f"{github_base_url}/pulls" if github_base_url else None
+        return count, url
+
+    number = pr_status.removeprefix("#")
+    url = f"{github_base_url}/pull/{number}" if github_base_url else None
+    return f"#{number}", url
 
 
 def format_pr_link(pr_status: str | None, github_base_url: str | None) -> str:
@@ -16,19 +36,26 @@ def format_pr_link(pr_status: str | None, github_base_url: str | None) -> str:
     Returns:
         Formatted PR display string (may include Rich markup for links)
     """
-    if not pr_status:
+    display, url = _pr_display_and_url(pr_status, github_base_url)
+    if not display:
         return ""
+    if not url:
+        return display
+    return f"[link={url}]{display}[/link]"
 
-    if not github_base_url:
-        return pr_status
 
-    # For main branch showing target PRs
-    if pr_status.startswith("target:"):
-        count = pr_status.split(":")[1]
-        return f"[link={github_base_url}/pulls]{count}[/link]"
+def format_pr_text(pr_status: str | None, github_base_url: str | None) -> Text:
+    """Format a PR as a directly clickable Textual/Rich renderable."""
+    display, url = _pr_display_and_url(pr_status, github_base_url)
+    if not url:
+        return Text(display)
 
-    # For branch with specific PR
-    return f"[link={github_base_url}/pull/{pr_status}]{pr_status}[/link]"
+    style = Style(
+        underline=True,
+        link=url,
+        meta={"@click": ("app.open_pr", (url,))},
+    )
+    return Text(display, style=style)
 
 
 def format_branch_link(

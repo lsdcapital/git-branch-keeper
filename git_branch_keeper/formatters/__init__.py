@@ -23,6 +23,7 @@ from .links import (
     format_branch_link,
     format_branch_link_with_indent,
     format_pr_link,
+    format_pr_text,
 )
 
 # Status formatters
@@ -46,6 +47,7 @@ __all__ = [
     "format_deletion_reason",
     "format_display_status",
     "format_pr_link",
+    "format_pr_text",
     "format_remote_status",
     "format_status",
     "get_branch_style_type",

@@ -22,7 +22,7 @@ from git_branch_keeper.models.branch import (
     BranchStatus,
 )
 from git_branch_keeper.ui.app import BranchKeeperApp
-from git_branch_keeper.ui.screens import ConfirmScreen
+from git_branch_keeper.ui.screens import ConfirmationPrompt, ConfirmScreen
 
 
 def _branch(
@@ -94,6 +94,17 @@ async def test_app_mounts_and_renders_rows(make_app):
         await pilot.pause()
 
 
+async def test_header_shows_repository_path_next_to_name(make_app, git_repo):
+    app = make_app([_branch("feature/a")])
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        header_title = app.query_one("HeaderTitle", Static)
+        assert app.sub_title == git_repo.working_dir
+        assert str(header_title.content) == f"Git Branch Keeper — {git_repo.working_dir}"
+
+
 async def test_status_feedback_stays_on_fixed_third_line(make_app):
     app = make_app([_branch("feature/a")])
 
@@ -135,7 +146,7 @@ async def test_delete_scope_binding_toggles_remote_deletion(make_app):
         assert "Delete scope: LOCAL + MERGED REMOTE-ONLY [d]" in status
 
 
-async def test_delete_confirmation_explains_local_only_scope(make_app):
+async def test_delete_confirmation_summarizes_local_only_impact(make_app):
     app = make_app([_branch("feature/a", has_remote=True)])
 
     async with app.run_test() as pilot:
@@ -144,19 +155,20 @@ async def test_delete_confirmation_explains_local_only_scope(make_app):
         await pilot.pause()
 
         assert isinstance(app.screen, ConfirmScreen)
-        message = app.screen.message
-        assert "Deletion scope: LOCAL ONLY" in message
-        assert "Matching remotes for local branches on origin will be kept" in message
-        assert "remain visible as remote-only rows" in message
-        assert "Cancel and press d to delete local and remote branches together" in message
+        prompt = app.screen.prompt
+        assert prompt.question == "Delete 1 branch?"
+        assert prompt.description == "1 local · recoverable with Undo"
+        assert prompt.confirm_label == "Delete 1"
+        assert prompt.default_confirm is True
         assert [section.title for section in app.screen.prompt.sections] == [
-            "Deletion scope: LOCAL ONLY",
-            "Selected branches (1)",
+            "Branches (1)",
         ]
-        assert app.screen.prompt.sections[0].tone == "scope"
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "yes"
+        assert "press d" not in app.screen.message
 
 
-async def test_delete_confirmation_warns_remote_undo_is_manual(make_app):
+async def test_delete_confirmation_summarizes_local_and_remote_impact(make_app):
     app = make_app([_branch("feature/a", has_remote=True)])
     app.keeper.delete_remote = True
 
@@ -166,12 +178,10 @@ async def test_delete_confirmation_warns_remote_undo_is_manual(make_app):
         await pilot.pause()
 
         assert isinstance(app.screen, ConfirmScreen)
-        message = app.screen.message
-        assert "Deletion scope: LOCAL + REMOTE" in message
-        assert "Matching branches on origin will also be deleted" in message
-        assert "Undo restores local branches only" in message
-        assert "deleted remote branches must be pushed back manually" in message
-        assert app.screen.prompt.sections[0].tone == "danger"
+        assert (
+            app.screen.prompt.description == "1 local · 1 on origin · remote deletion is permanent"
+        )
+        assert "feature/a" in app.screen.prompt.sections[0].body
 
 
 async def test_delete_scope_cannot_change_behind_confirmation(make_app):
@@ -183,13 +193,14 @@ async def test_delete_scope_cannot_change_behind_confirmation(make_app):
         app.action_delete_marked()
         await pilot.pause()
         assert isinstance(app.screen, ConfirmScreen)
+        original_description = app.screen.prompt.description
 
         await pilot.press("d")
         await pilot.pause()
 
         assert app.keeper.delete_remote is False
         assert isinstance(app.screen, ConfirmScreen)
-        assert "Deletion scope: LOCAL ONLY" in app.screen.message
+        assert app.screen.prompt.description == original_description
 
 
 async def test_clear_marks_binding_empties_marks(make_app):
@@ -563,12 +574,25 @@ async def test_delete_confirmation_calls_out_remote_only_deletion(make_app):
         await pilot.pause()
 
         assert isinstance(app.screen, ConfirmScreen)
-        message = app.screen.message
-        assert "1 merged remote-only branch on origin will be deleted" in message
-        assert "delete-scope toggle does not apply" in message
-        assert "feature/gone (merged, remote only)" in message
-        assert app.screen.prompt.sections[2].title == "Remote-only selection"
-        assert app.screen.prompt.sections[2].tone == "warning"
+        prompt = app.screen.prompt
+        assert prompt.description == "1 on origin · remote deletion is permanent"
+        assert prompt.sections[0].title == "Branches (1)"
+        assert prompt.sections[0].body == "• feature/gone"
+        assert "toggle" not in app.screen.message
+
+
+async def test_delete_confirmation_keeps_force_risk_compact(make_app):
+    app = make_app([_branch("feature/risky")])
+
+    async with app.run_test() as pilot:
+        app.force_marked_branches.add("feature/risky")
+        app.action_delete_marked()
+        await pilot.pause()
+
+        assert app.screen.prompt.warning == ("1 force-marked · may contain uncommitted work")
+        assert str(app.screen.query_one("#confirm-warning").content) == (
+            "1 force-marked · may contain uncommitted work"
+        )
 
 
 async def test_status_bar_omits_blocked_when_there_is_nothing_to_explain(make_app):
@@ -637,6 +661,29 @@ async def test_confirm_screen_key_semantics(make_app, key, expected):
     assert results == [expected]
 
 
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [("escape", False), ("enter", True), ("n", False), ("y", True)],
+)
+async def test_default_confirm_key_semantics(make_app, key, expected):
+    """Deletion checkpoints focus confirm, so Enter and Y complete the action."""
+    app = make_app([_branch("feature/a")])
+    results: list[bool] = []
+    prompt = ConfirmationPrompt(
+        title="Confirm deletion",
+        question="Delete 1 branch?",
+        confirm_label="Delete 1",
+        default_confirm=True,
+    )
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen(prompt), results.append)
+        await pilot.pause()
+        await pilot.press(key)
+        await pilot.pause()
+
+    assert results == [expected]
+
+
 async def test_confirm_screen_buttons_share_one_row_with_cancel_first(make_app):
     """Guards against the button container reverting to a vertical layout."""
     app = make_app([_branch("feature/a")])
@@ -669,8 +716,58 @@ async def test_confirm_screen_renders_sections_as_literal_structured_content(mak
             for widget in app.screen.query(".confirm-section-body").results(Static)
         ]
 
-        assert titles == ["Deletion scope: LOCAL ONLY", "Selected branches (1)"]
+        assert titles == ["Branches (1)"]
         assert "feature/[wip]" in bodies[-1]
+
+
+async def test_large_delete_confirmation_keeps_full_selection_scrollable(make_app):
+    """Large batches stay compact while every selected name remains inspectable."""
+    branches = [_branch(f"feature/cleanup-{index:02}") for index in range(48)]
+    app = make_app(branches)
+
+    async with app.run_test(size=(80, 27)) as pilot:
+        app.marked_branches.update(branch.name for branch in branches)
+        app.action_delete_marked()
+        await pilot.pause()
+
+        prompt = app.screen.prompt
+        body = app.screen.query_one("#confirm-message")
+        assert prompt.question == "Delete 48 branches?"
+        assert prompt.description == "48 local · recoverable with Undo"
+        assert "feature/cleanup-00" in prompt.sections[0].body
+        assert "feature/cleanup-47" in prompt.sections[0].body
+        assert body.virtual_size.height > body.region.height
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "yes"
+
+
+async def test_typical_delete_confirmation_fits_without_scrolling(make_app):
+    """A normal batch keeps its complete impact and branch list visible."""
+    branches = [_branch(f"feature/cleanup-{index}") for index in range(4)]
+    app = make_app(branches)
+
+    async with app.run_test(size=(80, 27)) as pilot:
+        app.marked_branches.update(branch.name for branch in branches)
+        app.action_delete_marked()
+        await pilot.pause()
+
+        body = app.screen.query_one("#confirm-message")
+        assert body.max_scroll_y == 0
+        assert app.screen.query_one("#confirm-actions").region.bottom <= app.screen.size.height
+
+
+async def test_opening_enter_does_not_confirm_the_new_modal(make_app):
+    """The Enter that opens the checkpoint must not activate its default button."""
+    app = make_app([_branch("feature/a")])
+
+    async with app.run_test() as pilot:
+        app.marked_branches.add("feature/a")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen)
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "yes"
 
 
 async def test_restore_confirmation_reuses_structure_with_safe_action_variant(make_app):

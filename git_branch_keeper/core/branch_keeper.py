@@ -1675,13 +1675,26 @@ class BranchKeeper:
             pr_info = pr_data[branch]
             self._annotate_pr_head_match(branch, pr_info)
 
+            # Keep the selected source PR visible regardless of whether it is open,
+            # merged, or closed without merging. GitHubService prefers the latest
+            # open PR, then merged, then closed, and retains its number in pr_info.
+            # Protected target branches deliberately keep showing an aggregate open
+            # count instead of implying that one source PR represents the target.
+            if branch == self.main_branch:
+                if pr_info["count"] > 0:
+                    pr_status = f"target:{pr_info['count']}"
+            else:
+                pr_number = pr_info.get("number")
+                if isinstance(pr_number, int) and not isinstance(pr_number, bool):
+                    pr_status = str(pr_number)
+
             # If branch has open PRs, it's always ACTIVE
             if pr_info["count"] > 0:
                 status = BranchStatus.ACTIVE
-                # Format PR status display
-                if branch == self.main_branch:
-                    pr_status = f"target:{pr_info['count']}"
-                else:
+                # Compatibility fallback for incomplete provider data. Real GitHub
+                # PRs have a number, but retaining a non-empty display still signals
+                # an open PR if a mock/provider omits it.
+                if branch != self.main_branch and pr_status is None:
                     pr_status = str(pr_info["count"])
 
             # If branch was merged via PR

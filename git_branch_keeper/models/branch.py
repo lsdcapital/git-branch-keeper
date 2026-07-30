@@ -98,6 +98,8 @@ class BranchDetails:
     # before remote enumeration was local by construction. `has_remote and not
     # has_local` is the remote-only case; see BranchRefResolver.
     has_local: bool = True
+    # Compact PR display value. Source branches store the selected PR number;
+    # protected target branches use ``target:<open count>``.
     pr_status: str | None = None
     pr_details: dict[str, Any] | None = None  # Structured PR metadata from provider APIs
     notes: str | None = None  # Added notes field
