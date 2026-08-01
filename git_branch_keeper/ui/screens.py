@@ -235,10 +235,17 @@ class ConfirmScreen(BaseModal[bool]):
     }
 
     ConfirmScreen #confirm-actions {
-        height: 3;
-        min-height: 3;
-        padding: 0 2;
+        height: 2;
+        min-height: 2;
+        padding: 1 2 0 2;
         background: $surface;
+    }
+
+    ConfirmScreen #confirm-actions Button {
+        width: auto;
+        min-width: 10;
+        height: 1;
+        margin-left: 2;
     }
     """
 
@@ -256,7 +263,7 @@ class ConfirmScreen(BaseModal[bool]):
         self,
         prompt: ConfirmationPrompt | str,
         dialog_title: str = "Confirm",
-        confirm_label: str = "Yes",
+        confirm_label: str = "Confirm",
         cancel_label: str = "Cancel",
         danger: bool = True,
     ):
@@ -324,22 +331,26 @@ class ConfirmScreen(BaseModal[bool]):
                                 markup=False,
                             )
             with Horizontal(id="confirm-actions", classes="modal-buttons"):
-                cancel_keys = "Esc" if self.prompt.default_confirm else "Esc/Enter"
-                confirm_keys = "Enter/Y" if self.prompt.default_confirm else "Y"
                 yield Button(
-                    f"{cancel_keys}  {self.cancel_label}",
+                    self.cancel_label,
                     variant="default",
                     id="no",
+                    compact=True,
                 )
                 yield Button(
-                    f"{confirm_keys}  {self.confirm_label}",
+                    self.confirm_label,
                     variant="error" if self.danger else "primary",
                     id="yes",
+                    compact=True,
                 )
 
     def on_mount(self) -> None:
         dialog = self.query_one("#confirm-dialog", Vertical)
         dialog.border_title = self.dialog_title
+        if self.prompt.default_confirm:
+            dialog.border_subtitle = f" Esc {self.cancel_label} · Enter/Y {self.confirm_label} "
+        else:
+            dialog.border_subtitle = f" Esc/Enter {self.cancel_label} · Y {self.confirm_label} "
         if self.prompt.default_confirm:
             self.query_one("#yes", Button).focus()
 

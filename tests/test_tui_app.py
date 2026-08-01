@@ -685,7 +685,7 @@ async def test_default_confirm_key_semantics(make_app, key, expected):
 
 
 async def test_confirm_screen_buttons_share_one_row_with_cancel_first(make_app):
-    """Guards against the button container reverting to a vertical layout."""
+    """Confirmation actions stay compact, ordered, and visually action-specific."""
     app = make_app([_branch("feature/a")])
     async with app.run_test() as pilot:
         app.push_screen(ConfirmScreen("Delete 1 branch?", confirm_label="Delete"))
@@ -693,8 +693,13 @@ async def test_confirm_screen_buttons_share_one_row_with_cancel_first(make_app):
 
         cancel = app.screen.query_one("#no", Button)
         delete = app.screen.query_one("#yes", Button)
+        dialog = app.screen.query_one("#confirm-dialog")
         assert cancel.region.y == delete.region.y  # side by side, not stacked
         assert cancel.region.x < delete.region.x  # Cancel left of Delete
+        assert cancel.region.height == delete.region.height == 1
+        assert str(cancel.label) == "Cancel"
+        assert str(delete.label) == "Delete"
+        assert dialog.border_subtitle == " Esc/Enter Cancel · Y Delete "
         assert cancel.region.bottom <= app.screen.size.height
         assert delete.region.bottom <= app.screen.size.height
 

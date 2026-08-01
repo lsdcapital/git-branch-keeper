@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI test coverage (pure marking-logic unit tests plus Textual `run_test` harness tests)
 
 ### Fixed
+- Confirmation dialogs now use compact, action-labelled buttons with keyboard hints in
+  the dialog frame instead of oversized Yes/No-style controls.
 - The TUI header now shows the repository path next to the application name, making
   similarly named clones and worktrees easy to distinguish without using another row.
 - PR cells now show a clickable `#number` for open, merged, and closed-unmerged
