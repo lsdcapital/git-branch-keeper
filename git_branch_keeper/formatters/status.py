@@ -17,7 +17,11 @@ def format_status(status: BranchStatus) -> str:
     return STATUS_DISPLAY.get(status.value, status.value)
 
 
-def has_cleanup_blockers(branch: BranchDetails, protected_branches: list[str]) -> bool:
+def has_cleanup_blockers(
+    branch: BranchDetails,
+    protected_branches: list[str],
+    allow_remote_deletion: bool = False,
+) -> bool:
     """Return True when a stale/merged row is blocked from cleanup.
 
     The underlying merge/stale status remains true, but displaying a plain
@@ -32,6 +36,8 @@ def has_cleanup_blockers(branch: BranchDetails, protected_branches: list[str]) -
 
     if not branch.has_local and not (branch.has_remote and branch.status == BranchStatus.MERGED):
         return True
+    if not branch.has_local and not allow_remote_deletion:
+        return True
 
     return (
         branch.modified_files is True
@@ -40,9 +46,17 @@ def has_cleanup_blockers(branch: BranchDetails, protected_branches: list[str]) -
     )
 
 
-def format_display_status(branch: BranchDetails, protected_branches: list[str]) -> str:
+def format_display_status(
+    branch: BranchDetails,
+    protected_branches: list[str],
+    allow_remote_deletion: bool = False,
+) -> str:
     """Format status for cleanup-focused CLI/TUI display."""
-    if has_cleanup_blockers(branch, protected_branches):
+    if has_cleanup_blockers(
+        branch,
+        protected_branches,
+        allow_remote_deletion=allow_remote_deletion,
+    ):
         return "blocked"
     return format_status(branch.status)
 
@@ -91,7 +105,11 @@ def format_deletion_confirmation_items(
     return "\n".join(lines)
 
 
-def get_branch_style_type(branch: BranchDetails, protected_branches: list[str]) -> str:
+def get_branch_style_type(
+    branch: BranchDetails,
+    protected_branches: list[str],
+    allow_remote_deletion: bool = False,
+) -> str:
     """
     Determine the style type for a branch based on its properties.
 
@@ -106,6 +124,9 @@ def get_branch_style_type(branch: BranchDetails, protected_branches: list[str]) 
         return BranchStyleType.PROTECTED
 
     if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]:
+        if not branch.has_local and not allow_remote_deletion:
+            return BranchStyleType.WARNING
+
         # Remote-only cleanup needs positive merge proof. A stale remote ref is
         # visible for review but is not safe to delete automatically.
         if not branch.has_local and not (

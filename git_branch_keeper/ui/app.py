@@ -467,7 +467,11 @@ class BranchKeeperApp(App):
         is_force_marked = branch.name in self.force_marked_branches
 
         # Determine text color using unified styling logic
-        style_type = get_branch_style_type(branch, self.keeper.protected_branches)
+        style_type = get_branch_style_type(
+            branch,
+            self.keeper.protected_branches,
+            allow_remote_deletion=self.keeper.delete_remote,
+        )
         # Override color for force-marked branches to show they will be deleted
         if is_force_marked:
             text_color = TUI_COLORS[BranchStyleType.DELETABLE]  # Use red color
@@ -492,7 +496,11 @@ class BranchKeeperApp(App):
         branch_text = Text(formatted_name, style=text_color)
 
         # Format cleanup-focused status using shared formatter
-        status_str = format_display_status(branch, self.keeper.protected_branches)
+        status_str = format_display_status(
+            branch,
+            self.keeper.protected_branches,
+            allow_remote_deletion=self.keeper.delete_remote,
+        )
         status_text = Text(status_str, style=text_color)
 
         # Format last commit date using shared formatter
@@ -597,6 +605,9 @@ class BranchKeeperApp(App):
         # Validate ALL related items before marking any
         issues = []
         for branch in matching:
+            if not branch.is_worktree and not branch.has_local and not self.keeper.delete_remote:
+                return False, "Enable LOCAL + REMOTE deletion with 'd' before marking remote refs"
+
             if (
                 not branch.is_worktree
                 and not branch.has_local
@@ -675,7 +686,10 @@ class BranchKeeperApp(App):
                 branch.name
                 for branch in self.branches
                 if BranchValidationService.blocking_reason(
-                    branch, self.keeper.protected_branches, self._current_branch_name()
+                    branch,
+                    self.keeper.protected_branches,
+                    self._current_branch_name(),
+                    allow_remote_deletion=self.keeper.delete_remote,
                 )
             }
             - deletable_names
@@ -688,10 +702,7 @@ class BranchKeeperApp(App):
         if self.keeper.delete_remote:
             scope_text.append("Delete scope: LOCAL + REMOTE [d]", style="bold yellow")
         else:
-            scope_text.append(
-                "Delete scope: LOCAL + MERGED REMOTE-ONLY [d]",
-                style="bold green",
-            )
+            scope_text.append("Delete scope: LOCAL ONLY [d]", style="bold green")
 
         summary_text = Text(no_wrap=True, overflow="ellipsis")
         summary_text.append(
@@ -730,9 +741,16 @@ class BranchKeeperApp(App):
                 severity="warning",
             )
         else:
-            self._set_status_message(
-                "Paired remote deletion disabled — merged remote-only cleanup is unchanged"
-            )
+            remote_only_names = {
+                branch.name
+                for branch in self.branches
+                if not branch.is_worktree and branch.has_remote and not branch.has_local
+            }
+            self.marked_branches.difference_update(remote_only_names)
+            self.force_marked_branches.difference_update(remote_only_names)
+            self._set_status_message("Remote deletion disabled — remote-only marks cleared")
+        self._refresh_branch_rows()
+        self._update_status()
 
     def action_open_pr(self, url: str) -> None:
         """Open a PR link from the branch table in the default browser."""
@@ -921,7 +939,6 @@ class BranchKeeperApp(App):
         for branch in branches_to_delete:
             branches_by_name.setdefault(branch.name, []).append(branch)
 
-        selected_names = list(branches_by_name)
         local_count = 0
         remote_count = 0
         for matching_rows in branches_by_name.values():
@@ -939,24 +956,48 @@ class BranchKeeperApp(App):
         else:
             impact.append("recoverable with Undo")
 
-        branches_list = "\n".join(f"• {name}" for name in selected_names)
-        warning = None
+        local_names = [
+            name
+            for name, rows in branches_by_name.items()
+            if any(branch.has_local for branch in rows)
+        ]
+        remote_names = [
+            name
+            for name, rows in branches_by_name.items()
+            if any(branch.has_remote for branch in rows)
+            and (self.keeper.delete_remote or not any(branch.has_local for branch in rows))
+        ]
+        sections = []
+        if local_names:
+            sections.append(
+                ConfirmationSection(
+                    f"Local branches ({len(local_names)})",
+                    "\n".join(f"• {name}" for name in local_names),
+                )
+            )
+        if remote_names:
+            sections.append(
+                ConfirmationSection(
+                    f"Remote branches on {self.keeper.remote_name} ({len(remote_names)})",
+                    "\n".join(f"• {name}" for name in remote_names),
+                    tone="danger",
+                )
+            )
+
+        warnings = []
         if force_count:
-            warning = f"{force_count} force-marked · may contain uncommitted work"
+            warnings.append(f"{force_count} force-marked · may contain uncommitted work")
+        if remote_names:
+            warnings.append("Remote branches are shared repository state and may belong to others")
 
         return ConfirmationPrompt(
             title="Confirm deletion",
             question=f"Delete {total_marked} branch" f"{'es' if total_marked != 1 else ''}?",
             description=" · ".join(impact),
-            warning=warning,
+            warning=" · ".join(warnings) if warnings else None,
             confirm_label=f"Delete {total_marked}",
-            sections=(
-                ConfirmationSection(
-                    f"Branches ({total_marked})",
-                    branches_list,
-                ),
-            ),
-            default_confirm=True,
+            sections=tuple(sections),
+            default_confirm=False,
         )
 
     def _handle_delete_confirmation(self, confirmed: bool | None) -> None:
@@ -980,7 +1021,9 @@ class BranchKeeperApp(App):
                         branch.worktree_is_orphaned
                         or is_force
                         or BranchValidationService.is_deletable(
-                            branch, self.keeper.protected_branches
+                            branch,
+                            self.keeper.protected_branches,
+                            allow_remote_deletion=self.keeper.delete_remote,
                         )
                     ):
                         branches.append(branch)
@@ -1411,10 +1454,16 @@ class BranchKeeperApp(App):
 
         # Store original refresh flag value using safe .get() method
         original_refresh = self.keeper.config.get("refresh", False)
+        remote_sync_error = None
 
         try:
             # Temporarily enable refresh to bypass cache
             self.keeper.config.refresh = True
+
+            if self.keeper.config.get("include_remote_branches", True):
+                _, remote_sync_error = await asyncio.to_thread(self.keeper.sync_remote_refs)
+            else:
+                self.keeper.git_service.invalidate_analysis_caches()
 
             # Re-run the shared analyzer with Rich progress disabled for TUI.
             analysis = await asyncio.to_thread(
@@ -1430,7 +1479,13 @@ class BranchKeeperApp(App):
                     preserve_view=True,
                 )
 
-                self._set_status_message("Branch data refreshed", severity="success")
+                if remote_sync_error:
+                    self._set_status_message(
+                        "Branch data refreshed, but remote synchronization failed",
+                        severity="warning",
+                    )
+                else:
+                    self._set_status_message("Branch data refreshed", severity="success")
             else:
                 self._set_status_message("No branches found", severity="warning")
 

@@ -404,6 +404,7 @@ class CacheService:
                 notes=data.get("notes"),
                 in_worktree=False,  # Don't cache worktree status - it's dynamic
                 merge_detection=data.get("merge_detection"),
+                tip_sha=data.get("tip_sha"),
             )
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Failed to deserialize branch {data.get('name', 'unknown')}: {e}")

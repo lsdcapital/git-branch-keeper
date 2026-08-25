@@ -11,7 +11,11 @@ class BranchValidationService:
     """Service for validating branch operations."""
 
     @staticmethod
-    def is_deletable(branch: BranchDetails, protected_branches: list[str]) -> bool:
+    def is_deletable(
+        branch: BranchDetails,
+        protected_branches: list[str],
+        allow_remote_deletion: bool = False,
+    ) -> bool:
         """
         Check if a branch is deletable based on status and protection.
 
@@ -22,12 +26,14 @@ class BranchValidationService:
         Returns:
             True if branch can be deleted (is stale/merged, not protected, and has no issues)
         """
-        # A merged remote-only branch is a first-class cleanup candidate. There is
-        # no local ref to inspect or remove, so stale alone is deliberately not
-        # enough: remote-only cleanup requires positive merge proof.
+        # A merged remote-only branch can be a cleanup candidate, but only when the
+        # caller explicitly opted into remote mutation. There is no local ref to
+        # inspect or remove, so stale alone is deliberately not enough either:
+        # remote-only cleanup requires positive merge proof.
         if not branch.has_local:
             return (
-                branch.has_remote
+                allow_remote_deletion
+                and branch.has_remote
                 and branch.status == BranchStatus.MERGED
                 and branch.name not in protected_branches
             )
@@ -52,6 +58,7 @@ class BranchValidationService:
         branch: BranchDetails,
         protected_branches: list[str],
         current_branch: str | None = None,
+        allow_remote_deletion: bool = False,
     ) -> str | None:
         """Why a cleanup candidate is not deletable, or None if it is deletable.
 
@@ -68,6 +75,8 @@ class BranchValidationService:
             branch.has_remote and branch.status == BranchStatus.MERGED
         ):
             return "remote-only and not confirmed merged"
+        if not branch.has_local and not allow_remote_deletion:
+            return "remote deletion is disabled"
         if branch.name in protected_branches:
             return "protected"
         if current_branch is not None and branch.name == current_branch:
@@ -87,6 +96,7 @@ class BranchValidationService:
         branches: list[BranchDetails],
         protected_branches: list[str],
         current_branch: str | None = None,
+        allow_remote_deletion: bool = False,
     ) -> list[tuple[int, str]]:
         """Count cleanup candidates that were held back, grouped by reason.
 
@@ -97,7 +107,10 @@ class BranchValidationService:
         counts: Counter[str] = Counter()
         for branch in branches:
             reason = BranchValidationService.blocking_reason(
-                branch, protected_branches, current_branch
+                branch,
+                protected_branches,
+                current_branch,
+                allow_remote_deletion=allow_remote_deletion,
             )
             if reason:
                 counts[reason] += 1

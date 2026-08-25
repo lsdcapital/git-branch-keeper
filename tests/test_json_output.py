@@ -92,7 +92,7 @@ def test_schema_to_dict_is_json_serializable():
     assert "delete_remote_branch" in decoded["branch_scan_result"]["action_types"]
 
 
-def test_merged_remote_only_json_action_is_remote_delete_even_without_remote_flag():
+def test_merged_remote_only_json_action_requires_remote_flag():
     branch = BranchDetails(
         name="feature/remote-only",
         last_commit_date="2024-01-01",
@@ -112,7 +112,12 @@ def test_merged_remote_only_json_action_is_remote_delete_even_without_remote_fla
 
     actions = _recommended_actions(analysis, delete_remote=False, remote_name="upstream")
 
-    assert _deletion_scope(branch, delete_remote=False) == "remote-only"
+    assert _deletion_scope(branch, delete_remote=False) == "none"
+    assert actions == []
+
+    actions = _recommended_actions(analysis, delete_remote=True, remote_name="upstream")
+
+    assert _deletion_scope(branch, delete_remote=True) == "remote-only"
     assert actions == [
         {
             "type": "delete_remote_branch",

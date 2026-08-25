@@ -66,7 +66,11 @@ class DisplayService:
         # Add rows
         for branch in branch_details:
             # Get row style using shared formatter
-            style_type = get_branch_style_type(branch, protected_branches)
+            style_type = get_branch_style_type(
+                branch,
+                protected_branches,
+                allow_remote_deletion=delete_remote,
+            )
             row_style = CLI_COLORS.get(style_type)
 
             is_current = branch.name == current_branch_name if current_branch_name else False
@@ -75,7 +79,11 @@ class DisplayService:
             )
             last_commit_date = format_date(branch.last_commit_date)
             location = format_remote_status(branch.has_remote, branch.has_local)
-            status_text = format_display_status(branch, protected_branches)
+            status_text = format_display_status(
+                branch,
+                protected_branches,
+                allow_remote_deletion=delete_remote,
+            )
             changes_indicator = format_changes(branch, current_branch_name)
             pr_display = format_pr_link(branch.pr_status, github_base_url)
 
@@ -100,7 +108,7 @@ class DisplayService:
             # Display legend
             console.print("\nLegend:")
             console.print("Location: local = local only      both = local and remote")
-            console.print("          remote = remote only (merged refs can be deleted)")
+            console.print("          remote = remote only (requires --remote for deletion)")
             console.print("↑ = Unpushed commits      ↓ = Commits to pull")
             console.print("* = Current branch        +M = Modified files")
             console.print("+U = Untracked files      +S = Staged files")
@@ -111,7 +119,11 @@ class DisplayService:
             branches_to_delete = [
                 branch
                 for branch in branch_details
-                if BranchValidationService.is_deletable(branch, protected_branches)
+                if BranchValidationService.is_deletable(
+                    branch,
+                    protected_branches,
+                    allow_remote_deletion=delete_remote,
+                )
             ]
 
             if branches_to_delete:
@@ -131,7 +143,10 @@ class DisplayService:
             # Account for merged/stale rows that remain blocked (for example,
             # stale remote-only refs, which require positive merge proof).
             blocked = BranchValidationService.summarize_blocked(
-                branch_details, protected_branches, current_branch_name
+                branch_details,
+                protected_branches,
+                current_branch_name,
+                allow_remote_deletion=delete_remote,
             )
             if blocked:
                 console.print("\nMerged/stale but not deletable:")

@@ -3,7 +3,7 @@
 from .branch_queries import BranchQueries
 from .github import GitHubService
 from .merge_detector import MergeDetector
-from .operations import GitOperations
+from .operations import GitOperations, RemoteDeletionResult
 from .worktrees import WorktreeService
 
 __all__ = [
@@ -11,5 +11,6 @@ __all__ = [
     "GitHubService",
     "GitOperations",
     "MergeDetector",
+    "RemoteDeletionResult",
     "WorktreeService",
 ]

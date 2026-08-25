@@ -48,10 +48,10 @@ git-branch-keeper --debug
 - For branches with local and remote refs, deletion is **local-only by default**; the
   matching remote is kept unless `--remote` is passed (`config.delete_remote`)
 - Use `--dry-run` to preview cleanup candidates without prompts or changes
-- Branches that exist only on the remote are analyzed by default. Positively merged
-  remote-only refs are cleanup candidates; stale/unmerged ones are never deleted.
-  `--no-remote-branches` restores the local-only view. The `--remote` flag separately
-  controls matching-remote deletion for branches that also exist locally.
+- Branches that exist only on the remote are analyzed by default for visibility.
+  `--no-remote-branches` restores the local-only view. Every remote mutation requires
+  explicit opt-in with TUI `d` or CLI `--remote`; only then can positively merged
+  remote-only refs become cleanup candidates. Stale/unmerged ones are never deleted.
 
 ## Architecture
 
@@ -252,11 +252,11 @@ ahead/behind and a silently downgraded confidence. On one real repo that was 37 
 tabs call them directly, bypassing the analysis path, so each needs its own remote-only
 short-circuit rather than relying on the one in `get_branch_status_details`.
 
-**Only positively merged remote-only branches are deletable.** Stale age is not enough
-when the only mutation is `git push <remote> --delete`; `BranchValidationService` and the
-force-mode planner therefore admit `MERGED` only. They are cleanup candidates regardless
-of `config.delete_remote`, because there is no local ref and hence no local-only action.
-The TUI calls this out in both the status bar and confirmation dialog.
+**Only explicitly opted-in, positively merged remote-only branches are deletable.** Stale
+age is not enough when the only mutation is `git push <remote> --delete`;
+`BranchValidationService` and the force-mode planner therefore require both `MERGED` and
+`config.delete_remote`. Without opt-in they remain visible but blocked. The TUI calls
+this out in both the status bar and confirmation dialog.
 
 `BranchKeeper._delete_remote_only_branch()` re-runs merge detection at the destructive
 boundary and captures the remote-tracking tip. `GitOperations.delete_remote_only_branch()`

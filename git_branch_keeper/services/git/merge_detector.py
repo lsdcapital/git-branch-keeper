@@ -128,6 +128,22 @@ class MergeDetector:
         with self._cache_lock:
             self._merge_status_cache[key] = value
 
+    def invalidate(self) -> None:
+        """Discard branch-dependent memos before an explicit refresh."""
+        with self._cache_lock:
+            self._merge_status_cache.clear()
+            self._main_branch_sha_cache.clear()
+        with self._squash_lock:
+            self._likely_squash_merged.clear()
+        with self._partial_lock:
+            self._partial_merge.clear()
+        with self._unstarted_lock:
+            self._unstarted_unverifiable.clear()
+        with self._remote_history_lock:
+            self._remote_history_unverifiable.clear()
+        with self._merge_info_lock:
+            self._merge_detection_info.clear()
+
     def _increment_stat(self, method: str):
         """Thread-safe stats increment."""
         with self._stats_lock:
@@ -156,6 +172,67 @@ class MergeDetector:
             return dict(
                 self._merge_detection_info.get(branch_name, self._default_merge_detection_info())
             )
+
+    def validate_exact_squash_match(
+        self,
+        branch_name: str,
+        main_branch: str,
+        matched_commit: str,
+    ) -> bool:
+        """Revalidate one previously discovered exact squash match directly.
+
+        The normal discovery scan is deliberately bounded. Once an exact match is
+        known, destructive revalidation should not lose it merely because main grew
+        past that window: verify the same commit is still on main and still has the
+        branch's combined stable patch-id.
+        """
+        try:
+            repo = self._get_repo()
+            rev = self.refs.resolve(branch_name, repo, refresh=True)
+            main_tip = repo.refs[main_branch].commit
+            matched = repo.commit(matched_commit)
+            if not repo.is_ancestor(matched, main_tip):
+                logger.debug(
+                    f"[squash-proof] Stored match {matched.hexsha[:7]} is no longer on "
+                    f"{main_branch}"
+                )
+                return False
+
+            merge_bases = repo.merge_base(main_branch, rev)
+            if not merge_bases:
+                return False
+            branch_diff = repo.git.diff(
+                f"{merge_bases[0].hexsha}..{rev}",
+                "--no-color",
+                "--ignore-space-change",
+                "--ignore-blank-lines",
+            )
+            branch_patch_id = self._patch_id_for_diff(branch_diff)
+            matched_patch_id = self._patch_id_for_diff(self._commit_diff(repo, matched.hexsha))
+            if not branch_patch_id or branch_patch_id != matched_patch_id:
+                logger.debug(
+                    f"[squash-proof] Stored match {matched.hexsha[:7]} no longer matches "
+                    f"{branch_name}"
+                )
+                return False
+
+            self._set_merge_detection_info(
+                branch_name,
+                {
+                    "merged": True,
+                    "method": "squash_patch_id",
+                    "confidence": "exact",
+                    "matched_commit": matched.hexsha,
+                    "searched_commits": 1,
+                    "scan_limit": None,
+                    "truncated": False,
+                },
+            )
+            logger.debug(f"[squash-proof] Revalidated {branch_name} against {matched.hexsha[:7]}")
+            return True
+        except (*GIT_ERRORS, ValueError) as error:
+            logger.debug(f"[squash-proof] Could not revalidate {branch_name}: {error}")
+            return False
 
     def _get_squash_scan_limit(self) -> int:
         """Return the maximum number of first-parent main commits to scan for squash matches."""

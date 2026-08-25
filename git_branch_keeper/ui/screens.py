@@ -26,10 +26,10 @@ def _format_location(branch: BranchDetails) -> str:
     """Describe where a branch lives, for the detail pane's Remote row.
 
     A plain "Yes"/"No" cannot say "remote only", which is the one case the user
-    needs called out because merged remote-only refs are cleanup candidates.
+    needs called out because deleting it necessarily mutates shared remote state.
     """
     if branch.has_remote and not branch.has_local:
-        return "Remote only (merged refs are deletable)"
+        return "Remote only (deletion requires remote opt-in)"
     return "Yes" if branch.has_remote else "No"
 
 
@@ -541,6 +541,10 @@ class TabbedInfoScreen(BaseModal[None]):
             self.branch.has_remote and self.branch.status == BranchStatus.MERGED
         ):
             blockers.append("Remote-only branch is not confirmed merged")
+        elif not self.branch.has_local and not self.keeper.delete_remote:
+            blockers.append(
+                "Remote deletion is disabled; press 'd' in the branch list to enable it"
+            )
 
         if self.branch.status == BranchStatus.UNSTARTED:
             blockers.append("Branch has no commits of its own - nothing was merged")
@@ -606,7 +610,11 @@ class TabbedInfoScreen(BaseModal[None]):
         # Format PR/status display using shared formatters
         github_base_url = self.keeper._get_github_base_url()
         pr_display = format_pr_link(self.branch.pr_status, github_base_url) or "None"
-        display_status = format_display_status(self.branch, self.keeper.protected_branches)
+        display_status = format_display_status(
+            self.branch,
+            self.keeper.protected_branches,
+            allow_remote_deletion=self.keeper.delete_remote,
+        )
         status_lines = f"[bold]Status:[/bold] {display_status}"
         if display_status != self.branch.status.value:
             status_lines += f"\n[bold]Merge Status:[/bold] {self.branch.status.value}"
@@ -615,7 +623,11 @@ class TabbedInfoScreen(BaseModal[None]):
         is_deletable = (
             False
             if self.branch.is_worktree
-            else BranchValidationService.is_deletable(self.branch, self.keeper.protected_branches)
+            else BranchValidationService.is_deletable(
+                self.branch,
+                self.keeper.protected_branches,
+                allow_remote_deletion=self.keeper.delete_remote,
+            )
         )
 
         # Format detailed info

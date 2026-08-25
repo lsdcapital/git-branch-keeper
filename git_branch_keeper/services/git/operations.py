@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import git
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
 
 console = Console()
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteDeletionResult:
+    """Structured outcome for a remote-only deletion attempt."""
+
+    success: bool
+    outcome: str
+    message: str
+    remote_deleted: bool = False
 
 
 class GitOperations:
@@ -88,6 +99,64 @@ class GitOperations:
         finally:
             self.in_git_operation = False
 
+    @staticmethod
+    def _git_error_detail(error: git.exc.GitCommandError) -> str:
+        """Return Git's useful stderr without reducing it to a generic failure."""
+        stderr = (getattr(error, "stderr", None) or "").strip()
+        if stderr:
+            return stderr
+        stdout = (getattr(error, "stdout", None) or "").strip()
+        if stdout:
+            return stdout
+        return str(error)
+
+    def invalidate_analysis_caches(self) -> None:
+        """Discard ref and merge memos before an explicit reanalysis."""
+        self.ref_resolver.invalidate()
+        self.merge_detector.invalidate()
+
+    def sync_remote_refs(self) -> tuple[bool, str | None]:
+        """Fetch and prune the selected remote for an explicit user refresh."""
+        try:
+            repo = self._get_repo()
+            repo.git.fetch("--prune", "--no-tags", self.remote_name)
+            self.invalidate_analysis_caches()
+            return True, None
+        except git.exc.GitCommandError as error:
+            self.invalidate_analysis_caches()
+            detail = self._git_error_detail(error)
+            logger.warning(f"Could not synchronize {self.remote_name}: {detail}")
+            return False, detail
+
+    def get_live_remote_branch_sha(self, branch_name: str) -> tuple[str | None, str | None]:
+        """Return the server's exact branch tip, distinguishing absence from failure."""
+        try:
+            repo = self._get_repo()
+            ref_name = f"refs/heads/{branch_name}"
+            output = repo.git.ls_remote("--heads", self.remote_name, ref_name).strip()
+            if not output:
+                return None, None
+
+            for line in output.splitlines():
+                fields = line.split()
+                if len(fields) == 2 and fields[1] == ref_name:
+                    return fields[0], None
+            return None, f"Unexpected ls-remote response for {self.remote_name}/{branch_name}"
+        except git.exc.GitCommandError as error:
+            return None, self._git_error_detail(error)
+
+    def _discard_remote_tracking_ref(
+        self, repo: git.Repo, branch_name: str, expected_sha: str
+    ) -> None:
+        """Drop one stale tracking ref without touching any server-side state."""
+        tracking_ref = f"refs/remotes/{self.remote_name}/{branch_name}"
+        try:
+            repo.git.update_ref("-d", tracking_ref, expected_sha)
+        except git.exc.GitCommandError as error:
+            logger.debug(
+                f"Could not remove tracking ref {tracking_ref}: {self._git_error_detail(error)}"
+            )
+
     # ============================================================================
     # Delegation methods to MergeDetector
     # ============================================================================
@@ -138,6 +207,16 @@ class GitOperations:
     def get_merge_detection_info(self, branch_name: str) -> dict:
         """Get structured merge-detection details for display/JSON output."""
         return self.merge_detector.get_merge_detection_info(branch_name)
+
+    def validate_exact_squash_match(
+        self, branch_name: str, main_branch: str, matched_commit: str
+    ) -> bool:
+        """Revalidate a stored exact squash proof without a bounded history scan."""
+        return self.merge_detector.validate_exact_squash_match(
+            branch_name,
+            main_branch,
+            matched_commit,
+        )
 
     # ============================================================================
     # Delegation methods to BranchRefResolver
@@ -418,7 +497,7 @@ class GitOperations:
         expected_sha: str,
         dry_run: bool = False,
         batch_id: str | None = None,
-    ) -> bool:
+    ) -> RemoteDeletionResult:
         """Delete a remote-only ref if it still has the expected tip.
 
         This deliberately differs from ``delete_branch``: there is no local head
@@ -430,31 +509,72 @@ class GitOperations:
                 repo = self._get_repo()
                 state = self.ref_resolver.snapshot(repo, refresh=True).get(branch_name)
                 if not state or not state.has_remote or state.has_local:
-                    logger.warning(
-                        f"Refusing remote-only deletion of {branch_name}: "
-                        "branch location changed"
+                    message = "Branch location changed before remote deletion"
+                    logger.warning(f"Refusing remote-only deletion of {branch_name}: {message}")
+                    return RemoteDeletionResult(
+                        success=False,
+                        outcome="location_changed",
+                        message=message,
                     )
-                    return False
                 if state.tip_sha != expected_sha:
-                    logger.warning(
-                        f"Refusing remote-only deletion of {branch_name}: "
-                        f"tip changed from {expected_sha[:12]} to {state.tip_sha[:12]}"
+                    message = (
+                        f"Branch tip changed from {expected_sha[:12]} " f"to {state.tip_sha[:12]}"
                     )
-                    return False
+                    logger.warning(f"Refusing remote-only deletion of {branch_name}: {message}")
+                    return RemoteDeletionResult(
+                        success=False,
+                        outcome="tip_changed",
+                        message=message,
+                    )
+
+                live_sha, live_error = self.get_live_remote_branch_sha(branch_name)
+                if live_error:
+                    return RemoteDeletionResult(
+                        success=False,
+                        outcome="remote_check_failed",
+                        message=f"Could not check live remote ref: {live_error}",
+                    )
+                if live_sha is None:
+                    if not dry_run:
+                        self._discard_remote_tracking_ref(repo, branch_name, expected_sha)
+                    message = f"Remote branch {self.remote_name}/{branch_name} was already absent"
+                    console.print(f"[green]{message}[/green]")
+                    return RemoteDeletionResult(
+                        success=True,
+                        outcome="already_absent",
+                        message=message,
+                    )
+                if live_sha != expected_sha:
+                    message = f"Remote branch advanced from {expected_sha[:12]} to {live_sha[:12]}"
+                    return RemoteDeletionResult(
+                        success=False,
+                        outcome="tip_changed",
+                        message=message,
+                    )
 
                 if dry_run:
-                    console.print(
-                        f"[yellow]Would delete remote-only branch "
-                        f"{self.remote_name}/{branch_name}[/yellow]"
+                    message = f"Would delete remote-only branch {self.remote_name}/{branch_name}"
+                    console.print(f"[yellow]{message}[/yellow]")
+                    return RemoteDeletionResult(
+                        success=True,
+                        outcome="dry_run",
+                        message=message,
                     )
-                    return True
 
                 console.print(f"Deleting remote-only branch {self.remote_name}/{branch_name}...")
-                repo.git.push(
-                    self.remote_name,
-                    f":refs/heads/{branch_name}",
-                    force_with_lease=f"refs/heads/{branch_name}:{expected_sha}",
-                )
+                try:
+                    repo.git.push(
+                        self.remote_name,
+                        f":refs/heads/{branch_name}",
+                        force_with_lease=f"refs/heads/{branch_name}:{expected_sha}",
+                    )
+                except git.exc.GitCommandError as error:
+                    detail = self._git_error_detail(error)
+                    return RemoteDeletionResult(
+                        success=False,
+                        outcome="push_failed",
+                        message=f"Remote rejected deletion: {detail}",
+                    )
                 self.deletion_journal.record_deletion(
                     branch_name,
                     expected_sha,
@@ -463,13 +583,23 @@ class GitOperations:
                     remote_name=self.remote_name,
                     batch_id=batch_id,
                 )
+                self._discard_remote_tracking_ref(repo, branch_name, expected_sha)
                 console.print(
                     f"[green]Deleted remote-only branch "
                     f"{self.remote_name}/{branch_name}[/green]"
                 )
-                return True
+                return RemoteDeletionResult(
+                    success=True,
+                    outcome="deleted",
+                    message=f"Deleted remote branch {self.remote_name}/{branch_name}",
+                    remote_deleted=True,
+                )
             except Exception as e:  # noqa: BLE001 - deletion must fail closed
                 console.print(f"[red]Error deleting remote branch {branch_name}: {e}[/red]")
-                return False
+                return RemoteDeletionResult(
+                    success=False,
+                    outcome="error",
+                    message=f"Unexpected remote deletion error: {e}",
+                )
             finally:
                 self.ref_resolver.invalidate()

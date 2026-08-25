@@ -99,10 +99,11 @@ git-branch-keeper --cli --filter merged
 git-branch-keeper --cli --filter merged --dry-run
 
 # Delete merged branches with confirmation prompts
-# (local branches stay local-only; merged remote-only branches are deleted remotely)
+# (local refs only; all remote refs are kept)
 git-branch-keeper --cli --filter merged --delete
 
-# Also delete the remote branch (affects collaborators)
+# Also delete matching remote refs and enable merged remote-only cleanup
+# (affects collaborators)
 git-branch-keeper --cli --filter merged --delete --remote
 
 # Force delete without confirmation (DANGEROUS)
@@ -111,9 +112,9 @@ git-branch-keeper --cli --filter merged --delete --force
 
 > **⚠️ Safety Note**: Plain CLI mode (`--cli` / `--no-interactive`) is read-only by default. Pass `--delete` to clean up branches, or `--dry-run` to preview cleanup candidates.
 
-> **🌐 Remote branches**: For a branch that exists both locally and remotely, deletion is **local-only** by default — the matching remote branch is kept. In the TUI, press `d` to switch between **LOCAL ONLY** and **LOCAL + REMOTE**; in CLI mode, add `--remote`. This toggle does not apply to a merged remote-only row, whose only possible cleanup action is remote deletion.
+> **🌐 Remote branches**: Deletion is **local-only** by default — every remote branch is kept. In the TUI, press `d` to switch between **LOCAL ONLY** and **LOCAL + REMOTE**; in CLI mode, add `--remote`. This explicit opt-in covers both matching remotes for local branches and positively merged remote-only branches.
 
-> **☁️ Remote-only branches**: Branches that exist on the selected remote with no local counterpart are **analyzed and shown by default**. Positively merged remote-only branches are cleanup candidates and are marked by default in the TUI; stale or unmerged remote-only branches remain protected. Before deletion, GBK re-verifies the merge and uses a force-with-lease guard so an upstream ref that advanced after analysis is preserved. Pass `--no-remote-branches` for a strictly local view. Remote-tracking refs are only as fresh as your last `git fetch`, so fetch to discover newly merged or newly created refs.
+> **☁️ Remote-only branches**: Branches that exist on the selected remote with no local counterpart are **analyzed and shown by default**, but remain blocked while deletion scope is **LOCAL ONLY**. After explicit remote opt-in, only positively merged remote-only branches become cleanup candidates; stale or unmerged ones remain protected. Before deletion, GBK queries the live remote, re-verifies the merge, and uses a force-with-lease guard so an upstream ref that advanced after analysis is preserved. Pass `--no-remote-branches` for a strictly local view. An explicit refresh (`r` or `--refresh`) fetches and prunes the selected remote before reanalysis.
 
 ## 📖 Usage
 
@@ -135,10 +136,10 @@ git-branch-keeper [OPTIONS]
 - `--delete` - Cleanup/delete eligible branches in CLI mode (prompts unless `--force` is used)
 - `--cleanup` - Deprecated alias for `--delete`
 - `--dry-run` - Preview cleanup candidates without deleting or prompting
-- `--remote` - Also delete the matching remote for a local branch (default: it is kept)
-- `--no-remote-branches` - Only analyze branches that exist locally (default: remote-only branches are analyzed; merged ones are cleanup candidates)
+- `--remote` - Enable remote deletion for matching remotes and positively merged remote-only branches (default: all remote refs are kept)
+- `--no-remote-branches` - Only analyze branches that exist locally (default: remote-only branches are analyzed and shown)
 - `--force` - Delete without confirmation (legacy behavior: also implies `--delete`; use with caution!)
-- `--refresh` - Bypass cache and refresh all data
+- `--refresh` - Fetch/prune the selected remote, bypass cache, and refresh all data
 
 **Subcommands:**
 - `undo [BRANCH]` - Restore a deleted branch from the journal (most recent if no name given)
@@ -172,7 +173,7 @@ git-branch-keeper [OPTIONS]
 | `behind X` | Remote has X commits not pulled |
 | `diverged` | Local and remote have different commits |
 | `local-only` | No remote branch exists |
-| `remote-only` | Remote branch has no local counterpart; deletable only when merged |
+| `remote-only` | Remote branch has no local counterpart; deletable only when merged and remote deletion is enabled |
 | `merged-git` | Detected as merged by git |
 | `merged-pr` | Merged via GitHub pull request |
 
@@ -189,8 +190,8 @@ git-branch-keeper [OPTIONS]
 | **CLI Cleanup** | `--cli --delete` | Deletes eligible branches with confirmation prompts | ⚠️ **CAUTION** |
 | **Force Mode** | `--cli --delete --force` | Deletes immediately without confirmation | 🔴 **DANGEROUS** |
 | **Dry Run** | `--dry-run` flag | Preview only, no deletion or prompts | ✅ **SAFE** |
-| **Paired remote deletion** | TUI `d` toggle / CLI `--remote` | Off by default for branches that also exist locally | ✅ **SAFE default** |
-| **Merged remote-only cleanup** | Merged row with Location `remote` | Recommended by default; deletes the remote ref after confirmation | ⚠️ **CAUTION** |
+| **Remote deletion** | TUI `d` toggle / CLI `--remote` | Off by default for all remote refs | ✅ **SAFE default** |
+| **Merged remote-only cleanup** | Remote deletion enabled and merged row with Location `remote` | Blocked until explicit opt-in; then deletes after confirmation | ⚠️ **CAUTION** |
 
 ### ⚠️ Important Safety Warnings
 
@@ -198,7 +199,7 @@ git-branch-keeper [OPTIONS]
 
 2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking when cleanup is enabled. For legacy compatibility, `--force` also implies `--delete`. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
 
-   **Deletion is local-only by default for paired branches**: when a branch exists both locally and remotely, the remote is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote`. A positively merged remote-only branch is the exception: it is a cleanup candidate by default because no local deletion is possible. It is called out in the confirmation and journaled for `undo`.
+   **Deletion is local-only by default**: every remote ref is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote`. This opt-in also enables positively merged remote-only branches. Remote deletions are separated from local branches in the confirmation, called out as shared repository state, and journaled for `undo` when GBK performs the deletion.
 
 3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
    ```bash
@@ -290,7 +291,7 @@ Create a configuration file to customize behavior. The tool looks for config fil
 | `stale_days` | integer | Days before branch is stale | `30` |
 | `github_token` | string | GitHub personal access token. If omitted, GBK also tries `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token` | `null` |
 | `squash_scan_limit` | integer | First-parent commits on main to scan for exact squash patch-id matches | `500` |
-| `include_remote_branches` | boolean | Analyze remote-only branches; positively merged ones become cleanup candidates | `true` |
+| `include_remote_branches` | boolean | Analyze and show remote-only branches; deletion still requires remote opt-in | `true` |
 
 ### GitHub Auth Setup (Optional)
 

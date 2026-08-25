@@ -108,3 +108,6 @@ class BranchDetails:
     worktree_path: str | None = None  # Path to the worktree directory if is_worktree=True
     worktree_is_orphaned: bool = False  # True if branch's worktree directory is missing
     merge_detection: dict[str, Any] | None = None  # Structured merge-detection details
+    # Tip observed when this row was analyzed. Destructive operations compare it
+    # with the execution-time tip before trusting the row's merge proof.
+    tip_sha: str | None = None

@@ -69,17 +69,16 @@ def parse_args():
     parser.add_argument(
         "--remote",
         action="store_true",
-        help="Also delete the matching remote when deleting a local branch "
-        "(default: that remote is kept). Merged remote-only candidates are deleted "
-        "regardless because they have no local ref.",
+        help="Enable remote deletion: delete matching remotes for local branches and "
+        "allow positively merged remote-only branches to be deleted "
+        "(default: all remote refs are kept).",
     )
     parser.add_argument(
         "--no-remote-branches",
         action="store_true",
         help="Only analyze branches that exist locally. By default branches that exist "
-        "only on the remote are analyzed too; merged ones are cleanup candidates. "
-        "--remote separately controls whether deleting a local branch also deletes "
-        "its matching remote branch.",
+        "only on the remote are analyzed and shown too. --remote separately enables "
+        "all remote deletion, including positively merged remote-only branches.",
     )
     parser.add_argument(
         "--interactive", action="store_true", help="Launch interactive TUI mode (default for TTY)"
@@ -121,7 +120,11 @@ def parse_args():
         default="asc",
         help="Sort order: ascending or descending (default: asc)",
     )
-    parser.add_argument("--refresh", action="store_true", help="Force refresh and bypass cache")
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Fetch and prune the selected remote, then force refresh and bypass cache",
+    )
     parser.add_argument(
         "--workers",
         type=int,

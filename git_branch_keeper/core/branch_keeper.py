@@ -196,12 +196,28 @@ class BranchKeeper:
         if not self.tui_mode:
             console.print(*args, **kwargs)
 
+    def sync_remote_refs(self) -> tuple[bool, str | None]:
+        """Synchronize and prune the selected remote for an explicit refresh."""
+        return self.git_service.sync_remote_refs()
+
+    def _cached_deletion_evidence(self, branch_name: str) -> tuple[str | None, dict | None]:
+        """Return the analysis tip and exact merge evidence retained on disk."""
+        cached = self.cache_service.load_cache().get(branch_name, {})
+        tip_sha = cached.get("tip_sha")
+        merge_detection = cached.get("merge_detection")
+        return (
+            tip_sha if isinstance(tip_sha, str) else None,
+            merge_detection if isinstance(merge_detection, dict) else None,
+        )
+
     def delete_branch(
         self,
         branch_name: str,
         reason: str,
         force_mode: bool = False,
         batch_id: str | None = None,
+        expected_tip_sha: str | None = None,
+        merge_detection: dict | None = None,
     ) -> tuple[bool, str | None]:
         """Delete a branch or show what would be deleted in dry-run mode.
 
@@ -214,12 +230,30 @@ class BranchKeeper:
             Tuple of (success, error_message). error_message is None on success.
         """
         try:
+            if expected_tip_sha is None or merge_detection is None:
+                cached_tip, cached_merge_detection = self._cached_deletion_evidence(branch_name)
+                expected_tip_sha = expected_tip_sha or cached_tip
+                merge_detection = merge_detection or cached_merge_detection
+
             # Refresh location at the execution boundary. Merged remote-only refs
             # are valid cleanup targets, but take a separate path because their
             # only mutation is necessarily on the configured remote.
             has_local = self.git_service.has_local_branch(branch_name, refresh=True)
             if not has_local:
-                return self._delete_remote_only_branch(branch_name, reason, batch_id=batch_id)
+                return self._delete_remote_only_branch(
+                    branch_name,
+                    reason,
+                    batch_id=batch_id,
+                    expected_tip_sha=expected_tip_sha,
+                    merge_detection=merge_detection,
+                )
+
+            current_tip_sha = self.git_service.get_branch_tip_sha(branch_name)
+            if expected_tip_sha and current_tip_sha != expected_tip_sha:
+                current_label = current_tip_sha[:12] if current_tip_sha else "missing"
+                error_msg = f"Branch tip changed from {expected_tip_sha[:12]} to {current_label}"
+                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                return False, error_msg
 
             # Check for open PRs first
             if self.github_service.has_open_pr(branch_name):
@@ -341,8 +375,14 @@ class BranchKeeper:
             # being acted on may have come from the on-disk cache or from an analysis
             # run that happened long before the user confirmed, and a branch that has
             # picked up commits since is no longer merged.
-            if reason == "merged" and not self._has_current_merge_proof(branch_name):
-                error_msg = f"No longer merged into {self.main_branch} - it has new commits"
+            if reason == "merged" and not self._has_current_merge_proof(
+                branch_name,
+                merge_detection=merge_detection,
+            ):
+                tip_label = current_tip_sha[:12] if current_tip_sha else "unknown"
+                error_msg = (
+                    f"Could not re-establish merge proof for unchanged branch tip {tip_label}"
+                )
                 self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
                 return False, error_msg
 
@@ -374,6 +414,8 @@ class BranchKeeper:
         branch_name: str,
         reason: str,
         batch_id: str | None = None,
+        expected_tip_sha: str | None = None,
+        merge_detection: dict | None = None,
     ) -> tuple[bool, str | None]:
         """Delete a positively merged remote-only branch.
 
@@ -386,12 +428,17 @@ class BranchKeeper:
             self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
             return False, error_msg
 
+        if not self.delete_remote:
+            error_msg = "Remote deletion is disabled; enable LOCAL + REMOTE first"
+            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            return False, error_msg
+
         if branch_name in self.protected_branches:
             error_msg = "Protected branch"
             self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
             return False, error_msg
 
-        if not self.git_service.has_remote_branch(branch_name):
+        if not self.git_service.has_remote_branch(branch_name, refresh=True):
             error_msg = f"No branch exists on {self.remote_name}"
             self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
             return False, error_msg
@@ -402,16 +449,52 @@ class BranchKeeper:
             self.stats["skipped_pr"] += 1
             return False, error_msg
 
-        expected_sha = self.git_service.get_branch_tip_sha(branch_name)
-        if not expected_sha:
+        current_tip_sha = self.git_service.get_branch_tip_sha(branch_name)
+        if not current_tip_sha:
             error_msg = "Could not resolve remote branch tip"
+            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            return False, error_msg
+        if expected_tip_sha and current_tip_sha != expected_tip_sha:
+            error_msg = f"Branch tip changed from {expected_tip_sha[:12]} to {current_tip_sha[:12]}"
+            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            return False, error_msg
+        expected_sha = expected_tip_sha or current_tip_sha
+
+        # Remote-tracking refs are local cache. Check the server before spending
+        # time rebuilding merge proof, and treat an already-absent ref as an
+        # idempotent success instead of a failed destructive operation.
+        live_sha, live_error = self.git_service.get_live_remote_branch_sha(branch_name)
+        if live_error:
+            error_msg = f"Could not check live remote ref: {live_error}"
+            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            return False, error_msg
+        if live_sha is None:
+            result = self.git_service.delete_remote_only_branch(
+                branch_name,
+                expected_sha=expected_sha,
+                dry_run=self.dry_run,
+                batch_id=batch_id,
+            )
+            if result.success:
+                if not self.dry_run:
+                    self.cache_service.remove_branch_from_cache(branch_name)
+                return True, None
+            return False, result.message
+        if live_sha != expected_sha:
+            error_msg = f"Remote branch advanced from {expected_sha[:12]} to {live_sha[:12]}"
             self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
             return False, error_msg
 
         # Re-run merge detection immediately before deletion. Combined with the
         # lease in GitOperations, this protects both the verdict and exact ref tip.
-        if not self._has_current_merge_proof(branch_name):
-            error_msg = f"No longer merged into {self.main_branch} - it has new commits"
+        if not self._has_current_merge_proof(
+            branch_name,
+            merge_detection=merge_detection,
+        ):
+            error_msg = (
+                f"Could not re-establish merge proof for unchanged branch tip "
+                f"{expected_sha[:12]}"
+            )
             self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
             return False, error_msg
 
@@ -421,16 +504,16 @@ class BranchKeeper:
             )
             return True, None
 
-        success = self.git_service.delete_remote_only_branch(
+        result = self.git_service.delete_remote_only_branch(
             branch_name,
             expected_sha=expected_sha,
             batch_id=batch_id,
         )
-        if success:
+        if result.success:
             self.cache_service.remove_branch_from_cache(branch_name)
             logger.debug(f"Removed {branch_name} from cache after remote-only deletion")
             return True, None
-        return False, "Remote deletion failed (the branch may have advanced or be protected)"
+        return False, result.message
 
     def _create_worktree_entry(self, worktree_info, parent_branch: BranchDetails) -> BranchDetails:
         """Create a BranchDetails entry representing a worktree.
@@ -474,6 +557,7 @@ class BranchKeeper:
             is_worktree=True,
             worktree_path=worktree_info.path,
             merge_detection=parent_branch.merge_detection,
+            tip_sha=parent_branch.tip_sha,
         )
 
     def _insert_worktree_entries(self, branch_details: list) -> list:
@@ -1276,7 +1360,8 @@ class BranchKeeper:
             # remote ref. Remote-only branches remain eligible only when merged.
             if not branch.has_local:
                 if (
-                    branch.has_remote
+                    self.delete_remote
+                    and branch.has_remote
                     and branch.status == BranchStatus.MERGED
                     and branch.name not in self.protected_branches
                 ):
@@ -1296,7 +1381,11 @@ class BranchKeeper:
                     deletable.append(branch)
             else:
                 # Normal mode - use standard validation
-                if BranchValidationService.is_deletable(branch, self.protected_branches):
+                if BranchValidationService.is_deletable(
+                    branch,
+                    self.protected_branches,
+                    allow_remote_deletion=self.delete_remote,
+                ):
                     deletable.append(branch)
 
         return deletable
@@ -1463,7 +1552,12 @@ class BranchKeeper:
                 message = f"Deleting {branch.name}..."
                 reason = format_deletion_reason(branch.status)
                 success, error_message = self.delete_branch(
-                    branch.name, reason, force_mode=force_mode, batch_id=batch_id
+                    branch.name,
+                    reason,
+                    force_mode=force_mode,
+                    batch_id=batch_id,
+                    expected_tip_sha=branch.tip_sha,
+                    merge_detection=branch.merge_detection,
                 )
 
                 if success:
@@ -1491,7 +1585,10 @@ class BranchKeeper:
         uncommitted changes, or a remote-only stale verdict without merge proof.
         """
         blocked = BranchValidationService.summarize_blocked(
-            branch_details, self.protected_branches, self._current_branch_name()
+            branch_details,
+            self.protected_branches,
+            self._current_branch_name(),
+            allow_remote_deletion=self.delete_remote,
         )
         if not blocked:
             return
@@ -1635,8 +1732,27 @@ class BranchKeeper:
         pr_info["local_head_sha"] = local_head_sha
         pr_info["head_matches_local"] = bool(local_head_sha and local_head_sha == head_sha)
 
-    def _has_current_merge_proof(self, branch: str) -> bool:
+    def _has_current_merge_proof(
+        self,
+        branch: str,
+        merge_detection: dict | None = None,
+    ) -> bool:
         """Revalidate Git or authoritative merged-PR proof at deletion time."""
+        if merge_detection:
+            matched_commit = merge_detection.get("matched_commit")
+            if (
+                merge_detection.get("method") == "squash_patch_id"
+                and merge_detection.get("confidence") == "exact"
+                and isinstance(matched_commit, str)
+                and matched_commit
+                and self.git_service.validate_exact_squash_match(
+                    branch,
+                    self.main_branch,
+                    matched_commit,
+                )
+            ):
+                return True
+
         if self.git_service.is_branch_merged(branch, self.main_branch, force_refresh=True):
             return True
 
@@ -1925,6 +2041,7 @@ class BranchKeeper:
             in_worktree=in_worktree,
             worktree_path=worktree_path_for_details,  # Store worktree path for branches in worktrees
             merge_detection=merge_detection,
+            tip_sha=self.git_service.get_branch_tip_sha(branch),
         )
 
         logger.debug(

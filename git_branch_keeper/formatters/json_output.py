@@ -16,8 +16,8 @@ from git_branch_keeper.services.branch_validation_service import BranchValidatio
 if TYPE_CHECKING:
     from git_branch_keeper.core import BranchKeeper
 
-# 5: positively merged remote-only branches are cleanup candidates. Adds the
-# "remote-only" deletion scope and delete_remote_branch recommended action.
+# 5: positively merged remote-only branches can become cleanup candidates after
+# remote opt-in. Adds the "remote-only" scope and delete_remote_branch action.
 SCHEMA_VERSION = 5
 
 
@@ -72,7 +72,9 @@ def _deletion_scope(branch: BranchDetails, delete_remote: bool) -> str:
     """Describe what a branch delete action would affect."""
     if not branch.has_local:
         return (
-            "remote-only" if branch.has_remote and branch.status == BranchStatus.MERGED else "none"
+            "remote-only"
+            if delete_remote and branch.has_remote and branch.status == BranchStatus.MERGED
+            else "none"
         )
     if branch.has_remote and delete_remote:
         return "local-and-remote"
@@ -92,7 +94,10 @@ def _blocker(code: str, message: str) -> dict[str, str]:
 
 
 def _branch_deletion_blockers(
-    branch: BranchDetails, protected_branches: list[str], stale_days: int
+    branch: BranchDetails,
+    protected_branches: list[str],
+    stale_days: int,
+    delete_remote: bool,
 ) -> list[dict[str, str]]:
     """Return structured reasons a branch row is not branch-deletable."""
     blockers: list[dict[str, str]] = []
@@ -112,6 +117,13 @@ def _branch_deletion_blockers(
                     "Branch exists only on the remote and is not confirmed merged. "
                     "Only positively merged remote-only branches are cleanup candidates."
                 ),
+            )
+        )
+    elif not branch.has_local and not delete_remote:
+        blockers.append(
+            _blocker(
+                "REMOTE_DELETION_DISABLED",
+                "Branch exists only on the remote; pass --remote to enable remote deletion.",
             )
         )
     if branch.status == BranchStatus.UNSTARTED:
@@ -440,10 +452,19 @@ def _branch_to_dict(
         "merge_detection": _merge_detection(branch),
         "worktree": worktree,
         "deletion": {
-            "deletable": BranchValidationService.is_deletable(branch, protected_branches),
+            "deletable": BranchValidationService.is_deletable(
+                branch,
+                protected_branches,
+                allow_remote_deletion=delete_remote,
+            ),
             "reason": _deletion_reason(branch),
             "scope": _deletion_scope(branch, delete_remote),
-            "blockers": _branch_deletion_blockers(branch, protected_branches, stale_days),
+            "blockers": _branch_deletion_blockers(
+                branch,
+                protected_branches,
+                stale_days,
+                delete_remote,
+            ),
         },
         "confidence": _confidence(branch, github_enabled, comparison),
         "notes": _notes(branch),
@@ -476,6 +497,13 @@ def _recommended_actions(
     actions: list[dict[str, Any]] = []
 
     for branch in analysis.deletable_branches:
+        scope = _deletion_scope(branch, delete_remote)
+        # Treat the serialized deletion scope as an independent safety boundary.
+        # An analysis result can be cached or constructed under a different remote
+        # setting; never recommend a command when the current scope permits no delete.
+        if scope == "none":
+            continue
+
         reason = format_deletion_reason(branch.status)
         if not branch.has_local:
             commands = [_command(["git", "push", remote_name, "--delete", branch.name])]
@@ -500,7 +528,7 @@ def _recommended_actions(
                 ),
                 "branch": branch.name,
                 "reason": reason,
-                "scope": _deletion_scope(branch, delete_remote),
+                "scope": scope,
                 "destructive": True,
                 "requires_confirmation": True,
                 "commands": commands,

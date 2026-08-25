@@ -154,7 +154,7 @@ def test_delete_refuses_a_branch_that_gained_commits_after_analysis(merged_repo)
     success, error = keeper.delete_branch("feature/done", "merged")
 
     assert success is False
-    assert "No longer merged" in error
+    assert "Branch tip changed" in error
     assert "feature/done" in [h.name for h in repo.heads]
     assert repo.heads["feature/done"].commit.hexsha == new_sha
 
@@ -197,6 +197,65 @@ def test_squash_merged_branch_still_deletes(git_repo):
     success, error = keeper.delete_branch("feature/squashed", "merged")
     assert success is True, error
     assert "feature/squashed" not in [h.name for h in repo.heads]
+
+
+def test_stored_exact_squash_proof_survives_a_tiny_scan_window(git_repo):
+    """Execution revalidates the stored match directly after main moves past it."""
+    repo = git_repo
+    repo_path = Path(repo.working_dir)
+
+    repo.git.checkout("-b", "feature/squashed")
+    (repo_path / "one.txt").write_text("1\n")
+    repo.index.add(["one.txt"])
+    repo.index.commit("one")
+    (repo_path / "two.txt").write_text("2\n")
+    repo.index.add(["two.txt"])
+    repo.index.commit("two")
+    repo.git.checkout("main")
+    repo.git.merge("--squash", "feature/squashed")
+    repo.git.commit("-m", "Squashed feature")
+
+    keeper = BranchKeeper(
+        repo.working_dir,
+        Config(
+            interactive=False,
+            main_branch="main",
+            protected_branches=["main"],
+            squash_scan_limit=1,
+        ),
+    )
+    analysis = keeper.analyze_branches(show_progress=False)
+    branch = next(b for b in analysis.branches if b.name == "feature/squashed")
+    assert branch.merge_detection["method"] == "squash_patch_id"
+    assert branch.merge_detection["confidence"] == "exact"
+
+    # Move the exact squash commit outside the configured discovery window.
+    for index in range(2):
+        filename = f"later-{index}.txt"
+        (repo_path / filename).write_text(f"{index}\n")
+        repo.index.add([filename])
+        repo.index.commit(f"Later main work {index}")
+
+    fresh = BranchKeeper(
+        repo.working_dir,
+        Config(
+            interactive=False,
+            main_branch="main",
+            protected_branches=["main"],
+            squash_scan_limit=1,
+        ),
+    )
+    assert fresh.git_service.is_branch_merged("feature/squashed", "main") is False
+
+    success, error = keeper.delete_branch(
+        branch.name,
+        "merged",
+        expected_tip_sha=branch.tip_sha,
+        merge_detection=branch.merge_detection,
+    )
+
+    assert success is True, error
+    assert "feature/squashed" not in [head.name for head in repo.heads]
 
 
 def test_stale_unmerged_branch_still_deletes(git_repo):

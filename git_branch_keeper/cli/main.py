@@ -138,6 +138,14 @@ def main():
         # Suppress Rich console output in TUI and JSON modes.
         keeper = BranchKeeper(os.getcwd(), config, tui_mode=use_interactive or output_json)
 
+        if parsed_args.refresh:
+            remote_synced, remote_sync_error = keeper.sync_remote_refs()
+            if not remote_synced and not output_json:
+                console.print(
+                    f"[yellow]Remote synchronization failed; analyzing existing refs: "
+                    f"{remote_sync_error}[/yellow]"
+                )
+
         if output_json:
             from git_branch_keeper.formatters.json_output import analysis_to_dict
 

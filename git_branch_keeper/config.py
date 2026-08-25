@@ -14,9 +14,8 @@ class Config:
     ignore_patterns: list[str] = field(default_factory=list)
     main_branch: str = "main"
     status_filter: str = "all"  # all, merged, stale
-    # Analyze branches that exist only on the remote. On by default: branch
-    # accumulation is a remote problem, and the local set is a biased sample of it.
-    # Positively merged remote-only branches are cleanup candidates.
+    # Analyze branches that exist only on the remote. On by default for visibility;
+    # deleting any remote ref still requires the separate delete_remote opt-in.
     include_remote_branches: bool = True
 
     # Stale branch threshold
@@ -26,8 +25,8 @@ class Config:
     interactive: bool = True
     dry_run: bool = False  # Only applies when a cleanup/delete action is requested
     force: bool = False
-    # Opt-in deletion of a local branch's matching remote. Merged remote-only rows
-    # are remote cleanup candidates regardless because no local-only action exists.
+    # Explicit opt-in for every remote mutation: both matching remotes for local
+    # branches and positively merged remote-only refs.
     delete_remote: bool = False
     verbose: bool = False
     debug: bool = False
