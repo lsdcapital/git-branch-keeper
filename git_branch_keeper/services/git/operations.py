@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -514,6 +515,7 @@ class GitOperations:
         expected_sha: str,
         dry_run: bool = False,
         batch_id: str | None = None,
+        verify_merge: Callable[[], bool] | None = None,
     ) -> RemoteDeletionResult:
         """Delete a remote-only ref if it still has the expected tip.
 
@@ -567,6 +569,19 @@ class GitOperations:
                         success=False,
                         outcome="tip_changed",
                         message=message,
+                    )
+
+                # Validate merge proof only after establishing the live ref exists.
+                # This lets callers share this one network check while the push
+                # lease still rejects a ref that changes during verification.
+                if verify_merge is not None and not verify_merge():
+                    return RemoteDeletionResult(
+                        success=False,
+                        outcome="merge_unverified",
+                        message=(
+                            "Could not re-establish merge proof for unchanged branch tip "
+                            f"{expected_sha[:12]}"
+                        ),
                     )
 
                 if dry_run:

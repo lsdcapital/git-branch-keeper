@@ -59,7 +59,7 @@ git-branch-keeper [OPTIONS]
 | `behind X` | Remote has X commits not pulled |
 | `diverged` | Local and remote have different commits |
 | `local-only` | No remote branch exists |
-| `remote-only` | Remote branch has no local counterpart; deletable only when merged and remote deletion is enabled |
+| `remote-only` | Remote branch has no local counterpart; normal cleanup requires merge proof and remote deletion enabled; explicit TUI force-marking can override merge proof |
 | `merged-git` | Detected as merged by git |
 | `merged-pr` | Merged via GitHub pull request |
 
@@ -85,7 +85,9 @@ git-branch-keeper [OPTIONS]
 
 2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking when cleanup is enabled. For legacy compatibility, `--force` also implies `--delete`. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
 
-   **Deletion is local-only by default**: every remote ref is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote`. This opt-in also enables positively merged remote-only branches. Remote deletions are separated from local branches in the confirmation, called out as shared repository state, and journaled for `undo` when GBK performs the deletion.
+   **Deletion is local-only by default**: every remote ref is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote`. This opt-in also enables positively merged remote-only branches. The confirmation lists each branch once with its deletion scope (local, remote, or both). Delete is selected by default; press Enter to confirm or Escape to cancel. Deletions are journaled for `undo`.
+
+   **Force-delete an old remote-only branch in the TUI**: enable **LOCAL + REMOTE** with `d`, highlight the branch, press `f`, then press `Enter` and confirm. Force Mark accepts stale, merged, and unstarted branches and can delete a remote-only branch without merge proof. Force-marked branches are labelled `force` in the confirmation. Protected branches, open PRs, remote access failures, and changed branch tips still block deletion. Bulk marking and CLI `--force` continue to require merge proof for remote-only branches.
 
 3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
    ```bash

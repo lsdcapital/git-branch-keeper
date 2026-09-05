@@ -10,8 +10,8 @@ These tests pin the three things that make remote-only analysis and cleanup safe
 1. Every git call resolves the name to a rev. `GIT_ERRORS` includes `LookupError`,
    and `IndexError` subclasses it, so `repo.refs["remote-only-name"]` fails
    *silently* and degrades a row to age 0 / not-merged rather than erroring.
-2. Remote-only deletion requires explicit remote opt-in and positive merge proof. The
-   tip is journaled and the remote push uses a lease so unseen commits are preserved.
+2. Normal remote-only deletion requires remote opt-in and positive merge proof.
+   Explicit force-marking can bypass merge proof; journal and lease checks still apply.
 3. The temp-worktree probe is skipped. It costs a checkout per branch; running it
    for 38 remote branches would make GBK unusable.
 """
@@ -257,8 +257,8 @@ def test_remote_only_with_no_unique_commits_is_unstarted_not_merged(repo_with_re
 
     `git reflog show origin/foo` records *fetches*, not the branch's own history, so
     the positive proof `is_unstarted_branch()` normally demands is unobtainable.
-    UNSTARTED is the conservative answer: it is excluded from every [STALE, MERGED]
-    check, so it can never make the branch deletable.
+    UNSTARTED is the conservative answer: it is excluded from automatic cleanup
+    and requires explicit force-marking to delete.
     """
     path, repo = repo_with_remote
     repo.git.checkout("-b", "feat/empty")
@@ -931,3 +931,115 @@ def test_legacy_cache_entries_default_to_local(repo_with_remote):
 
     assert restored is not None
     assert restored.has_local is True
+
+
+@pytest.mark.parametrize("unmerged", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_explicit_remote_override_deletes_without_merge_proof(repo_with_remote, unmerged, dry_run):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/abandoned")
+    if unmerged:
+        _commit(repo, path, "abandoned.md", "unfinished work", BODY)
+    _push_and_drop_local(repo, "feat/abandoned")
+    tip = repo.refs["origin/feat/abandoned"].commit.hexsha
+    keeper = _keeper(path, {"dry_run": dry_run, "delete_remote": True})
+    keeper.git_service.deletion_journal.journal_file = Path(path) / "force-remote.jsonl"
+    with patch.object(keeper, "_has_current_merge_proof", return_value=False):
+        success, error = keeper.delete_branch(
+            "feat/abandoned",
+            "stale" if unmerged else "unstarted",
+            expected_tip_sha=tip,
+            allow_unmerged_remote=True,
+        )
+    assert success is True, error
+    with git.Repo(Path(path).parent / "origin.git") as bare:
+        assert ("feat/abandoned" in bare.heads) is dry_run
+    if not dry_run:
+        entry = keeper.git_service.deletion_journal.deletions()[-1]
+        assert entry["sha"] == tip
+        assert entry["remote_deleted"] is True
+
+
+@pytest.mark.parametrize(
+    "guard", ["remote_disabled", "protected", "open_pr", "tip_changed", "remote_advanced"]
+)
+def test_explicit_remote_override_preserves_guards(repo_with_remote, guard):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/abandoned")
+    _push_and_drop_local(repo, "feat/abandoned")
+    tip = repo.refs["origin/feat/abandoned"].commit.hexsha
+    keeper = _keeper(path, {"dry_run": False, "delete_remote": guard != "remote_disabled"})
+    if guard == "protected":
+        keeper.protected_branches.append("feat/abandoned")
+    if guard == "open_pr":
+        keeper.github_service.has_open_pr = Mock(return_value=True)
+    if guard == "remote_advanced":
+        keeper.git_service.get_live_remote_branch_sha = Mock(return_value=("b" * 40, None))
+    success, error = keeper.delete_branch(
+        "feat/abandoned",
+        "unstarted",
+        allow_unmerged_remote=True,
+        expected_tip_sha="a" * 40 if guard == "tip_changed" else tip,
+    )
+    assert success is False
+    assert error
+    with git.Repo(Path(path).parent / "origin.git") as bare:
+        assert bare.heads["feat/abandoned"].commit.hexsha == tip
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_remote_deletion_checks_live_ref_once_and_reports_start(repo_with_remote, force):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/finished")
+    _commit(repo, path, "finished.md", "feature", BODY)
+    repo.git.push("origin", "feat/finished")
+    repo.git.checkout("main")
+    repo.git.merge("feat/finished", "--no-ff", "-m", "Merge feature")
+    repo.git.branch("-D", "feat/finished")
+    keeper = _keeper(path, {"dry_run": False, "delete_remote": True})
+    keeper.git_service.deletion_journal.journal_file = Path(path) / "single-check.jsonl"
+    branch = _remote_only(BranchStatus.MERGED)
+    branch.name = "feat/finished"
+    branch.tip_sha = repo.refs["origin/feat/finished"].commit.hexsha
+    events = []
+    original_check = keeper.git_service.get_live_remote_branch_sha
+
+    def check(name):
+        assert events[-1].message == "Deleting feat/finished"
+        assert events[-1].current == 0
+        return original_check(name)
+
+    with patch.object(keeper.git_service, "get_live_remote_branch_sha", side_effect=check) as live:
+        deleted, failed, _, _ = keeper.perform_deletion(
+            [branch], [], allow_unmerged_remote=force, progress_callback=events.append
+        )
+
+    assert deleted == ["feat/finished"]
+    assert failed == []
+    live.assert_called_once_with("feat/finished")
+    assert events[-1].current == 1
+
+
+def test_remote_deletion_lease_protects_changes_during_merge_verification(repo_with_remote):
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", "feat/race")
+    _commit(repo, path, "race.md", "feature", BODY)
+    tip = repo.head.commit.hexsha
+    _push_and_drop_local(repo, "feat/race")
+    keeper = _keeper(path, {"dry_run": False, "delete_remote": True})
+    keeper.git_service.deletion_journal.journal_file = Path(path) / "lease-race.jsonl"
+    replacement = repo.head.commit.hexsha
+
+    def verify(*args, **kwargs):
+        with git.Repo(Path(path).parent / "origin.git") as bare:
+            bare.git.update_ref("refs/heads/feat/race", replacement, tip)
+        return True
+
+    with patch.object(keeper, "_has_current_merge_proof", side_effect=verify):
+        success, error = keeper.delete_branch("feat/race", "merged", expected_tip_sha=tip)
+
+    assert success is False
+    assert "Remote rejected deletion" in error
+    with git.Repo(Path(path).parent / "origin.git") as bare:
+        assert bare.heads["feat/race"].commit.hexsha == replacement
+    assert not keeper.git_service.deletion_journal.deletions()

@@ -58,7 +58,7 @@ gbk --filter stale --stale-days 90
 gbk undo
 ```
 
-Plain CLI mode is read-only unless cleanup is requested. A stale branch may contain unmerged work. Deleting remote branches requires `--remote` in the CLI or the **d** scope toggle in the TUI. The `--force` option skips confirmations and can override some protections; see the [safety guide](docs/usage.md) before using it.
+Plain CLI mode is read-only unless cleanup is requested. A stale branch may contain unmerged work. Deleting remote branches requires `--remote` in the CLI or the **d** scope toggle in the TUI. For an old remote-only branch that normal marking rejects, use `d` to enable remote deletion, `f` to force-mark it, then `Enter` to review and confirm. The `--force` option skips confirmations and can override some protections; see the [safety guide](docs/usage.md) before using it.
 
 ## Terminal shortcuts
 

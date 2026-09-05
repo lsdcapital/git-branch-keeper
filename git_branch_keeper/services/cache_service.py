@@ -410,16 +410,20 @@ class CacheService:
             logger.warning(f"Failed to deserialize branch {data.get('name', 'unknown')}: {e}")
             return None
 
-    def get_cached_branches(self, current_branches: list[str]) -> dict[str, BranchDetails]:
+    def get_cached_branches(
+        self, current_branches: list[str], *, cache: dict[str, dict] | None = None
+    ) -> dict[str, BranchDetails]:
         """Get cached branch details for all branches that still exist.
 
         Args:
             current_branches: List of current branch names in the repository
+            cache: Optional cache snapshot shared within one analysis pass.
 
         Returns:
             Dictionary mapping branch names to cached BranchDetails
         """
-        cache = self.load_cache()
+        if cache is None:
+            cache = self.load_cache()
         cached_branches = {}
 
         for branch_name in current_branches:
@@ -433,7 +437,13 @@ class CacheService:
         logger.debug(f"Found {len(cached_branches)} cached branches ({stable_count} stable)")
         return cached_branches
 
-    def get_stale_branches(self, current_branches: list[str], main_branch: str) -> list[str]:
+    def get_stale_branches(
+        self,
+        current_branches: list[str],
+        main_branch: str,
+        *,
+        cache: dict[str, dict] | None = None,
+    ) -> list[str]:
         """Get list of branches that need to be refreshed (unstable or not cached).
 
         A branch needs refresh if:
@@ -455,15 +465,18 @@ class CacheService:
 
         Args:
             current_branches: List of current branch names in the repository
+            cache: Optional cache snapshot shared within one analysis pass.
             main_branch: Name of the main branch (always refreshed)
 
         Returns:
             List of branch names that need to be refreshed
         """
-        cache = self.load_cache()
+        if cache is None:
+            cache = self.load_cache()
         # None means the repo could not be read; then nothing can be validated, so
         # every cached entry has to be treated as stale.
-        branch_states = self._get_current_branch_states()
+        branch_states: dict[str, BranchRefState] | None = None
+        states_resolved = False
         # Resolved lazily - only legacy entries need it, so repos with a current
         # cache never pay for the extra git call.
         reachable_from_main: set[str] | None = None
@@ -489,6 +502,12 @@ class CacheService:
                 logger.debug(f"Branch '{branch_name}' is unstable, needs refresh")
                 stale_branches.append(branch_name)
                 continue
+
+            # Only stable entries can save work. Cold/unstable caches already
+            # refresh every row, so avoid scanning Git refs just to discard them.
+            if not states_resolved:
+                branch_states = self._get_current_branch_states()
+                states_resolved = True
 
             # Stable, but only trustworthy if the branch still points where it did.
             cached_tip = branch_data.get("tip_sha")

@@ -6,6 +6,7 @@ import signal
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
+from time import perf_counter
 
 import git
 from rich.console import Console
@@ -225,6 +226,7 @@ class BranchKeeper:
         batch_id: str | None = None,
         expected_tip_sha: str | None = None,
         merge_detection: dict | None = None,
+        allow_unmerged_remote: bool = False,
     ) -> tuple[bool, str | None]:
         """Delete a branch or show what would be deleted in dry-run mode.
 
@@ -232,6 +234,7 @@ class BranchKeeper:
             branch_name: Name of the branch to delete
             reason: Reason for deletion (merged/stale)
             force_mode: If True, skip uncommitted changes check
+            allow_unmerged_remote: Explicit per-selection override of remote merge proof.
 
         Returns:
             Tuple of (success, error_message). error_message is None on success.
@@ -253,6 +256,7 @@ class BranchKeeper:
                     batch_id=batch_id,
                     expected_tip_sha=expected_tip_sha,
                     merge_detection=merge_detection,
+                    allow_unmerged_remote=allow_unmerged_remote,
                 )
 
             current_tip_sha = self.git_service.get_branch_tip_sha(branch_name)
@@ -423,14 +427,15 @@ class BranchKeeper:
         batch_id: str | None = None,
         expected_tip_sha: str | None = None,
         merge_detection: dict | None = None,
+        allow_unmerged_remote: bool = False,
     ) -> tuple[bool, str | None]:
-        """Delete a positively merged remote-only branch.
+        """Delete a remote-only branch with merge proof or an explicit override.
 
         The low-level operation uses the observed remote-tracking SHA as a
         force-with-lease expectation. If the upstream ref advanced after analysis,
         the push is rejected instead of deleting unseen commits.
         """
-        if reason != "merged":
+        if reason != "merged" and not allow_unmerged_remote:
             error_msg = "Remote-only branches require positive merge proof"
             self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
             return False, error_msg
@@ -467,58 +472,25 @@ class BranchKeeper:
             return False, error_msg
         expected_sha = expected_tip_sha or current_tip_sha
 
-        # Remote-tracking refs are local cache. Check the server before spending
-        # time rebuilding merge proof, and treat an already-absent ref as an
-        # idempotent success instead of a failed destructive operation.
-        live_sha, live_error = self.git_service.get_live_remote_branch_sha(branch_name)
-        if live_error:
-            error_msg = f"Could not check live remote ref: {live_error}"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
-            return False, error_msg
-        if live_sha is None:
-            result = self.git_service.delete_remote_only_branch(
-                branch_name,
-                expected_sha=expected_sha,
-                dry_run=self.dry_run,
-                batch_id=batch_id,
-            )
-            if result.success:
-                if not self.dry_run:
-                    self.cache_service.remove_branch_from_cache(branch_name)
-                return True, None
-            return False, result.message
-        if live_sha != expected_sha:
-            error_msg = f"Remote branch advanced from {expected_sha[:12]} to {live_sha[:12]}"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
-            return False, error_msg
-
-        # Re-run merge detection immediately before deletion. Combined with the
-        # lease in GitOperations, this protects both the verdict and exact ref tip.
-        if not self._has_current_merge_proof(
-            branch_name,
-            merge_detection=merge_detection,
-        ):
-            error_msg = (
-                f"Could not re-establish merge proof for unchanged branch tip "
-                f"{expected_sha[:12]}"
-            )
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
-            return False, error_msg
-
-        if self.dry_run:
-            self._console_print(
-                f"Would delete remote-only branch {self.remote_name}/{branch_name} ({reason})"
-            )
-            return True, None
+        # The mutation service performs the single live remote check, then calls
+        # the merge verifier before pushing with a lease. Already-absent refs
+        # remain idempotent successes without needing merge proof.
+        def verify_merge() -> bool:
+            return self._has_current_merge_proof(branch_name, merge_detection=merge_detection)
 
         result = self.git_service.delete_remote_only_branch(
             branch_name,
             expected_sha=expected_sha,
+            dry_run=self.dry_run,
             batch_id=batch_id,
+            verify_merge=None if allow_unmerged_remote else verify_merge,
         )
         if result.success:
-            self.cache_service.remove_branch_from_cache(branch_name)
-            logger.debug(f"Removed {branch_name} from cache after remote-only deletion")
+            if self.dry_run:
+                self._console_print(result.message)
+            else:
+                self.cache_service.remove_branch_from_cache(branch_name)
+                logger.debug(f"Removed {branch_name} from cache after remote-only deletion")
             return True, None
         return False, result.message
 
@@ -700,10 +672,13 @@ class BranchKeeper:
 
         if use_cache:
             self._emit_analysis_progress(progress_callback, "Loading cache")
-            cached_branches = self.cache_service.get_cached_branches(branches)
+            cache_snapshot = self.cache_service.load_cache()
+            cached_branches = self.cache_service.get_cached_branches(branches, cache=cache_snapshot)
             logger.debug(f"Loaded {len(cached_branches)} cached branches")
 
-            branches_to_process = self.cache_service.get_stale_branches(branches, self.main_branch)
+            branches_to_process = self.cache_service.get_stale_branches(
+                branches, self.main_branch, cache=cache_snapshot
+            )
 
             stable_count = len(branches) - len(branches_to_process)
             if (self.verbose or self.debug_mode) and stable_count > 0:
@@ -789,10 +764,13 @@ class BranchKeeper:
                     is_complete=False,
                 )
 
-            cached_branches = self.cache_service.get_cached_branches(branches)
+            cache_snapshot = self.cache_service.load_cache()
+            cached_branches = self.cache_service.get_cached_branches(branches, cache=cache_snapshot)
             logger.debug(f"Fast-loaded {len(cached_branches)} cached branches")
 
-            branches_to_process = self.cache_service.get_stale_branches(branches, self.main_branch)
+            branches_to_process = self.cache_service.get_stale_branches(
+                branches, self.main_branch, cache=cache_snapshot
+            )
 
             if branches_to_process and not finalize_partial:
                 return BranchAnalysisResult(
@@ -1468,6 +1446,7 @@ class BranchKeeper:
         batch_id: str | None = None,
         progress_callback: OperationProgressCallback | None = None,
         show_progress: bool = False,
+        allow_unmerged_remote: bool = False,
     ) -> tuple:
         """Perform deletion of branches and removal of worktrees.
 
@@ -1480,6 +1459,7 @@ class BranchKeeper:
             force_mode: If True, skip uncommitted changes checks (but not PR or worktree checks)
             progress_callback: Optional callback for UI-native progress updates.
             show_progress: Whether to show a Rich progress bar for CLI cleanup.
+            allow_unmerged_remote: Explicit selection may bypass remote merge proof.
 
         Returns:
             Tuple of (deleted_branches, failed_branches, removed_worktrees, failed_worktrees)
@@ -1528,7 +1508,10 @@ class BranchKeeper:
             # Remove worktrees first. In dry-run mode, report what would happen
             # without touching worktree directories or Git metadata.
             for wt in worktrees_to_remove:
-                message = "Removing worktree..."
+                message = f"Removing worktree {wt.worktree_path}"
+                self._emit_operation_progress(
+                    progress_callback, "Cleaning up", completed, total_steps, message
+                )
                 if self.dry_run:
                     self._console_print(f"Would remove worktree at {wt.worktree_path}")
                     removed_worktrees.append(wt.worktree_path)
@@ -1564,7 +1547,11 @@ class BranchKeeper:
 
             # Delete branches
             for branch in branches_to_delete:
-                message = f"Deleting {branch.name}..."
+                message = f"Deleting {branch.name}"
+                self._emit_operation_progress(
+                    progress_callback, "Cleaning up", completed, total_steps, message
+                )
+                started = perf_counter()
                 reason = format_deletion_reason(branch.status)
                 success, error_message = self.delete_branch(
                     branch.name,
@@ -1573,8 +1560,13 @@ class BranchKeeper:
                     batch_id=batch_id,
                     expected_tip_sha=branch.tip_sha,
                     merge_detection=branch.merge_detection,
+                    allow_unmerged_remote=allow_unmerged_remote,
                 )
 
+                logger.debug(
+                    "Deletion of %s completed in %.2fs (success=%s)",
+                    branch.name, perf_counter() - started, success,
+                )
                 if success:
                     deleted_branches.append(branch.name)
                     message = f"Deleted {branch.name}"

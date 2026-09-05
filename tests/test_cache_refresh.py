@@ -284,3 +284,25 @@ class TestCacheRefreshPersistence:
         assert main2.untracked_files is True, "Untracked status should be preserved"
         assert main2.modified_files is True, "Modified status should be preserved"
         assert main2.staged_files is True, "Staged status should be preserved"
+
+
+def test_cache_fast_path_reads_one_snapshot(git_repo, mock_config, mocker):
+    keeper = BranchKeeper(git_repo.working_dir, mock_config)
+    load = mocker.spy(keeper.cache_service, "load_cache")
+
+    keeper.get_cached_analysis_fast(finalize_partial=True, include_refresh_candidates=True)
+
+    assert load.call_count == 1
+
+
+def test_unstable_cache_does_not_scan_refs_for_validation(git_repo, mocker):
+    cache = cache_service_module.CacheService(git_repo.working_dir)
+    scan = mocker.patch.object(
+        cache, "_get_current_branch_states", side_effect=AssertionError("unnecessary ref scan")
+    )
+    rows = {"feature/active": {"stable": False}}
+
+    assert cache.get_stale_branches(
+        ["main", "feature/active", "feature/new"], "main", cache=rows
+    ) == ["main", "feature/active", "feature/new"]
+    scan.assert_not_called()

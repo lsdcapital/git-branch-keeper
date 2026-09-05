@@ -611,10 +611,13 @@ class BranchKeeperApp(App):
             if (
                 not branch.is_worktree
                 and not branch.has_local
-                and not (branch.has_remote and branch.status == BranchStatus.MERGED)
+                and not (branch.has_remote and (branch.status == BranchStatus.MERGED or is_force))
             ):
                 logger.debug(f"[MARK_WITH_HIERARCHY] {branch.name} is remote-only")
-                return False, "Cannot mark a remote-only branch unless it is merged"
+                return (
+                    False,
+                    "Cannot mark a remote-only branch unless it is merged; press 'f' to force-mark",
+                )
 
             # Check protected branches (always enforced)
             if BranchValidationService.is_protected(branch.name, self.keeper.protected_branches):
@@ -681,6 +684,7 @@ class BranchKeeperApp(App):
         # The per-branch reason lives in the detail pane's deletion blockers.
         # Subtract the plan: it unblocks branches whose only obstacle is a clean
         # worktree, and the two figures must not contradict each other.
+        current_branch = self._current_branch_name()
         blocked = len(
             {
                 branch.name
@@ -688,7 +692,7 @@ class BranchKeeperApp(App):
                 if BranchValidationService.blocking_reason(
                     branch,
                     self.keeper.protected_branches,
-                    self._current_branch_name(),
+                    current_branch,
                     allow_remote_deletion=self.keeper.delete_remote,
                 )
             }
@@ -856,7 +860,7 @@ class BranchKeeperApp(App):
             self._set_status_message(f"Cleared {count} marks")
 
     def action_force_mark(self) -> None:
-        """Force-mark current branch (ignores uncommitted changes)."""
+        """Force-mark a cleanup candidate, allowing unproven remote merge status."""
         if self._block_if_refreshing("force-marking"):
             return
 
@@ -871,9 +875,9 @@ class BranchKeeperApp(App):
         branch = self.branches[row_index]
 
         # Check basic force-mark eligibility (status)
-        if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
+        if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED, BranchStatus.UNSTARTED]:
             self._set_status_message(
-                "Can only force-mark stale/merged branches",
+                "Can only force-mark stale, merged, or unstarted branches",
                 severity="warning",
             )
             return
@@ -933,71 +937,31 @@ class BranchKeeperApp(App):
         self, branches_to_delete: list[BranchDetails]
     ) -> ConfirmationPrompt:
         """Build a compact checkpoint for an intentionally selected deletion batch."""
-        total_marked = len(self.marked_branches) + len(self.force_marked_branches)
-        force_count = len(self.force_marked_branches)
         branches_by_name: dict[str, list[BranchDetails]] = {}
         for branch in branches_to_delete:
             branches_by_name.setdefault(branch.name, []).append(branch)
 
-        local_count = 0
-        remote_count = 0
-        for matching_rows in branches_by_name.values():
-            has_local = any(branch.has_local for branch in matching_rows)
-            has_remote = any(branch.has_remote for branch in matching_rows)
-            local_count += int(has_local)
-            remote_count += int(has_remote and (self.keeper.delete_remote or not has_local))
+        items = []
+        for name, rows in branches_by_name.items():
+            locations = []
+            has_local = any(branch.has_local for branch in rows)
+            if has_local:
+                locations.append("local")
+            if any(branch.has_remote for branch in rows) and (
+                self.keeper.delete_remote or not has_local
+            ):
+                locations.append(self.keeper.remote_name)
+            scope = " + ".join(locations)
+            force = " · force" if name in self.force_marked_branches else ""
+            items.append(f"• {name} · {scope}{force}")
 
-        impact = []
-        if local_count:
-            impact.append(f"{local_count} local")
-        if remote_count:
-            impact.append(f"{remote_count} on {self.keeper.remote_name}")
-            impact.append("remote deletion is permanent")
-        else:
-            impact.append("recoverable with Undo")
-
-        local_names = [
-            name
-            for name, rows in branches_by_name.items()
-            if any(branch.has_local for branch in rows)
-        ]
-        remote_names = [
-            name
-            for name, rows in branches_by_name.items()
-            if any(branch.has_remote for branch in rows)
-            and (self.keeper.delete_remote or not any(branch.has_local for branch in rows))
-        ]
-        sections = []
-        if local_names:
-            sections.append(
-                ConfirmationSection(
-                    f"Local branches ({len(local_names)})",
-                    "\n".join(f"• {name}" for name in local_names),
-                )
-            )
-        if remote_names:
-            sections.append(
-                ConfirmationSection(
-                    f"Remote branches on {self.keeper.remote_name} ({len(remote_names)})",
-                    "\n".join(f"• {name}" for name in remote_names),
-                    tone="danger",
-                )
-            )
-
-        warnings = []
-        if force_count:
-            warnings.append(f"{force_count} force-marked · may contain uncommitted work")
-        if remote_names:
-            warnings.append("Remote branches are shared repository state and may belong to others")
-
+        count = len(branches_by_name)
         return ConfirmationPrompt(
             title="Confirm deletion",
-            question=f"Delete {total_marked} branch" f"{'es' if total_marked != 1 else ''}?",
-            description=" · ".join(impact),
-            warning=" · ".join(warnings) if warnings else None,
-            confirm_label=f"Delete {total_marked}",
-            sections=tuple(sections),
-            default_confirm=False,
+            question=f"Delete {count} branch{'es' if count != 1 else ''}?",
+            confirm_label=f"Delete {count}",
+            sections=(ConfirmationSection("Branches", "\n".join(items)),),
+            default_confirm=True,
         )
 
     def _handle_delete_confirmation(self, confirmed: bool | None) -> None:
@@ -1082,6 +1046,7 @@ class BranchKeeperApp(App):
                     force_branches,
                     force_worktrees,
                     force_mode=True,
+                    allow_unmerged_remote=True,
                     batch_id=deletion_batch_id,
                     progress_callback=self._analysis_progress_callback,
                 )
