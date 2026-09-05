@@ -76,7 +76,7 @@ git-branch-keeper [OPTIONS]
 | **CLI Cleanup** | `--cli --delete` | Deletes eligible branches with confirmation prompts | ⚠️ **CAUTION** |
 | **Force Mode** | `--cli --delete --force` | Deletes immediately without confirmation | 🔴 **DANGEROUS** |
 | **Dry Run** | `--dry-run` flag | Preview only, no deletion or prompts | ✅ **SAFE** |
-| **Remote deletion** | TUI `d` toggle / CLI `--remote` | Off by default for all remote refs | ✅ **SAFE default** |
+| **Remote deletion** | TUI `d` review / CLI `--remote` | Off by default for all remote refs | ✅ **SAFE default** |
 | **Merged remote-only cleanup** | Remote deletion enabled and merged row with Location `remote` | Blocked until explicit opt-in; then deletes after confirmation | ⚠️ **CAUTION** |
 
 ### ⚠️ Important Safety Warnings
@@ -85,9 +85,9 @@ git-branch-keeper [OPTIONS]
 
 2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking when cleanup is enabled. For legacy compatibility, `--force` also implies `--delete`. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
 
-   **Deletion is local-only by default**: every remote ref is preserved unless you toggle the TUI deletion scope with `d` or pass `--remote`. This opt-in also enables positively merged remote-only branches. The confirmation lists each branch once with its deletion scope (local, remote, or both). Delete is selected by default; press Enter to confirm or Escape to cancel. Deletions are journaled for `undo`.
+   **Deletion is local-only by default**: press `d` to review “Also clean my merged remote branches.” GBK lists the eligible names before enabling this scope. Eligibility requires a same-repository PR authored by your authenticated GitHub account, merged into the configured main branch, with no open PR and an unchanged head matching the remote-tracking tip. Missing ownership or API evidence keeps the remote. Local cleanup can still remove other eligible local branches while retaining their remotes. The final confirmation shows separate local and remote totals and each branch's deletion locations. Ownership, PR status and tips are checked again before remote deletion; a lease rejects a remote tip that changes. `d` again returns to local-only and clears remote-only marks. This selection is session-only; a refresh does not silently add new eligible remotes. Toggle off and review again to select a new set. Undo restores local branches only.
 
-   **Force-delete an old remote-only branch in the TUI**: enable **LOCAL + REMOTE** with `d`, highlight the branch, press `f`, then press `Enter` and confirm. Force Mark accepts stale, merged, and unstarted branches and can delete a remote-only branch without merge proof. Force-marked branches are labelled `force` in the confirmation. Protected branches, open PRs, remote access failures, and changed branch tips still block deletion. Bulk marking and CLI `--force` continue to require merge proof for remote-only branches.
+   **Broader remote cleanup is explicit**: starting with `--remote` retains the broader **LOCAL + REMOTE** scope, including other authors' merged branches. In that explicit scope, `f` can force-mark stale, merged or unstarted remote-only branches without merge proof; protected branches, open PRs, remote access failures and changed tips still block deletion. Force-marking never bypasses ownership or merge requirements in **LOCAL + MY MERGED REMOTES**. Bulk marking and CLI `--force` continue to require merge proof for remote-only branches.
 
 3. **First Run Recommendation**: On your first run, use `--dry-run` to understand what would be deleted:
    ```bash

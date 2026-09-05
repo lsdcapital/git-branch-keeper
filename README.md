@@ -58,7 +58,7 @@ gbk --filter stale --stale-days 90
 gbk undo
 ```
 
-Plain CLI mode is read-only unless cleanup is requested. A stale branch may contain unmerged work. Deleting remote branches requires `--remote` in the CLI or the **d** scope toggle in the TUI. For an old remote-only branch that normal marking rejects, use `d` to enable remote deletion, `f` to force-mark it, then `Enter` to review and confirm. The `--force` option skips confirmations and can override some protections; see the [safety guide](docs/usage.md) before using it.
+Plain CLI mode is read-only unless cleanup is requested. Local-only deletion is the default. In the TUI, **d** reviews an optional selection of **your merged remote branches**: the PR author must match your authenticated GitHub account, the PR must be merged into the configured main branch, and the branch tip must still match. Other remotes are kept. Confirmation shows separate local and remote totals. The explicit `--remote` flag retains broader remote cleanup for deliberate review of other branches; see the [safety guide](docs/usage.md).
 
 ## Terminal shortcuts
 
@@ -68,7 +68,7 @@ Plain CLI mode is read-only unless cleanup is requested. A stale branch may cont
 | Space | Mark or unmark a branch |
 | a | Mark all deletable branches |
 | Enter | Review deletion of marked branches |
-| d | Toggle local-only / local + remote deletion |
+| d | Review your merged remote branches / return to local-only cleanup |
 | i | Show branch details |
 | r | Fetch/prune the selected remote and refresh |
 | q | Quit |

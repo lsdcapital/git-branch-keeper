@@ -470,7 +470,7 @@ class BranchKeeperApp(App):
         style_type = get_branch_style_type(
             branch,
             self.keeper.protected_branches,
-            allow_remote_deletion=self.keeper.delete_remote,
+            allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
         )
         # Override color for force-marked branches to show they will be deleted
         if is_force_marked:
@@ -499,7 +499,7 @@ class BranchKeeperApp(App):
         status_str = format_display_status(
             branch,
             self.keeper.protected_branches,
-            allow_remote_deletion=self.keeper.delete_remote,
+            allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
         )
         status_text = Text(status_str, style=text_color)
 
@@ -606,7 +606,10 @@ class BranchKeeperApp(App):
         issues = []
         for branch in matching:
             if not branch.is_worktree and not branch.has_local and not self.keeper.delete_remote:
-                return False, "Enable LOCAL + REMOTE deletion with 'd' before marking remote refs"
+                return (
+                    False,
+                    "Use 'd' to review your merged remote branches before marking remote refs",
+                )
 
             if (
                 not branch.is_worktree
@@ -618,6 +621,14 @@ class BranchKeeperApp(App):
                     False,
                     "Cannot mark a remote-only branch unless it is merged; press 'f' to force-mark",
                 )
+
+            if (
+                not branch.is_worktree
+                and not branch.has_local
+                and self.keeper.owned_remote_only
+                and not self.keeper.remote_deletion_allowed(branch)
+            ):
+                return False, "Remote branch is outside your verified merged-PR selection"
 
             # Check protected branches (always enforced)
             if BranchValidationService.is_protected(branch.name, self.keeper.protected_branches):
@@ -693,7 +704,7 @@ class BranchKeeperApp(App):
                     branch,
                     self.keeper.protected_branches,
                     current_branch,
-                    allow_remote_deletion=self.keeper.delete_remote,
+                    allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
                 )
             }
             - deletable_names
@@ -704,7 +715,10 @@ class BranchKeeperApp(App):
 
         scope_text = Text(no_wrap=True, overflow="ellipsis")
         if self.keeper.delete_remote:
-            scope_text.append("Delete scope: LOCAL + REMOTE [d]", style="bold yellow")
+            label = (
+                "LOCAL + MY MERGED REMOTES" if self.keeper.owned_remote_only else "LOCAL + REMOTE"
+            )
+            scope_text.append(f"Delete scope: {label} [d]", style="bold yellow")
         else:
             scope_text.append("Delete scope: LOCAL ONLY [d]", style="bold green")
 
@@ -733,28 +747,78 @@ class BranchKeeperApp(App):
         dynamic_status.update(dynamic_text)
 
     def action_toggle_delete_scope(self) -> None:
-        """Toggle whether deleting a local branch also deletes its remote branch."""
+        """Choose the optional owned-PR cleanup, or return to local-only cleanup."""
         if self._block_if_refreshing("changing deletion scope"):
             return
-
-        self.keeper.delete_remote = not self.keeper.delete_remote
-        if self.keeper.delete_remote:
-            self._set_status_message(
-                f"Remote deletion enabled for {self.keeper.remote_name} — "
-                "undo restores local branches only",
-                severity="warning",
-            )
-        else:
-            remote_only_names = {
-                branch.name
-                for branch in self.branches
-                if not branch.is_worktree and branch.has_remote and not branch.has_local
-            }
-            self.marked_branches.difference_update(remote_only_names)
-            self.force_marked_branches.difference_update(remote_only_names)
-            self._set_status_message("Remote deletion disabled — remote-only marks cleared")
+        if not self.keeper.delete_remote:
+            self.review_owned_remote_scope()
+            return
+        self.keeper.delete_remote = False
+        self.keeper.owned_remote_only = False
+        self.keeper.owned_remote_tips = {}
+        remote_only_names = {b.name for b in self.branches if not b.is_worktree and not b.has_local}
+        self.marked_branches.difference_update(remote_only_names)
+        self.force_marked_branches.difference_update(remote_only_names)
+        self._set_status_message("Local cleanup only — remote branches kept")
         self._refresh_branch_rows()
         self._update_status()
+
+    @work(exclusive=True, thread=False)
+    async def review_owned_remote_scope(self) -> None:
+        """Verify and list the proposed remote additions before the user opts in."""
+        self._set_refreshing(True)
+        self._set_analysis_progress(
+            BranchAnalysisProgress(phase="Checking your merged remote branches")
+        )
+        try:
+            candidates = await asyncio.to_thread(
+                self.keeper.prepare_owned_remote_cleanup,
+                self.branches,
+                progress_callback=self._analysis_progress_callback,
+            )
+        except Exception as error:
+            logger.exception("Could not prepare owned remote cleanup")
+            self._set_status_message(str(error), severity="warning")
+            return
+        finally:
+            self._set_refreshing(False)
+        if not candidates:
+            self._set_status_message(
+                "No unchanged merged remote branches owned by your GitHub account",
+                severity="warning",
+            )
+            return
+
+        def choose(confirmed):
+            if confirmed:
+                self.keeper.owned_remote_tips = candidates
+                self.keeper.owned_remote_only = True
+                self.keeper.delete_remote = True
+                self._refresh_branch_rows()
+                self._set_status_message(
+                    "Your merged remotes are eligible; review marks before deleting"
+                )
+
+        self.push_screen(
+            ConfirmScreen(
+                ConfirmationPrompt(
+                    title="Remote cleanup",
+                    question="Also clean my merged remote branches?",
+                    confirm_label="Include my merged remotes",
+                    cancel_label="Local only",
+                    description="Only the branches below can be deleted remotely in this selection. Other remote branches are kept.",
+                    sections=(
+                        ConfirmationSection(
+                            "Eligible remote branches",
+                            "\n".join(f"• {name}" for name in sorted(candidates)),
+                        ),
+                    ),
+                    warning="Remote deletion affects collaborators. Undo restores local branches only.",
+                    default_confirm=False,
+                )
+            ),
+            choose,
+        )
 
     def action_open_pr(self, url: str) -> None:
         """Open a PR link from the branch table in the default browser."""
@@ -942,15 +1006,16 @@ class BranchKeeperApp(App):
             branches_by_name.setdefault(branch.name, []).append(branch)
 
         items = []
+        local_count = remote_count = 0
         for name, rows in branches_by_name.items():
             locations = []
             has_local = any(branch.has_local for branch in rows)
             if has_local:
                 locations.append("local")
-            if any(branch.has_remote for branch in rows) and (
-                self.keeper.delete_remote or not has_local
-            ):
+                local_count += 1
+            if any(b.has_remote and self.keeper.remote_deletion_allowed(b) for b in rows):
                 locations.append(self.keeper.remote_name)
+                remote_count += 1
             scope = " + ".join(locations)
             force = " · force" if name in self.force_marked_branches else ""
             items.append(f"• {name} · {scope}{force}")
@@ -958,7 +1023,7 @@ class BranchKeeperApp(App):
         count = len(branches_by_name)
         return ConfirmationPrompt(
             title="Confirm deletion",
-            question=f"Delete {count} branch{'es' if count != 1 else ''}?",
+            question=f"Delete {local_count} local and {remote_count} remote branches?",
             confirm_label=f"Delete {count}",
             sections=(ConfirmationSection("Branches", "\n".join(items)),),
             default_confirm=True,
@@ -987,7 +1052,7 @@ class BranchKeeperApp(App):
                         or BranchValidationService.is_deletable(
                             branch,
                             self.keeper.protected_branches,
-                            allow_remote_deletion=self.keeper.delete_remote,
+                            allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
                         )
                     ):
                         branches.append(branch)
@@ -1426,6 +1491,9 @@ class BranchKeeperApp(App):
             self.keeper.config.refresh = True
 
             if self.keeper.config.get("include_remote_branches", True):
+                self._set_analysis_progress(
+                    BranchAnalysisProgress(phase="Synchronizing remote branches")
+                )
                 _, remote_sync_error = await asyncio.to_thread(self.keeper.sync_remote_refs)
             else:
                 self.keeper.git_service.invalidate_analysis_caches()

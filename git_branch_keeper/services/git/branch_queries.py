@@ -204,8 +204,8 @@ class BranchQueries:
     def get_branch_status_details(self, branch_name: str) -> dict:
         """Get detailed status of a branch.
 
-        Uses temporary git worktrees for safe, isolated branch checking.
-        This prevents uncommitted changes from being carried between branches.
+        Inspect existing working trees only. A branch with no checkout has no
+        index or working files that could contain uncommitted changes.
 
         Returns:
             dict with keys: modified, untracked, staged (all bool)
@@ -284,46 +284,10 @@ class BranchQueries:
                     "untracked": has_untracked,
                     "staged": has_staged,
                 }
-            else:
-                # Not current - use temporary worktree (safe, isolated)
-                logger.debug(f"Checking branch {branch_name} using temporary worktree")
-                with self.worktree_service.create_temporary_worktree(branch_name) as temp_dir:
-                    # Get status from the worktree (without checking out current branch)
-                    status = repo.git.execute(["git", "-C", temp_dir, "status", "--porcelain"])
-
-                    # Parse porcelain format: XY filename
-                    # X = index status (first char), Y = working tree status (second char)
-                    has_modified = False
-                    has_untracked = False
-                    has_staged = False
-
-                    for line in status.split("\n"):
-                        if not line:
-                            continue
-                        if len(line) < 2:
-                            continue
-
-                        index_status = line[0]  # Staged changes
-                        worktree_status = line[1]  # Working tree changes
-
-                        # Untracked files
-                        if line.startswith("??"):
-                            has_untracked = True
-                            continue
-
-                        # Check for staged changes (index status is not space)
-                        if index_status != " ":
-                            has_staged = True
-
-                        # Check for working tree changes (worktree status is not space)
-                        if worktree_status != " ":
-                            has_modified = True
-
-                    return {
-                        "modified": has_modified,
-                        "untracked": has_untracked,
-                        "staged": has_staged,
-                    }
+            # Uncommitted changes belong to an existing working tree, not a ref.
+            # Checking out an otherwise unused branch just to run status copies
+            # the entire tree and can trigger checkout hooks/filters unnecessarily.
+            return {"modified": False, "untracked": False, "staged": False}
 
         except git.exc.GitCommandError as e:
             # Extract detailed error information from GitCommandError

@@ -126,24 +126,29 @@ async def test_status_feedback_stays_on_fixed_third_line(make_app):
         assert status.region.height == initial_height == 5
 
 
-async def test_delete_scope_binding_toggles_remote_deletion(make_app):
-    app = make_app([_branch("feature/a", has_remote=True)])
-
+async def test_delete_scope_binding_reviews_owned_remotes(make_app, monkeypatch):
+    branch = _branch("feature/a", has_remote=True)
+    branch.tip_sha = "abc123"
+    app = make_app([branch])
+    monkeypatch.setattr(
+        app.keeper, "prepare_owned_remote_cleanup", lambda rows, **kwargs: {"feature/a": "abc123"}
+    )
     async with app.run_test() as pilot:
         await pilot.press("d")
+        await app.workers.wait_for_complete()
         await pilot.pause()
-
-        assert app.keeper.delete_remote is True
-        status = _status_text(app)
-        assert "Delete scope: LOCAL + REMOTE [d]" in status
-        assert "undo restores local branches only" in status
-
-        await pilot.press("d")
-        await pilot.pause()
-
         assert app.keeper.delete_remote is False
-        status = _status_text(app)
-        assert "Delete scope: LOCAL ONLY [d]" in status
+        assert isinstance(app.screen, ConfirmScreen)
+        assert app.screen.prompt.question == "Also clean my merged remote branches?"
+        assert app.screen.focused.id == "no"
+        assert "feature/a" in app.screen.prompt.sections[0].body
+        await pilot.click("#yes")
+        assert app.keeper.delete_remote is True
+        assert app.keeper.owned_remote_only is True
+        assert "LOCAL + MY MERGED REMOTES" in _status_text(app)
+        await pilot.press("d")
+        assert app.keeper.delete_remote is False
+        assert app.keeper.owned_remote_tips == {}
 
 
 async def test_delete_confirmation_summarizes_local_only_impact(make_app):
@@ -156,7 +161,7 @@ async def test_delete_confirmation_summarizes_local_only_impact(make_app):
 
         assert isinstance(app.screen, ConfirmScreen)
         prompt = app.screen.prompt
-        assert prompt.question == "Delete 1 branch?"
+        assert prompt.question == "Delete 1 local and 0 remote branches?"
         assert prompt.description is None
         assert prompt.sections[0].body == "• feature/a · local"
         assert prompt.confirm_label == "Delete 1"
@@ -340,6 +345,27 @@ async def test_deletion_progress_uses_delete_label(make_app):
         status = _status_text(app)
         assert "Deleting" in status
         assert "Deleted feature/a 1/2 (50%)" in status
+
+
+async def test_refresh_shows_activity_without_claiming_completed_branches(make_app):
+    app = make_app([_branch("feature/a")])
+    async with app.run_test() as pilot:
+        app._set_refreshing(True)
+        for elapsed in (1, 2):
+            app._set_analysis_progress(
+                BranchAnalysisProgress(
+                    phase="Processing branches",
+                    current=0,
+                    total=14,
+                    message=f"Branches · 8 running · 6 queued · {elapsed}s elapsed",
+                )
+            )
+            await pilot.pause()
+            status = _status_text(app)
+            assert f"{elapsed}s elapsed" in status
+            assert "8 running · 6 queued" in status
+            assert "0/14 (0%)" in status
+        assert not app.query_one(DataTable).loading
 
 
 async def test_apply_refresh_result_preserves_scroll_position(make_app):
@@ -564,7 +590,8 @@ async def test_status_bar_blocks_remote_only_candidates_until_opt_in(make_app):
         assert "Deletable: 0" in status
         assert "Blocked: 2" in status
 
-        await pilot.press("d")
+        app.keeper.delete_remote = True
+        app._update_status()
         await pilot.pause()
 
         status = _status_text(app)
@@ -747,7 +774,7 @@ async def test_large_delete_confirmation_keeps_full_selection_scrollable(make_ap
 
         prompt = app.screen.prompt
         body = app.screen.query_one("#confirm-message")
-        assert prompt.question == "Delete 48 branches?"
+        assert prompt.question == "Delete 48 local and 0 remote branches?"
         assert prompt.description is None
         assert "feature/cleanup-00" in prompt.sections[0].body
         assert "feature/cleanup-47" in prompt.sections[0].body
@@ -821,7 +848,8 @@ async def test_force_mark_unstarted_remote_branch_and_confirm(make_app, monkeypa
     async with app.run_test() as pilot:
         await pilot.press("f")
         assert not app.force_marked_branches
-        await pilot.press("d", "f")
+        app.keeper.delete_remote = True  # Explicit broad --remote scope
+        await pilot.press("f")
         assert app.force_marked_branches == {"feature/unused"}
         app.action_delete_marked()
         await pilot.pause()
@@ -838,3 +866,39 @@ async def test_force_mark_unstarted_remote_branch_and_confirm(make_app, monkeypa
         assert deletion.call_args.kwargs["allow_unmerged_remote"] is True
         assert deletion.call_args.args[0][0].name == "feature/unused"
         assert app.branches == []
+
+
+async def test_owned_scope_confirmation_counts_only_selected_remotes(make_app):
+    own = _branch("feature/mine", has_remote=True)
+    own.tip_sha = "abc123"
+    other = _branch("feature/theirs", has_remote=True)
+    app = make_app([own, other])
+    app.keeper.delete_remote = app.keeper.owned_remote_only = True
+    app.keeper.owned_remote_tips = {own.name: own.tip_sha}
+    async with app.run_test() as pilot:
+        app.marked_branches.update([own.name, other.name])
+        app.action_delete_marked()
+        await pilot.pause()
+        assert app.screen.prompt.question == "Delete 2 local and 1 remote branches?"
+        assert "feature/mine · local + origin" in app.screen.prompt.sections[0].body
+        assert "feature/theirs · local\n" in app.screen.prompt.sections[0].body + "\n"
+
+
+async def test_owned_scope_cannot_force_mark_unselected_remote(make_app):
+    other = _branch("feature/theirs", has_remote=True, has_local=False)
+    app = make_app([other])
+    app.keeper.delete_remote = app.keeper.owned_remote_only = True
+    async with app.run_test() as pilot:
+        await pilot.press("f")
+        assert not app.force_marked_branches
+        assert "outside your verified" in _status_text(app)
+
+
+async def test_scope_without_identity_keeps_local_only(make_app):
+    app = make_app([_branch("feature/a", has_remote=True)])
+    async with app.run_test() as pilot:
+        await pilot.press("d")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not app.keeper.delete_remote
+        assert "Cannot verify your GitHub account" in _status_text(app)

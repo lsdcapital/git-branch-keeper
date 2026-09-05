@@ -22,6 +22,38 @@ class FrozenDateTime(datetime):
 class TestCacheRefreshPersistence:
     """Test that cache is updated correctly during refresh operations."""
 
+    def test_merged_status_error_is_retried_until_recovered(self, git_repo):
+        """Legacy stable errors must refresh even when the branch tip is unchanged."""
+        git_repo.create_head("fix/st-connect")
+        cache = cache_service_module.CacheService(git_repo.working_dir)
+        branch = BranchDetails(
+            name="fix/st-connect",
+            last_commit_date="2025-10-30",
+            age_days=310,
+            status=BranchStatus.MERGED,
+            modified_files=None,
+            untracked_files=None,
+            staged_files=None,
+            has_remote=False,
+            sync_status=SyncStatus.MERGED_GIT.value,
+            notes="[ERROR] Git error: Cmd('git') failed due to: exit code(1)",
+        )
+        cache.save_cache([branch], "main")
+        rows = cache.load_cache()
+        assert rows[branch.name]["stable"] is False
+
+        # Reproduce the on-disk rows written by older versions.
+        rows[branch.name]["stable"] = True
+        assert cache.get_stale_branches([branch.name], "main", cache=rows) == [branch.name]
+
+        branch.notes = None
+        branch.modified_files = False
+        branch.untracked_files = False
+        branch.staged_files = False
+        cache.save_cache([branch], "main")
+        assert cache.load_cache()[branch.name]["stable"] is True
+        assert cache.get_stale_branches([branch.name], "main") == []
+
     def test_cached_pr_metadata_backfills_missing_display_number(self, git_repo):
         """Stable pre-upgrade rows show their retained PR number without a refresh."""
         cache = cache_service_module.CacheService(git_repo.working_dir)

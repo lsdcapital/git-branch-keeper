@@ -298,3 +298,24 @@ class TestGitHubServiceEdgeCases:
 
         with pytest.raises(GitHubAPIError, match="deletion blocked"):
             service.has_open_pr("feature/test")
+
+
+def test_ownership_metadata_uses_pr_author_and_head_repository(mock_git_repo, mock_config):
+    service = GitHubService(mock_git_repo.working_dir, mock_config)
+    pr = Mock(
+        user=Mock(login="alice"),
+        head=Mock(ref="feature/a", sha="abc", repo=Mock(full_name="team/project")),
+    )
+    summary = service._pr_summary(pr)
+    assert summary["author_login"] == "alice"
+    assert summary["head_repo"] == "team/project"
+
+
+def test_authenticated_identity_is_separate_from_pr_author(mock_git_repo, mock_config):
+    service = GitHubService(mock_git_repo.working_dir, mock_config)
+    service.github_repo = "team/project"
+    service.gh_repo = Mock()
+    service.github = Mock()
+    service.github.get_user.return_value.login = "reviewer"
+    assert service.get_authenticated_login() == "reviewer"
+    service.github.get_user.assert_called_once_with()

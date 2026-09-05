@@ -546,6 +546,13 @@ class TabbedInfoScreen(BaseModal[None]):
                 "Remote deletion is disabled; press 'd' in the branch list to enable it"
             )
 
+        if (
+            not self.branch.has_local
+            and self.keeper.owned_remote_only
+            and not self.keeper.remote_deletion_allowed(self.branch)
+        ):
+            blockers.append("Remote branch is outside your verified merged-PR selection")
+
         if self.branch.status == BranchStatus.UNSTARTED:
             blockers.append("Branch has no commits of its own - nothing was merged")
         elif self.branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
@@ -613,7 +620,7 @@ class TabbedInfoScreen(BaseModal[None]):
         display_status = format_display_status(
             self.branch,
             self.keeper.protected_branches,
-            allow_remote_deletion=self.keeper.delete_remote,
+            allow_remote_deletion=self.keeper.remote_deletion_allowed(self.branch),
         )
         status_lines = f"[bold]Status:[/bold] {display_status}"
         if display_status != self.branch.status.value:
@@ -626,7 +633,7 @@ class TabbedInfoScreen(BaseModal[None]):
             else BranchValidationService.is_deletable(
                 self.branch,
                 self.keeper.protected_branches,
-                allow_remote_deletion=self.keeper.delete_remote,
+                allow_remote_deletion=self.keeper.remote_deletion_allowed(self.branch),
             )
         )
 

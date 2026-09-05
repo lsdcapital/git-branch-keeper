@@ -314,6 +314,10 @@ class CacheService:
         if branch.status != BranchStatus.MERGED:
             return False
 
+        # A failed status check is transient even when the merge verdict is stable.
+        if "[ERROR]" in (branch.notes or ""):
+            return False
+
         # If there is no PR display value, the branch is merged and stable.
         if not branch.pr_status:
             return True
@@ -498,7 +502,11 @@ class CacheService:
 
             # If in cache but not stable, needs refresh
             branch_data = cache[branch_name]
-            if not branch_data.get("stable", False):
+            # Older versions marked merged rows stable even when status failed.
+            # Retry those rows too, without requiring a manual full refresh.
+            if not branch_data.get("stable", False) or "[ERROR]" in (
+                branch_data.get("notes") or ""
+            ):
                 logger.debug(f"Branch '{branch_name}' is unstable, needs refresh")
                 stale_branches.append(branch_name)
                 continue

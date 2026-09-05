@@ -371,6 +371,7 @@ class GitOperations:
         dry_run: bool = False,
         delete_remote: bool = False,
         batch_id: str | None = None,
+        verify_remote: Callable[[str], bool] | None = None,
     ) -> bool:
         """Delete a branch locally, and remotely only when explicitly requested.
 
@@ -413,6 +414,9 @@ class GitOperations:
                         raise ValueError(
                             "Remote tip differs from local tip; remote work must be reviewed"
                         )
+                    elif verify_remote is not None:
+                        if not verify_remote(deleted_sha):
+                            raise ValueError("Remote ownership or merged PR could not be verified")
                     elif not self.is_branch_merged(
                         branch_name, self.config.get("main_branch", "main"), force_refresh=True
                     ):
@@ -536,9 +540,7 @@ class GitOperations:
                         message=message,
                     )
                 if state.tip_sha != expected_sha:
-                    message = (
-                        f"Branch tip changed from {expected_sha[:12]} " f"to {state.tip_sha[:12]}"
-                    )
+                    message = f"Branch tip changed from {expected_sha[:12]} to {state.tip_sha[:12]}"
                     logger.warning(f"Refusing remote-only deletion of {branch_name}: {message}")
                     return RemoteDeletionResult(
                         success=False,
@@ -617,8 +619,7 @@ class GitOperations:
                 )
                 self._discard_remote_tracking_ref(repo, branch_name, expected_sha)
                 console.print(
-                    f"[green]Deleted remote-only branch "
-                    f"{self.remote_name}/{branch_name}[/green]"
+                    f"[green]Deleted remote-only branch {self.remote_name}/{branch_name}[/green]"
                 )
                 return RemoteDeletionResult(
                     success=True,

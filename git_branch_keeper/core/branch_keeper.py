@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import signal
 import sys
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from time import perf_counter
 
@@ -107,6 +107,8 @@ class BranchKeeper:
         self.dry_run = config.get("dry_run", True)
         self.force_mode = config.get("force", False)
         self.delete_remote = config.get("delete_remote", False)
+        self.owned_remote_only = False
+        self.owned_remote_tips: dict[str, str] = {}
         self.main_branch = config.get("main_branch", "main")
 
         # Resolve optional GitHub auth before initializing services.
@@ -217,6 +219,98 @@ class BranchKeeper:
             tip_sha if isinstance(tip_sha, str) else None,
             merge_detection if isinstance(merge_detection, dict) else None,
         )
+
+    def remote_deletion_allowed(self, branch: BranchDetails) -> bool:
+        """Return the remote scope selected for this specific row."""
+        return self.delete_remote and (
+            not self.owned_remote_only
+            or self.owned_remote_tips.get(branch.name) == branch.tip_sha
+            and branch.tip_sha is not None
+            and branch.status == BranchStatus.MERGED
+        )
+
+    def _owned_merged_pr(self, name: str, sha: str, login: str | None, info: dict) -> bool:
+        """Require same-repository PR ownership and an unchanged merged head."""
+        author = info.get("author_login")
+        return bool(
+            login
+            and isinstance(author, str)
+            and author.casefold() == login.casefold()
+            and info.get("merged") is True
+            and info.get("count") == 0
+            and not info.get("error")
+            and info.get("head_sha") == sha
+            and info.get("head_ref") == name
+            and info.get("base_ref") == self.main_branch
+            and info.get("head_repo") == self.github_service.github_repo
+            and name not in self.protected_branches
+            and name != self.main_branch
+        )
+
+    def prepare_owned_remote_cleanup(
+        self,
+        branches: list[BranchDetails],
+        progress_callback: BranchAnalysisProgressCallback | None = None,
+    ) -> dict[str, str]:
+        """Build a reviewable remote selection without changing the active scope."""
+        login = self.github_service.get_authenticated_login()
+        if not login:
+            raise RuntimeError("Cannot verify your GitHub account; keeping remote branches")
+        candidates = [
+            b
+            for b in branches
+            if not b.is_worktree
+            and b.has_remote
+            and b.status == BranchStatus.MERGED
+            and b.name not in self.protected_branches
+            and b.tip_sha
+        ]
+
+        def check(branch):
+            info = self.github_service.get_pr_data_for_branch(branch.name).get(branch.name, {})
+            if not self._owned_merged_pr(branch.name, branch.tip_sha, login, info):
+                return None
+            try:
+                with git.Repo(self.repo_path) as repo:
+                    remote_sha = repo.commit(
+                        f"refs/remotes/{self.remote_name}/{branch.name}"
+                    ).hexsha
+                if remote_sha == branch.tip_sha:
+                    return branch.name, remote_sha
+            except GIT_ERRORS:
+                pass
+            return None
+
+        if not candidates:
+            return {}
+        with ThreadPoolExecutor(
+            max_workers=self._get_worker_count_for_branches(len(candidates))
+        ) as pool:
+            pending = {pool.submit(check, branch) for branch in candidates}
+            selected = {}
+            started = perf_counter()
+            completed = 0
+            while pending:
+                done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                for future in done:
+                    result = future.result()
+                    if result is not None:
+                        selected[result[0]] = result[1]
+                    completed += 1
+                self._emit_analysis_progress(
+                    progress_callback,
+                    "Checking remote ownership",
+                    completed,
+                    len(candidates),
+                    f"Checking GitHub ownership · {int(perf_counter() - started)}s elapsed",
+                )
+            return selected
+
+    def _verify_owned_remote(self, branch_name: str, expected_sha: str) -> bool:
+        """Recheck authenticated ownership, open PRs and merged head at deletion time."""
+        login = self.github_service.get_authenticated_login()
+        info = self.github_service.get_pr_data_for_branch(branch_name).get(branch_name, {})
+        return self._owned_merged_pr(branch_name, expected_sha, login, info)
 
     def delete_branch(
         self,
@@ -357,8 +451,22 @@ class BranchKeeper:
                     return False, error_msg
 
             remote_exists = self.git_service.has_remote_branch(branch_name)
+            delete_remote = self.delete_remote
+            if self.owned_remote_only:
+                selected_sha = self.owned_remote_tips.get(branch_name)
+                delete_remote = bool(delete_remote and selected_sha)
+                if (
+                    delete_remote
+                    and selected_sha is not None
+                    and (
+                        reason != "merged"
+                        or current_tip_sha != selected_sha
+                        or not self._verify_owned_remote(branch_name, selected_sha)
+                    )
+                ):
+                    return False, "Remote ownership or merged tip changed; review this branch again"
             if self.dry_run:
-                if remote_exists and self.delete_remote:
+                if remote_exists and delete_remote:
                     self._console_print(
                         f"Would delete local and remote branch {branch_name} ({reason})"
                     )
@@ -398,11 +506,18 @@ class BranchKeeper:
                 return False, error_msg
 
             # Delete the branch
+            remote_checks = {}
+            if self.owned_remote_only and delete_remote:
+                remote_checks["verify_remote"] = lambda sha: (
+                    sha == self.owned_remote_tips.get(branch_name)
+                    and self._verify_owned_remote(branch_name, sha)
+                )
             success = self.git_service.delete_branch(
                 branch_name,
                 self.dry_run,
-                delete_remote=self.delete_remote,
+                delete_remote=delete_remote,
                 batch_id=batch_id,
+                **remote_checks,
             )
 
             # If deletion was successful, remove from cache
@@ -471,11 +586,18 @@ class BranchKeeper:
             self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
             return False, error_msg
         expected_sha = expected_tip_sha or current_tip_sha
+        if self.owned_remote_only and (
+            self.owned_remote_tips.get(branch_name) != expected_sha
+            or not self._verify_owned_remote(branch_name, expected_sha)
+        ):
+            return False, "Remote branch is not an unchanged merged PR owned by your GitHub account"
 
         # The mutation service performs the single live remote check, then calls
         # the merge verifier before pushing with a lease. Already-absent refs
         # remain idempotent successes without needing merge proof.
         def verify_merge() -> bool:
+            if self.owned_remote_only:
+                return self._verify_owned_remote(branch_name, expected_sha)
             return self._has_current_merge_proof(branch_name, merge_detection=merge_detection)
 
         result = self.git_service.delete_remote_only_branch(
@@ -483,7 +605,9 @@ class BranchKeeper:
             expected_sha=expected_sha,
             dry_run=self.dry_run,
             batch_id=batch_id,
-            verify_merge=None if allow_unmerged_remote else verify_merge,
+            verify_merge=(
+                None if allow_unmerged_remote and not self.owned_remote_only else verify_merge
+            ),
         )
         if result.success:
             if self.dry_run:
@@ -1035,7 +1159,7 @@ class BranchKeeper:
 
         Branch analysis must not modify the user's working tree or stash. The
         current branch is inspected in place with ``git status --porcelain``;
-        non-current branches are inspected in temporary worktrees.
+        branches checked out elsewhere are inspected in their existing worktrees.
 
         Args:
             branches: List of branch names to process
@@ -1243,31 +1367,40 @@ class BranchKeeper:
                 for branch in branches
             }
 
-            # Collect results as they complete
+            # Report activity while whole-branch jobs are still running. Waiting
+            # only for completions leaves the UI frozen at 0/N during slow API calls.
             completed = 0
-            for future in as_completed(future_to_branch):
-                branch_name = future_to_branch[future]
-                try:
-                    details = future.result()
-                    if details:
-                        branch_details.append(details)
-                except Exception as e:  # noqa: BLE001 - one bad branch must not abort the batch
-                    # Deliberately broad: this collects results from worker threads
-                    # running arbitrary per-branch analysis; any failure must be
-                    # logged and skipped so the rest of the batch still completes.
-                    logger.error(f"Error processing branch {branch_name}: {e}")
-                    if self.debug_mode and not self.tui_mode:
-                        console.print_exception()
-                finally:
-                    if progress:  # Only update if progress bar exists
-                        progress.update(task, advance=1)
-                    completed += 1
-                    self._emit_analysis_progress(
-                        progress_callback,
-                        "Processing branches",
-                        completed,
-                        len(branches),
-                    )
+            started = perf_counter()
+            pending = set(future_to_branch)
+            while pending:
+                done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                for future in done:
+                    branch_name = future_to_branch[future]
+                    try:
+                        details = future.result()
+                        if details:
+                            branch_details.append(details)
+                    except Exception as e:  # noqa: BLE001 - one bad branch must not abort the batch
+                        # Deliberately broad: this collects results from worker threads
+                        # running arbitrary per-branch analysis; any failure must be
+                        # logged and skipped so the rest of the batch still completes.
+                        logger.error(f"Error processing branch {branch_name}: {e}")
+                        if self.debug_mode and not self.tui_mode:
+                            console.print_exception()
+                    finally:
+                        if progress:  # Only update if progress bar exists
+                            progress.update(task, advance=1)
+                        completed += 1
+                running = sum(future.running() for future in pending)
+                queued = sum(not future.running() and not future.done() for future in pending)
+                elapsed = int(perf_counter() - started)
+                self._emit_analysis_progress(
+                    progress_callback,
+                    "Processing branches",
+                    completed,
+                    len(branches),
+                    f"Branches · {running} running · {queued} queued · {elapsed}s elapsed",
+                )
         except (KeyboardInterrupt, SystemExit):
             for future in future_to_branch:
                 future.cancel()
@@ -1345,7 +1478,7 @@ class BranchKeeper:
             # remote ref. Remote-only branches remain eligible only when merged.
             if not branch.has_local:
                 if (
-                    self.delete_remote
+                    self.remote_deletion_allowed(branch)
                     and branch.has_remote
                     and branch.status == BranchStatus.MERGED
                     and branch.name not in self.protected_branches
@@ -1565,7 +1698,9 @@ class BranchKeeper:
 
                 logger.debug(
                     "Deletion of %s completed in %.2fs (success=%s)",
-                    branch.name, perf_counter() - started, success,
+                    branch.name,
+                    perf_counter() - started,
+                    success,
                 )
                 if success:
                     deleted_branches.append(branch.name)
@@ -1876,8 +2011,7 @@ class BranchKeeper:
         # read as a confident claim.
         if status == BranchStatus.UNSTARTED and self.git_service.unstarted_is_unverifiable(branch):
             append_note(
-                "remote-only: no local reflog, cannot confirm never-started "
-                "vs fast-forward merged"
+                "remote-only: no local reflog, cannot confirm never-started vs fast-forward merged"
             )
         elif status == BranchStatus.MERGED and self.git_service.remote_history_is_unverifiable(
             branch

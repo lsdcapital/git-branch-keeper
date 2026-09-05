@@ -37,6 +37,34 @@ class TestGitServiceInit:
 class TestGitServiceBranchOperations:
     """Test basic branch operations."""
 
+    def test_unused_branch_status_never_checks_out_files(self, git_repo, mock_config, mocker):
+        """Dirty files in main do not belong to an unused branch; no checkout is needed."""
+        from pathlib import Path
+
+        git_repo.create_head("feature/unused")
+        root = Path(git_repo.working_dir)
+        (root / "README.md").write_text("staged change\n")
+        git_repo.index.add(["README.md"])
+        (root / "README.md").write_text("unstaged change\n")
+        (root / "untracked.txt").write_text("untracked\n")
+        service = GitOperations(git_repo.working_dir, mock_config)
+        temp_checkout = mocker.patch.object(
+            service.worktree_service,
+            "create_temporary_worktree",
+            side_effect=AssertionError("Status must not create a checkout"),
+        )
+        before = git_repo.git.status("--porcelain")
+
+        assert service.get_branch_status_details("feature/unused") == {
+            "modified": False, "untracked": False, "staged": False
+        }
+        assert service.get_branch_status_details("main") == {
+            "modified": True, "untracked": True, "staged": True
+        }
+        temp_checkout.assert_not_called()
+        assert git_repo.git.status("--porcelain") == before
+        assert git_repo.active_branch.name == "main"
+
     def test_has_remote_branch_exists(self, git_repo_with_branches, mock_config):
         """Test detecting existing remote branch."""
         service = GitOperations(git_repo_with_branches.working_dir, mock_config)

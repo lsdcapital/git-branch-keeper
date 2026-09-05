@@ -204,6 +204,8 @@ class GitHubService:
         head = getattr(pr, "head", None)
         base = getattr(pr, "base", None)
         return {
+            "author_login": self._safe_str(getattr(getattr(pr, "user", None), "login", None)),
+            "head_repo": self._safe_str(getattr(getattr(head, "repo", None), "full_name", None)),
             "number": self._safe_int(getattr(pr, "number", None)),
             "url": self._safe_str(getattr(pr, "html_url", None)),
             "head_ref": self._safe_str(getattr(head, "ref", None)),
@@ -212,6 +214,16 @@ class GitHubService:
             "merge_commit_sha": self._safe_str(getattr(pr, "merge_commit_sha", None)),
             "merged_at": self._safe_isoformat(getattr(pr, "merged_at", None)),
         }
+
+    def get_authenticated_login(self) -> str | None:
+        """Resolve ownership from the authenticated account, never commit authorship."""
+        if not self.is_enabled() or self.github is None:
+            return None
+        try:
+            return self._safe_str(self.github.get_user().login)
+        except GITHUB_ERRORS as error:
+            logger.warning(f"Could not verify authenticated GitHub account: {error}")
+            return None
 
     def _latest_pr(self, prs: list) -> object | None:
         """Return the latest PR by updated_at when available, otherwise the first PR."""
