@@ -307,6 +307,32 @@ class WorktreeService:
 
         try:
             repo = self._get_repo()
+            if not os.path.lexists(os.path.join(path, ".git")):
+                # Do not pass a broken checkout to `remove --force`: files left
+                # behind by external cleanup are not necessarily disposable.
+                entries = self._parse_worktree_info(repo.git.worktree("list", "--porcelain"))
+                entry = next(
+                    (wt for wt in entries if os.path.realpath(wt.path) == os.path.realpath(path)),
+                    None,
+                )
+                if entry is not None and not entry.is_main:
+                    if os.path.lexists(path) and not force:
+                        return False, (
+                            "Broken worktree: its .git file is missing. Remaining files were "
+                            "preserved. Use force deletion (force-mark with 'f' in the TUI) "
+                            "to prune stale worktree registrations only; this directory's "
+                            "files will be kept."
+                        )
+                    repo.git.worktree("prune", "--expire=now")
+                    self.clear_cache()
+                    remaining = self._parse_worktree_info(repo.git.worktree("list", "--porcelain"))
+                    if any(os.path.realpath(wt.path) == os.path.realpath(path) for wt in remaining):
+                        return False, (
+                            "Stale worktree registration could not be pruned (it may be locked). "
+                            "Remaining files were preserved. Unlock the worktree before retrying."
+                        )
+                    logger.info(f"Pruned stale worktree registration at {path}; files preserved")
+                    return True, None
             args = ["remove", path]
             if force:
                 args.append("--force")

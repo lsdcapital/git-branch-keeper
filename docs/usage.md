@@ -42,6 +42,28 @@ git-branch-keeper [OPTIONS]
 - `--version` - Show version information
 - `-v, --verbose` - Verbose output
 
+### TUI views and cleanup scope
+
+The TUI defaults to **Local**. Click a view button or press `v` to cycle:
+
+- **Local:** local branches and their worktrees. Cleanup keeps remote refs.
+- **Remote:** branches on the selected remote, without worktree rows.
+- **All:** combined branch rows, with `local`, `remote`, or `both` in Location.
+
+Switching views clears marks. Mark All applies only to the visible view. Viewing
+remote branches does not enable remote deletion: use `d` in Remote or All to
+verify and mark remote cleanup candidates. This does not open a dialog or delete
+anything. Review the marks, then press Enter for the deletion confirmation.
+Confirmations show the local and remote
+deletion counts separately, including paired branches. The plain CLI and JSON
+outputs retain their existing branch-discovery options.
+
+Startup analyzes the selected view only. Remote-only branches load on demand
+when you open Remote or All. Press `r` to refresh the current view: Local skips
+remote fetch/prune and remote-only analysis, while Remote and All synchronize
+the selected remote. Local branches still receive PR checks. An explicit
+command-line `--refresh` retains its fetch/prune behavior before launching the TUI.
+
 ### Understanding Branch Status
 
 | Status | Description | Safe to Delete |
@@ -49,6 +71,13 @@ git-branch-keeper [OPTIONS]
 | `merged` | Changes are fully merged into main branch | ✅ Yes |
 | `stale` | No commits in N days (default: 30) | ⚠️ Maybe |
 | `active` | Recent commits, not yet merged | ❌ No |
+| `unstarted` | Local history indicates no development on the branch | No automatic cleanup |
+| `already in main` | Remote tip is reachable from main, but merge history is unclear | No automatic cleanup |
+
+The separate **Cleanup** column explains why a row cannot be cleaned up. For
+example, a merged remote branch can say “remote deletion is disabled”; a stale
+remote branch can say “merge not confirmed.” Neither restriction replaces its
+underlying status.
 
 ### Understanding Sync Status
 
@@ -76,7 +105,7 @@ git-branch-keeper [OPTIONS]
 | **CLI Cleanup** | `--cli --delete` | Deletes eligible branches with confirmation prompts | ⚠️ **CAUTION** |
 | **Force Mode** | `--cli --delete --force` | Deletes immediately without confirmation | 🔴 **DANGEROUS** |
 | **Dry Run** | `--dry-run` flag | Preview only, no deletion or prompts | ✅ **SAFE** |
-| **Remote deletion** | TUI `d` review / CLI `--remote` | Off by default for all remote refs | ✅ **SAFE default** |
+| **Remote deletion** | TUI `d` selection / CLI `--remote` | Off by default for all remote refs | ✅ **SAFE default** |
 | **Merged remote-only cleanup** | Remote deletion enabled and merged row with Location `remote` | Blocked until explicit opt-in; then deletes after confirmation | ⚠️ **CAUTION** |
 
 ### ⚠️ Important Safety Warnings
@@ -85,7 +114,7 @@ git-branch-keeper [OPTIONS]
 
 2. **Force Mode Skips All Confirmations**: The `--force` flag immediately deletes branches without asking when cleanup is enabled. For legacy compatibility, `--force` also implies `--delete`. Deletions are recorded in the deletion journal and can usually be restored with `git-branch-keeper undo` (see below), but don't rely on it — remote deletions affect collaborators immediately.
 
-   **Deletion is local-only by default**: press `d` to review “Also clean my merged remote branches.” GBK lists the eligible names before enabling this scope. Eligibility requires a same-repository PR authored by your authenticated GitHub account, merged into the configured main branch, with no open PR and an unchanged head matching the remote-tracking tip. Missing ownership or API evidence keeps the remote. Local cleanup can still remove other eligible local branches while retaining their remotes. The final confirmation shows separate local and remote totals and each branch's deletion locations. Ownership, PR status and tips are checked again before remote deletion; a lease rejects a remote tip that changes. `d` again returns to local-only and clears remote-only marks. This selection is session-only; a refresh does not silently add new eligible remotes. Toggle off and review again to select a new set. Undo restores local branches only.
+   **Deletion is local-only by default**: press `d` in Remote or All to verify and mark your merged remote cleanup candidates. GBK enables the verified scope and adds normal marks without opening a dialog or deleting anything; existing unrelated marks are preserved. Current checkouts and branches with uncommitted changes are not automatically marked. Review the selection, then press Enter for the single deletion confirmation. Eligibility requires a same-repository PR authored by your authenticated GitHub account, merged into the configured main branch, with no open PR and an unchanged head matching the remote-tracking tip. Missing ownership or API evidence keeps the remote. Local cleanup can still remove other eligible local branches while retaining their remotes. The final confirmation shows separate local and remote totals and each branch's deletion locations. Ownership, PR status and tips are checked again before remote deletion; a lease rejects a remote tip that changes. `d` again returns to local-only and clears remote-only marks. This selection is session-only; a refresh does not silently add new eligible remotes. Toggle off and press `d` again to select a new set. Undo restores local branches only.
 
    **Broader remote cleanup is explicit**: starting with `--remote` retains the broader **LOCAL + REMOTE** scope, including other authors' merged branches. In that explicit scope, `f` can force-mark stale, merged or unstarted remote-only branches without merge proof; protected branches, open PRs, remote access failures and changed tips still block deletion. Force-marking never bypasses ownership or merge requirements in **LOCAL + MY MERGED REMOTES**. Bulk marking and CLI `--force` continue to require merge proof for remote-only branches.
 
@@ -295,4 +324,3 @@ git-branch-keeper --main-branch develop --filter merged
 # Find branches inactive for 90+ days
 git-branch-keeper --filter stale --stale-days 90
 ```
-

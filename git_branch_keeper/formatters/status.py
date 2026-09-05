@@ -51,14 +51,45 @@ def format_display_status(
     protected_branches: list[str],
     allow_remote_deletion: bool = False,
 ) -> str:
-    """Format status for cleanup-focused CLI/TUI display."""
-    if has_cleanup_blockers(
+    """Show branch history independently of cleanup eligibility."""
+    if branch.status == BranchStatus.UNSTARTED and not branch.has_local:
+        return "already in main"
+    return format_status(branch.status)
+
+
+def format_cleanup_reason(
+    branch: BranchDetails,
+    protected_branches: list[str],
+    current_branch: str | None = None,
+    allow_remote_deletion: bool = False,
+    remote_deletion_enabled: bool = False,
+) -> str:
+    """Explain eligibility without hiding the branch's merge/stale status."""
+    from git_branch_keeper.services.branch_validation_service import BranchValidationService
+
+    if branch.name in protected_branches:
+        return "protected"
+    if branch.name == current_branch and not branch.is_worktree:
+        return "currently checked out"
+    if not branch.has_local and branch.status == BranchStatus.UNSTARTED:
+        return "merge history unclear"
+    if branch.is_worktree:
+        if any(
+            v is True for v in (branch.modified_files, branch.untracked_files, branch.staged_files)
+        ):
+            return "has uncommitted changes"
+        return ""
+    reason = BranchValidationService.blocking_reason(
         branch,
         protected_branches,
+        current_branch,
         allow_remote_deletion=allow_remote_deletion,
-    ):
-        return "blocked"
-    return format_status(branch.status)
+    )
+    if reason == "remote deletion is disabled" and remote_deletion_enabled:
+        return "outside selected remote scope"
+    if reason == "remote-only and not confirmed merged":
+        return "merge not confirmed"
+    return reason or ""
 
 
 def format_deletion_reason(status: BranchStatus) -> str:

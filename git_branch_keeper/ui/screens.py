@@ -554,7 +554,11 @@ class TabbedInfoScreen(BaseModal[None]):
             blockers.append("Remote branch is outside your verified merged-PR selection")
 
         if self.branch.status == BranchStatus.UNSTARTED:
-            blockers.append("Branch has no commits of its own - nothing was merged")
+            blockers.append(
+                "Tip is already in main; merge history is unclear"
+                if not self.branch.has_local
+                else "Branch has no commits of its own - nothing was merged"
+            )
         elif self.branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
             blockers.append(f"Branch status is {self.branch.status.value}, not stale/merged")
 
@@ -623,8 +627,7 @@ class TabbedInfoScreen(BaseModal[None]):
             allow_remote_deletion=self.keeper.remote_deletion_allowed(self.branch),
         )
         status_lines = f"[bold]Status:[/bold] {display_status}"
-        if display_status != self.branch.status.value:
-            status_lines += f"\n[bold]Merge Status:[/bold] {self.branch.status.value}"
+
         worktree_path = self._worktree_path_for_branch()
         deletion_blockers = self._format_deletion_blockers()
         is_deletable = (

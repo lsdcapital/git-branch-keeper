@@ -16,6 +16,7 @@ class ColumnDefinition:
 COLUMNS: list[ColumnDefinition] = [
     ColumnDefinition("branch", "Branch", 30),
     ColumnDefinition("status", "Status", 10),
+    ColumnDefinition("cleanup", "Cleanup", 30),
     ColumnDefinition("last_commit", "Last Commit", 12),
     ColumnDefinition("age", "Age", 8),
     ColumnDefinition("changes", "Branch State", 12),

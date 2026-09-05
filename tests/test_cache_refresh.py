@@ -338,3 +338,55 @@ def test_unstable_cache_does_not_scan_refs_for_validation(git_repo, mocker):
         ["main", "feature/active", "feature/new"], "main", cache=rows
     ) == ["main", "feature/active", "feature/new"]
     scan.assert_not_called()
+
+
+def test_cached_merged_file_flags_follow_live_worktree_state(git_repo):
+    """Stable merge evidence must not freeze dirty flags or checkout membership."""
+    from git_branch_keeper.config import Config
+
+    name = "feature/cached-files"
+    git_repo.create_head(name)
+    keeper = BranchKeeper(
+        git_repo.working_dir,
+        Config(dry_run=True, interactive=False, main_branch="main", protected_branches=["main"]),
+    )
+    row = BranchDetails(
+        name=name,
+        last_commit_date="2025-01-01",
+        age_days=1,
+        status=BranchStatus.MERGED,
+        modified_files=False,
+        untracked_files=True,
+        staged_files=False,
+        has_remote=False,
+        sync_status=SyncStatus.MERGED_GIT.value,
+    )
+    keeper.cache_service.save_cache([row], "main")
+
+    def cached_row():
+        result = keeper.get_cached_analysis_fast(
+            finalize_partial=True, include_refresh_candidates=True
+        )
+        return next(b for b in result.branches if b.name == name and not b.is_worktree)
+
+    # The exact reported bug: stable, merged, unused ref with a stale dirty flag.
+    restored = cached_row()
+    assert restored.untracked_files is False
+    assert restored.in_worktree is False
+
+    # A checkout can appear and become dirty without moving the cached commit.
+    path = Path(git_repo.working_dir).parent / "cached-checkout"
+    git_repo.git.worktree("add", str(path), name)
+    (path / "new.txt").write_text("unsaved work")
+    restored = cached_row()
+    assert restored.in_worktree is True
+    assert restored.untracked_files is True
+    assert restored.worktree_path == str(path)
+
+    (path / "new.txt").unlink()
+    assert cached_row().untracked_files is False
+    git_repo.git.worktree("remove", str(path))
+    restored = cached_row()
+    assert restored.in_worktree is False
+    assert restored.worktree_path is None
+    assert restored.untracked_files is False

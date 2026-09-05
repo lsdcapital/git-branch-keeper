@@ -53,7 +53,7 @@ def app(git_repo):
         git_repo.working_dir,
         Config(interactive=True, dry_run=True, main_branch="main"),
     )
-    return BranchKeeperApp(keeper, branches=[], cleanup_mode=False)
+    return BranchKeeperApp(keeper, branches=[], cleanup_mode=False, view="all")
 
 
 class TestMarkWithHierarchy:
@@ -190,10 +190,16 @@ class TestWorktreeCleanupPlanning:
 
 
 class TestDisplayStatus:
-    def test_dirty_merged_branch_displays_as_blocked(self, app):
+    def test_dirty_merged_branch_keeps_status_and_explains_cleanup(self, app):
         branch = _branch("feature/dirty", modified=True)
 
-        assert format_display_status(branch, app.keeper.protected_branches) == "blocked"
+        assert format_display_status(branch, app.keeper.protected_branches) == "merged"
+        from git_branch_keeper.formatters.status import format_cleanup_reason
+
+        assert (
+            format_cleanup_reason(branch, app.keeper.protected_branches)
+            == "has uncommitted changes"
+        )
 
     def test_clean_worktree_parent_stays_merged_when_cleanup_can_remove_worktree(self, app):
         branch = _branch("feature/wt", in_worktree=True, worktree_path="/tmp/wt")

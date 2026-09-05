@@ -72,12 +72,12 @@ def isolated_home(temp_dir, monkeypatch):
 
 @pytest.fixture
 def make_app(git_repo):
-    def _make(branches, cleanup_mode=False):
+    def _make(branches, cleanup_mode=False, view="all"):
         keeper = BranchKeeper(
             git_repo.working_dir,
             Config(interactive=True, dry_run=True, main_branch="main"),
         )
-        return BranchKeeperApp(keeper, branches=branches, cleanup_mode=cleanup_mode)
+        return BranchKeeperApp(keeper, branches=branches, cleanup_mode=cleanup_mode, view=view)
 
     return _make
 
@@ -120,32 +120,42 @@ async def test_status_feedback_stays_on_fixed_third_line(make_app):
         assert isinstance(content, Text)
         lines = _status_text(app).split("\n")
         assert len(lines) == 3
-        assert lines[0] == "Delete scope: LOCAL ONLY [d]"
+        assert lines[0] == "View: All [v] | Delete scope: LOCAL ONLY [d]"
         assert lines[1].startswith("Total: 1 | Protected:")
         assert lines[2] == "✓ Branch data refreshed"
         assert status.region.height == initial_height == 5
 
 
-async def test_delete_scope_binding_reviews_owned_remotes(make_app, monkeypatch):
+async def test_remote_cleanup_marks_candidates_before_single_deletion_confirmation(
+    make_app, monkeypatch
+):
     branch = _branch("feature/a", has_remote=True)
     branch.tip_sha = "abc123"
     app = make_app([branch])
     monkeypatch.setattr(
         app.keeper, "prepare_owned_remote_cleanup", lambda rows, **kwargs: {"feature/a": "abc123"}
     )
+    from unittest.mock import Mock
+
+    delete = Mock()
+    monkeypatch.setattr(app.keeper, "perform_deletion", delete)
     async with app.run_test() as pilot:
         await pilot.press("d")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert app.keeper.delete_remote is False
-        assert isinstance(app.screen, ConfirmScreen)
-        assert app.screen.prompt.question == "Also clean my merged remote branches?"
-        assert app.screen.focused.id == "no"
-        assert "feature/a" in app.screen.prompt.sections[0].body
-        await pilot.click("#yes")
         assert app.keeper.delete_remote is True
         assert app.keeper.owned_remote_only is True
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app.marked_branches == {branch.name}
+        delete.assert_not_called()
         assert "LOCAL + MY MERGED REMOTES" in _status_text(app)
+        assert "press Enter" in _status_text(app)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        assert app.screen.prompt.question == "Delete 1 local and 1 remote branches?"
+        delete.assert_not_called()
+        await pilot.click("#no")
         await pilot.press("d")
         assert app.keeper.delete_remote is False
         assert app.keeper.owned_remote_tips == {}
@@ -373,7 +383,7 @@ async def test_apply_refresh_result_preserves_scroll_position(make_app):
     refreshed = [_branch(f"feature/{index:02d}", status=BranchStatus.STALE) for index in range(60)]
     app = make_app(branches)
 
-    async with app.run_test(size=(120, 15)) as pilot:
+    async with app.run_test(size=(120, 16)) as pilot:
         table = app.query_one(DataTable)
         table.focus()
         await pilot.pause()
@@ -398,7 +408,7 @@ async def test_toggle_mark_does_not_reset_scroll_position(make_app):
     branches = [_branch(f"feature/{index:02d}") for index in range(60)]
     app = make_app(branches)
 
-    async with app.run_test(size=(120, 15)) as pilot:
+    async with app.run_test(size=(120, 16)) as pilot:
         table = app.query_one(DataTable)
         table.focus()
         await pilot.pause()
@@ -902,3 +912,254 @@ async def test_scope_without_identity_keeps_local_only(make_app):
         await pilot.pause()
         assert not app.keeper.delete_remote
         assert "Cannot verify your GitHub account" in _status_text(app)
+
+
+async def test_default_view_is_local_and_retains_hidden_remote_rows(git_repo):
+    keeper = BranchKeeper(git_repo.working_dir, Config(dry_run=True, main_branch="main"))
+    local = _branch("feature/local")
+    remote = _branch("feature/remote", has_local=False, has_remote=True)
+    app = BranchKeeperApp(keeper, branches=[local, remote], cleanup_mode=True)
+    async with app.run_test() as pilot:
+        assert app.branch_view == "local"
+        assert app.query_one(DataTable).row_count == 1
+        assert app.marked_branches == {local.name}
+        await pilot.press("v")
+        assert app.branch_view == "remote"
+        assert app.branches == [remote]
+        assert app.marked_branches == set()
+        assert app.keeper.delete_remote is False
+        assert app.query_one(DataTable).get_cell(remote.name, "cleanup").plain == (
+            "remote deletion is disabled"
+        )
+
+
+async def test_view_buttons_filter_without_duplicating_paired_refs(make_app):
+    local = _branch("feature/local")
+    both = _branch("feature/both", has_remote=True)
+    remote = _branch("feature/remote", has_local=False, has_remote=True)
+    worktree = _branch("feature/both", is_worktree=True, wt="/tmp/example", has_remote=True)
+    app = make_app([local, both, remote, worktree], view="local")
+    async with app.run_test() as pilot:
+        assert len(app.branches) == 3
+        await pilot.click("#view-remote")
+        assert app.branches == [both, remote]
+        assert app.focused is app.query_one(DataTable)
+        await pilot.click("#view-all")
+        assert len(app.branches) == 4
+        assert len([b for b in app.branches if b.name == both.name and not b.is_worktree]) == 1
+        assert app.keeper.delete_remote is False
+        await pilot.click("#view-local")
+        assert remote not in app.branches
+
+
+async def test_filtered_cursor_marks_visible_row_and_switch_clears_force_marks(make_app):
+    local = _branch("a-local")
+    remote = _branch("z-remote", has_local=False, has_remote=True)
+    app = make_app([local, remote], view="remote")
+    app.keeper.delete_remote = True
+    async with app.run_test() as pilot:
+        await pilot.press("f")
+        assert app.force_marked_branches == {remote.name}
+        await pilot.press("v")
+        assert app.branch_view == "all"
+        assert app.force_marked_branches == set()
+        assert app.keeper.delete_remote is True
+        await pilot.press("v", "a")
+        assert app.branch_view == "local"
+        assert app.marked_branches == {local.name}
+        app.action_delete_marked()
+        await pilot.pause()
+        assert app.screen.prompt.question == "Delete 1 local and 0 remote branches?"
+        assert remote.name not in app.screen.prompt.sections[0].body
+
+
+async def test_view_and_visible_selection_survive_refresh(make_app):
+    local = _branch("a-local")
+    remote = _branch("z-remote", has_local=False, has_remote=True)
+    app = make_app([local, remote], view="remote")
+    app.keeper.delete_remote = True
+    async with app.run_test() as pilot:
+        await pilot.press("space")
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=[local, remote, _branch("new-local")]),
+            preserve_marks=True,
+            preserve_view=True,
+        )
+        assert app.branch_view == "remote"
+        assert app.branches == [remote]
+        assert app.marked_branches == {remote.name}
+        app._set_refreshing(True)
+        await pilot.press("v")
+        assert app.branch_view == "remote"
+        app._set_refreshing(False)
+
+
+async def test_local_view_does_not_enable_remote_cleanup(make_app):
+    app = make_app([_branch("feature/both", has_remote=True)], view="local")
+    async with app.run_test() as pilot:
+        await pilot.press("d")
+        assert app.keeper.delete_remote is False
+        assert "Switch to Remote or All" in _status_text(app)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_local_deletion_limits_scope_and_restores_opt_in(make_app, monkeypatch, fails):
+    app = make_app([_branch("feature/both", has_remote=True)], view="local")
+    app.keeper.delete_remote = True
+
+    def perform(*args, **kwargs):
+        assert app.keeper.delete_remote is False
+        if fails:
+            raise RuntimeError("deletion failed")
+        return ([], [], [], [])
+
+    monkeypatch.setattr(app.keeper, "perform_deletion", perform)
+    if fails:
+        with pytest.raises(RuntimeError, match="deletion failed"):
+            app._perform_view_deletion([], [])
+    else:
+        assert app._perform_view_deletion([], []) == ([], [], [], [])
+    assert app.keeper.delete_remote is True
+
+
+async def test_remote_status_explains_history_and_scope(make_app):
+    merged = _branch("merged", has_local=False, has_remote=True)
+    stale = _branch("stale", BranchStatus.STALE, has_local=False, has_remote=True)
+    ambiguous = _branch("ambiguous", BranchStatus.UNSTARTED, has_local=False, has_remote=True)
+    app = make_app([merged, stale, ambiguous], view="remote")
+    async with app.run_test() as pilot:
+        table = app.query_one(DataTable)
+        assert table.get_cell(merged.name, "status").plain == "merged"
+        assert table.get_cell(merged.name, "cleanup").plain == "remote deletion is disabled"
+        assert table.get_cell(stale.name, "status").plain == "stale"
+        assert table.get_cell(stale.name, "cleanup").plain == "merge not confirmed"
+        assert table.get_cell(ambiguous.name, "status").plain == "already in main"
+        assert table.get_cell(ambiguous.name, "cleanup").plain == "merge history unclear"
+        app.keeper.delete_remote = app.keeper.owned_remote_only = True
+        app._refresh_branch_rows()
+        assert table.get_cell(merged.name, "cleanup").plain == "outside selected remote scope"
+        await pilot.pause()
+
+
+async def test_local_empty_view_can_switch_to_existing_remote_data(make_app):
+    remote = _branch("remote", has_local=False, has_remote=True)
+    app = make_app([remote], view="local")
+    async with app.run_test() as pilot:
+        assert "No branches in Local view" in _status_text(app)
+        assert app.query_one(DataTable).row_count == 0
+        await pilot.press("v")
+        assert app.query_one(DataTable).row_count == 1
+        assert app.branches == [remote]
+
+
+async def test_remote_cleanup_marks_only_verified_safe_candidates(make_app, monkeypatch):
+    own = _branch("own", has_local=False, has_remote=True)
+    other = _branch("other", has_local=False, has_remote=True)
+    dirty = _branch("dirty", has_remote=True)
+    dirty.untracked_files = True
+    current = _branch("main", has_remote=True)
+    local = _branch("local")
+    forced_local = _branch("forced-local")
+    app = make_app([own, other, dirty, current, local, forced_local])
+    for row in [own, dirty, current]:
+        row.tip_sha = "abc123"
+    monkeypatch.setattr(
+        app.keeper,
+        "prepare_owned_remote_cleanup",
+        lambda rows, **kwargs: {row.name: row.tip_sha for row in [own, dirty, current]},
+    )
+    async with app.run_test() as pilot:
+        app.marked_branches.add(local.name)
+        app.force_marked_branches.update([own.name, forced_local.name])
+        await pilot.press("d")
+        await app.workers.wait_for_complete()
+        assert app.marked_branches == {local.name, own.name}
+        assert app.force_marked_branches == {forced_local.name}
+        assert "2 blocked" in _status_text(app)
+        assert not isinstance(app.screen, ConfirmScreen)
+        await pilot.press("d")
+        assert app.marked_branches == {local.name}
+        assert app.force_marked_branches == {forced_local.name}
+        assert app.keeper.delete_remote is False
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_remote_cleanup_without_candidates_keeps_selection_and_scope(
+    make_app, monkeypatch, fails
+):
+    local = _branch("local")
+    app = make_app([local, _branch("remote", has_local=False, has_remote=True)])
+
+    def prepare(*args, **kwargs):
+        if fails:
+            raise RuntimeError("Cannot verify ownership")
+        return {}
+
+    monkeypatch.setattr(app.keeper, "prepare_owned_remote_cleanup", prepare)
+    async with app.run_test() as pilot:
+        app.marked_branches.add(local.name)
+        await pilot.press("d")
+        await app.workers.wait_for_complete()
+        assert app.marked_branches == {local.name}
+        assert app.keeper.delete_remote is False
+        assert app.keeper.owned_remote_tips == {}
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert not app.is_refreshing
+        assert ("Cannot verify ownership" if fails else "No unchanged merged") in _status_text(app)
+
+
+async def test_startup_and_refresh_defer_remote_work_until_remote_view(git_repo, monkeypatch):
+    from unittest.mock import Mock
+
+    keeper = BranchKeeper(git_repo.working_dir, Config(dry_run=True, main_branch="main"))
+    local = _branch("feature/local")
+    remote = _branch("feature/remote", has_local=False, has_remote=True)
+    analyzed_views = []
+    cached_views = []
+
+    def cached(**kwargs):
+        cached_views.append(kwargs["view"])
+        return BranchAnalysisResult(is_complete=False)
+
+    def analyze(**kwargs):
+        view = kwargs["view"]
+        analyzed_views.append(view)
+        rows = {"local": [local], "remote": [remote], "all": [local, remote]}[view]
+        return BranchAnalysisResult(branches=rows)
+
+    sync = Mock(return_value=(True, None))
+    monkeypatch.setattr(keeper, "get_cached_analysis_fast", cached)
+    monkeypatch.setattr(keeper, "analyze_branches", analyze)
+    monkeypatch.setattr(keeper, "sync_remote_refs", sync)
+    app = BranchKeeperApp(keeper)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        assert cached_views == ["local"]
+        assert analyzed_views == ["local"]
+        assert app.branches == [local]
+        sync.assert_not_called()
+
+        await pilot.press("r")
+        await app.workers.wait_for_complete()
+        assert analyzed_views == ["local", "local"]
+        sync.assert_not_called()
+
+        await pilot.press("v")
+        await app.workers.wait_for_complete()
+        assert analyzed_views[-1] == "remote"
+        assert app.branches == [remote]
+        assert not app.keeper.delete_remote
+        await pilot.press("r")
+        await app.workers.wait_for_complete()
+        sync.assert_called_once()
+        assert analyzed_views[-1] == "remote"
+
+        await pilot.press("v")
+        await app.workers.wait_for_complete()
+        assert analyzed_views[-1] == "all"
+        assert app.branches == [local, remote]
+        count = len(analyzed_views)
+        await pilot.press("v", "v")
+        await app.workers.wait_for_complete()
+        assert app.branches == [remote]
+        assert len(analyzed_views) == count

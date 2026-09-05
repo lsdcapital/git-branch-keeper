@@ -127,7 +127,7 @@ async def test_clicking_pr_number_opens_default_browser(make_app):
         table = app.query_one(DataTable)
         await pilot.pause()
 
-        pr_column = 8  # Mark + the seven columns before PRs.
+        pr_column = table.get_column_index("prs")
         pr_region = table._get_cell_region(Coordinate(0, pr_column))
         clicked = await pilot.click(
             table,

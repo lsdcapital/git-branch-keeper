@@ -11,10 +11,10 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container
+from textual.containers import Container, Horizontal
 from textual.coordinate import Coordinate
 from textual.timer import Timer
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import Button, DataTable, Footer, Static
 
 from git_branch_keeper.constants import (
     COLUMNS,
@@ -35,6 +35,7 @@ from git_branch_keeper.formatters import (
     format_remote_status,
     get_branch_style_type,
 )
+from git_branch_keeper.formatters.status import format_cleanup_reason
 from git_branch_keeper.models.branch import (
     BranchAnalysisProgress,
     BranchAnalysisResult,
@@ -89,6 +90,17 @@ class BranchKeeperApp(App):
         height: 1fr;
     }
 
+    #view-selector {
+        height: 1;
+    }
+
+    #view-selector Button {
+        height: 1;
+        border: none;
+        min-width: 12;
+        width: auto;
+    }
+
     #status-bar {
         dock: bottom;
         height: 5;
@@ -125,7 +137,8 @@ class BranchKeeperApp(App):
         Binding("l", "show_legend", "Legend"),
         Binding("s", "cycle_sort", "Change Sort"),
         Binding("r", "refresh", "Refresh"),
-        Binding("d", "toggle_delete_scope", "Delete Scope"),
+        Binding("v", "cycle_view", "Change View"),
+        Binding("d", "toggle_delete_scope", "Remote Cleanup"),
         Binding("u", "undo_recent_deletion", "Undo Delete"),
     ]
 
@@ -134,8 +147,13 @@ class BranchKeeperApp(App):
         keeper: BranchKeeper,
         branches: list[BranchDetails] | None = None,
         cleanup_mode: bool = False,
+        view: str = "local",
     ):
         super().__init__()
+        if view not in ("local", "remote", "all"):
+            raise ValueError(f"Unknown branch view: {view}")
+        self.branch_view = view
+        self._loaded_views = {"local", "remote", "all"} if branches is not None else set()
         self.keeper = keeper
         self.branches = branches or []
         self.analysis: BranchAnalysisResult | None = None
@@ -174,9 +192,55 @@ class BranchKeeperApp(App):
             self.repository_display_path = "unknown"
         self.sub_title = self.repository_display_path
 
+    @property
+    def branches(self) -> list[BranchDetails]:
+        """Visible rows; all selection and cursor operations use this same view."""
+        if self.branch_view == "local":
+            return [b for b in self._all_branches if b.has_local or b.is_worktree]
+        if self.branch_view == "remote":
+            return [b for b in self._all_branches if b.has_remote and not b.is_worktree]
+        return self._all_branches
+
+    @branches.setter
+    def branches(self, rows: list[BranchDetails]) -> None:
+        self._all_branches = rows
+
+    def _remote_deletion_allowed(self, branch: BranchDetails) -> bool:
+        return self.branch_view != "local" and self.keeper.remote_deletion_allowed(branch)
+
+    def action_set_view(self, view: str) -> None:
+        if view not in ("local", "remote", "all") or view == self.branch_view:
+            return
+        if self._block_if_refreshing("changing view"):
+            return
+        self.branch_view = view
+        self.marked_branches.clear()
+        self.force_marked_branches.clear()
+        self._populate_table()
+        self.query_one(DataTable).focus()
+        self._set_status_message(f"{view.title()} view — selection cleared")
+        self._update_status()
+        if view not in self._loaded_views:
+            self._set_refreshing(True, show_initial_loader=not bool(self.branches))
+            self.load_initial_data()
+
+    def action_cycle_view(self) -> None:
+        views = ("local", "remote", "all")
+        self.action_set_view(views[(views.index(self.branch_view) + 1) % len(views)])
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id in ("view-local", "view-remote", "view-all"):
+            self.action_set_view(event.button.id.removeprefix("view-"))
+
     def compose(self) -> ComposeResult:
         """Create child widgets."""
         yield NonExpandingHeader(show_clock=True, icon="")
+        yield Horizontal(
+            Button("Local", id="view-local"),
+            Button("Remote", id="view-remote"),
+            Button("All", id="view-all"),
+            id="view-selector",
+        )
         yield DataTable(id="branch-table", cursor_type="row", zebra_stripes=True)
         yield Container(
             Static(id="status-scope", classes="status-row"),
@@ -195,7 +259,12 @@ class BranchKeeperApp(App):
         if branches is None:
             branches = self._plan_deletable()
 
+        visible_names = {b.name for b in self.branches}
         for branch in branches:
+            if branch.name not in visible_names:
+                continue
+            if not branch.has_local and not self._remote_deletion_allowed(branch):
+                continue
             self.marked_branches.add(branch.name)
             self.force_marked_branches.discard(branch.name)
 
@@ -228,7 +297,24 @@ class BranchKeeperApp(App):
         )
 
         self.analysis = analysis
-        self.branches = analysis.branches
+        if self.branch_view == "local":
+            hidden_rows = [b for b in self._all_branches if not b.has_local and not b.is_worktree]
+            self.branches = hidden_rows + [
+                b for b in analysis.branches if b.has_local or b.is_worktree
+            ]
+        elif self.branch_view == "remote":
+            hidden_rows = [b for b in self._all_branches if not b.has_remote or b.is_worktree]
+            self.branches = hidden_rows + [
+                b for b in analysis.branches if b.has_remote and not b.is_worktree
+            ]
+        else:
+            self.branches = analysis.branches
+        if analysis.is_complete:
+            # A scoped refresh may change a paired ref's location. Re-read other
+            # scopes when next opened rather than trusting their retained rows.
+            self._loaded_views = {self.branch_view}
+            if self.branch_view == "all":
+                self._loaded_views.update(("local", "remote"))
 
         if preserve_marks:
             existing_names = {branch.name for branch in self.branches}
@@ -421,9 +507,9 @@ class BranchKeeperApp(App):
         # cached rows immediately, then refresh stale/unstable rows in the
         # background. Since the main branch is intentionally refreshed on every
         # run, a cache can be useful even when the snapshot is not complete.
-        if not self.branches:
+        if not self._all_branches:
             cached_analysis = self.keeper.get_cached_analysis_fast(
-                finalize_partial=True, include_refresh_candidates=True
+                finalize_partial=True, include_refresh_candidates=True, view=self.branch_view
             )
 
             if cached_analysis.branches:
@@ -439,10 +525,12 @@ class BranchKeeperApp(App):
                 self._set_status_message("No branches found", severity="warning")
         else:
             # Initial population for tests/callers that inject rows directly.
-            self.branches = self.keeper.sort_branches(self.branches)
+            self._all_branches = self.keeper.sort_branches(self._all_branches)
             self._auto_mark_deletable()
             self._populate_table()
             self._update_status()
+
+        table.focus()
 
     @staticmethod
     def _row_key_for_branch(branch: BranchDetails) -> str:
@@ -470,7 +558,7 @@ class BranchKeeperApp(App):
         style_type = get_branch_style_type(
             branch,
             self.keeper.protected_branches,
-            allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
+            allow_remote_deletion=self._remote_deletion_allowed(branch),
         )
         # Override color for force-marked branches to show they will be deleted
         if is_force_marked:
@@ -499,7 +587,7 @@ class BranchKeeperApp(App):
         status_str = format_display_status(
             branch,
             self.keeper.protected_branches,
-            allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
+            allow_remote_deletion=self._remote_deletion_allowed(branch),
         )
         status_text = Text(status_str, style=text_color)
 
@@ -527,6 +615,16 @@ class BranchKeeperApp(App):
             mark,
             branch_text,
             status_text,
+            Text(
+                format_cleanup_reason(
+                    branch,
+                    self.keeper.protected_branches,
+                    current_branch_name,
+                    allow_remote_deletion=self._remote_deletion_allowed(branch),
+                    remote_deletion_enabled=self.keeper.delete_remote
+                    and self.branch_view != "local",
+                )
+            ),
             last_commit,
             age_display,
             changes,
@@ -540,6 +638,9 @@ class BranchKeeperApp(App):
         """Add branch data to table."""
         table = self.query_one(DataTable)
         table.clear()
+        for view in ("local", "remote", "all"):
+            button = self.query_one(f"#view-{view}", Button)
+            button.variant = "primary" if view == self.branch_view else "default"
 
         # Get current branch name and GitHub URL once for all rows
         current_branch_name = self._current_branch_name()
@@ -579,9 +680,10 @@ class BranchKeeperApp(App):
                 column_keys,
                 self._format_branch_row(branch, current_branch_name, github_base_url),
             ):
-                # The force-mark indicator is wider ("✓!"), so allow only that
-                # compact mark column to resize; other cells keep existing widths.
-                table.update_cell(row_key, column_key, value, update_width=column_key == "mark")
+                # Scope changes can introduce a longer cleanup reason.
+                table.update_cell(
+                    row_key, column_key, value, update_width=column_key in ("mark", "cleanup")
+                )
 
     def _mark_with_hierarchy(
         self, branch_name: str, mark_set: set[str], is_force: bool = False
@@ -608,7 +710,7 @@ class BranchKeeperApp(App):
             if not branch.is_worktree and not branch.has_local and not self.keeper.delete_remote:
                 return (
                     False,
-                    "Use 'd' to review your merged remote branches before marking remote refs",
+                    "Use 'd' to select your verified merged remote branches",
                 )
 
             if (
@@ -626,7 +728,7 @@ class BranchKeeperApp(App):
                 not branch.is_worktree
                 and not branch.has_local
                 and self.keeper.owned_remote_only
-                and not self.keeper.remote_deletion_allowed(branch)
+                and not self._remote_deletion_allowed(branch)
             ):
                 return False, "Remote branch is outside your verified merged-PR selection"
 
@@ -704,7 +806,7 @@ class BranchKeeperApp(App):
                     branch,
                     self.keeper.protected_branches,
                     current_branch,
-                    allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
+                    allow_remote_deletion=self._remote_deletion_allowed(branch),
                 )
             }
             - deletable_names
@@ -714,7 +816,8 @@ class BranchKeeperApp(App):
         force_marked = len(self.force_marked_branches)
 
         scope_text = Text(no_wrap=True, overflow="ellipsis")
-        if self.keeper.delete_remote:
+        scope_text.append(f"View: {self.branch_view.title()} [v] | ")
+        if self.keeper.delete_remote and self.branch_view != "local":
             label = (
                 "LOCAL + MY MERGED REMOTES" if self.keeper.owned_remote_only else "LOCAL + REMOTE"
             )
@@ -741,6 +844,10 @@ class BranchKeeperApp(App):
             dynamic_text.append(f"{prefix} {self.status_message}", style=style)
         elif self.is_refreshing:
             dynamic_text.append(self._format_operation_progress(), style="cyan")
+        elif not self.branches:
+            dynamic_text.append(
+                f"No branches in {self.branch_view.title()} view. Press v to change view."
+            )
 
         scope_status.update(scope_text)
         summary_status.update(summary_text)
@@ -750,8 +857,13 @@ class BranchKeeperApp(App):
         """Choose the optional owned-PR cleanup, or return to local-only cleanup."""
         if self._block_if_refreshing("changing deletion scope"):
             return
+        if self.branch_view == "local":
+            self._set_status_message(
+                "Local view deletes local refs only. Switch to Remote or All to review remote cleanup."
+            )
+            return
         if not self.keeper.delete_remote:
-            self.review_owned_remote_scope()
+            self.mark_owned_remote_candidates()
             return
         self.keeper.delete_remote = False
         self.keeper.owned_remote_only = False
@@ -764,8 +876,8 @@ class BranchKeeperApp(App):
         self._update_status()
 
     @work(exclusive=True, thread=False)
-    async def review_owned_remote_scope(self) -> None:
-        """Verify and list the proposed remote additions before the user opts in."""
+    async def mark_owned_remote_candidates(self) -> None:
+        """Verify ownership and mark candidates; Enter remains the deletion checkpoint."""
         self._set_refreshing(True)
         self._set_analysis_progress(
             BranchAnalysisProgress(phase="Checking your merged remote branches")
@@ -789,36 +901,30 @@ class BranchKeeperApp(App):
             )
             return
 
-        def choose(confirmed):
-            if confirmed:
-                self.keeper.owned_remote_tips = candidates
-                self.keeper.owned_remote_only = True
-                self.keeper.delete_remote = True
-                self._refresh_branch_rows()
-                self._set_status_message(
-                    "Your merged remotes are eligible; review marks before deleting"
-                )
+        self.keeper.owned_remote_tips = candidates
+        self.keeper.owned_remote_only = True
+        self.keeper.delete_remote = True
 
-        self.push_screen(
-            ConfirmScreen(
-                ConfirmationPrompt(
-                    title="Remote cleanup",
-                    question="Also clean my merged remote branches?",
-                    confirm_label="Include my merged remotes",
-                    cancel_label="Local only",
-                    description="Only the branches below can be deleted remotely in this selection. Other remote branches are kept.",
-                    sections=(
-                        ConfirmationSection(
-                            "Eligible remote branches",
-                            "\n".join(f"• {name}" for name in sorted(candidates)),
-                        ),
-                    ),
-                    warning="Remote deletion affects collaborators. Undo restores local branches only.",
-                    default_confirm=False,
-                )
-            ),
-            choose,
-        )
+        # Ownership alone does not make a local checkout safe to remove. Use the
+        # same plan and hierarchy guards as Mark All before adding normal marks.
+        deletable_names = {branch.name for branch in self._plan_deletable()}
+        marked = 0
+        for name in candidates:
+            if name not in deletable_names:
+                continue
+            success, _ = self._mark_with_hierarchy(name, self.marked_branches)
+            if success:
+                self.force_marked_branches.discard(name)
+                marked += 1
+
+        self._refresh_branch_rows()
+        skipped = len(candidates) - marked
+        message = f"Marked {marked} remote candidates."
+        if skipped:
+            message += f" {skipped} blocked."
+        message += " Review marks, then press Enter."
+        self._set_status_message(message)
+        self._update_status()
 
     def action_open_pr(self, url: str) -> None:
         """Open a PR link from the branch table in the default browser."""
@@ -1013,7 +1119,7 @@ class BranchKeeperApp(App):
             if has_local:
                 locations.append("local")
                 local_count += 1
-            if any(b.has_remote and self.keeper.remote_deletion_allowed(b) for b in rows):
+            if any(b.has_remote and self._remote_deletion_allowed(b) for b in rows):
                 locations.append(self.keeper.remote_name)
                 remote_count += 1
             scope = " + ".join(locations)
@@ -1052,7 +1158,7 @@ class BranchKeeperApp(App):
                         or BranchValidationService.is_deletable(
                             branch,
                             self.keeper.protected_branches,
-                            allow_remote_deletion=self.keeper.remote_deletion_allowed(branch),
+                            allow_remote_deletion=self._remote_deletion_allowed(branch),
                         )
                     ):
                         branches.append(branch)
@@ -1088,6 +1194,16 @@ class BranchKeeperApp(App):
             deletion_batch_id,
         )
 
+    def _perform_view_deletion(self, *args, **kwargs):
+        """Restrict Local cleanup without changing the user's remote opt-in."""
+        delete_remote = self.keeper.delete_remote
+        try:
+            if self.branch_view == "local":
+                self.keeper.delete_remote = False
+            return self.keeper.perform_deletion(*args, **kwargs)
+        finally:
+            self.keeper.delete_remote = delete_remote
+
     @work(exclusive=True, thread=False)
     async def delete_marked_items(
         self,
@@ -1107,7 +1223,7 @@ class BranchKeeperApp(App):
             # Delete force-marked items with force mode
             if force_branches or force_worktrees:
                 deleted, failed_b, removed, failed_w = await asyncio.to_thread(
-                    self.keeper.perform_deletion,
+                    self._perform_view_deletion,
                     force_branches,
                     force_worktrees,
                     force_mode=True,
@@ -1123,7 +1239,7 @@ class BranchKeeperApp(App):
             # Delete normal-marked items without force
             if normal_branches or normal_worktrees:
                 deleted, failed_b, removed, failed_w = await asyncio.to_thread(
-                    self.keeper.perform_deletion,
+                    self._perform_view_deletion,
                     normal_branches,
                     normal_worktrees,
                     force_mode=False,
@@ -1136,12 +1252,14 @@ class BranchKeeperApp(App):
                 all_failed_worktrees.extend(failed_w)
 
             # Remove deleted/removed items from our list
+            if all_deleted_branches or all_removed_worktrees:
+                self._loaded_views = {self.branch_view}
             deleted_names = set(all_deleted_branches)
             removed_paths = set(all_removed_worktrees)
 
-            self.branches = [
+            self._all_branches = [
                 b
-                for b in self.branches
+                for b in self._all_branches
                 if not (
                     b.name in deleted_names or (b.is_worktree and b.worktree_path in removed_paths)
                 )
@@ -1369,7 +1487,7 @@ class BranchKeeperApp(App):
         self.keeper.config.sort_order = "desc" if self.sort_reverse else "asc"
 
         # Sort using keeper's unified sorting logic and refresh
-        self.branches = self.keeper.sort_branches(self.branches)
+        self._all_branches = self.keeper.sort_branches(self._all_branches)
         self._populate_table()
         self._update_status()
 
@@ -1396,6 +1514,7 @@ class BranchKeeperApp(App):
             # keeper methods are sync, so run them off the event loop.
             analysis = await asyncio.to_thread(
                 self.keeper.analyze_branches,
+                view=self.branch_view,
                 show_progress=False,
                 progress_callback=self._analysis_progress_callback,
             )
@@ -1409,6 +1528,7 @@ class BranchKeeperApp(App):
                     mark_newly_deletable=True,
                 )
             else:
+                self._apply_analysis_result(analysis, preserve_view=True)
                 self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
@@ -1440,6 +1560,7 @@ class BranchKeeperApp(App):
             )
             analysis = await asyncio.to_thread(
                 self.keeper.analyze_branches,
+                view=self.branch_view,
                 show_progress=False,
                 progress_callback=self._analysis_progress_callback,
             )
@@ -1453,6 +1574,7 @@ class BranchKeeperApp(App):
                     mark_newly_deletable=True,
                 )
             else:
+                self._apply_analysis_result(analysis, preserve_view=True)
                 self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:
@@ -1490,7 +1612,9 @@ class BranchKeeperApp(App):
             # Temporarily enable refresh to bypass cache
             self.keeper.config.refresh = True
 
-            if self.keeper.config.get("include_remote_branches", True):
+            if self.branch_view != "local" and self.keeper.config.get(
+                "include_remote_branches", True
+            ):
                 self._set_analysis_progress(
                     BranchAnalysisProgress(phase="Synchronizing remote branches")
                 )
@@ -1501,6 +1625,7 @@ class BranchKeeperApp(App):
             # Re-run the shared analyzer with Rich progress disabled for TUI.
             analysis = await asyncio.to_thread(
                 self.keeper.analyze_branches,
+                view=self.branch_view,
                 show_progress=False,
                 progress_callback=self._analysis_progress_callback,
             )
@@ -1520,6 +1645,7 @@ class BranchKeeperApp(App):
                 else:
                     self._set_status_message("Branch data refreshed", severity="success")
             else:
+                self._apply_analysis_result(analysis, preserve_view=True)
                 self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:

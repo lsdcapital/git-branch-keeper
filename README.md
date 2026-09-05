@@ -31,6 +31,23 @@ gbk --cli --filter merged
 
 *The actual GBK interface, rendered with sample branch data.*
 
+The TUI opens in **Local** view. Click **Local**, **Remote**, or **All**, or press
+`v` to cycle views. Local shows local branches and worktrees; Remote shows branches
+on the selected remote; All combines them with one branch row per name and a
+local/remote/both location. Changing views clears selections and does not enable
+remote deletion. Local cleanup keeps remote refs; in Remote or All, review the
+verified remote cleanup with `d`. It marks candidates for review; Enter opens
+the deletion confirmation.
+
+Local startup analyzes local branches only. Remote-only analysis loads when you
+first open Remote or All. Pressing `r` refreshes the current view; Local refresh
+does not fetch the remote. Local branches still receive their normal PR checks.
+
+**Status** describes branch history; **Cleanup** explains restrictions such as
+“remote deletion is disabled” or “merge not confirmed.” Remote tips already
+reachable from main with uncertain merge history display **already in main**
+instead of **unstarted**; this label alone does not authorize cleanup.
+
 ## What it helps with
 
 - **Find cleanup candidates:** Detect merged changes, including squash and rebase workflows, and identify inactive branches.
@@ -38,6 +55,12 @@ gbk --cli --filter merged
 - **Manage worktrees:** Show worktree state and protect the worktree you are running in.
 - **Keep shared branches safe:** Remote deletion requires explicit opt-in; protected branches and open GitHub PRs receive additional checks.
 - **Recover a deletion:** Use the deletion journal to restore branches while their commits are still available.
+
+If a worktree directory has already disappeared, deleting its entry cleans up stale
+Git registrations. If the directory exists but its `.git` file is missing, GBK
+preserves the files and offers registration cleanup via force deletion (`f` to
+force-mark in the TUI). This cleanup leaves the directory's files in place and
+respects worktree locks. Git pruning can also clear other stale registrations.
 
 ## Common commands
 

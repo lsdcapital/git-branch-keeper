@@ -758,6 +758,7 @@ class BranchKeeper:
         self,
         show_progress: bool = True,
         progress_callback: BranchAnalysisProgressCallback | None = None,
+        view: str = "all",
     ) -> BranchAnalysisResult:
         """Analyze branch state using the shared CLI/TUI data path.
 
@@ -769,6 +770,7 @@ class BranchKeeper:
         Args:
             show_progress: Whether to show Rich progress while processing branches.
             progress_callback: Optional callback for UI-native progress updates.
+            view: Discover local, remote, or all branch names before doing analysis.
 
         Returns:
             BranchAnalysisResult with display rows and shared metadata.
@@ -779,7 +781,7 @@ class BranchKeeper:
             return BranchAnalysisResult(is_complete=False)
 
         self._emit_analysis_progress(progress_callback, "Discovering branches")
-        branches = self._get_filtered_branches()
+        branches = self._get_filtered_branches(view=view)
         if not branches:
             self._emit_analysis_progress(
                 progress_callback,
@@ -858,7 +860,10 @@ class BranchKeeper:
         return analysis
 
     def get_cached_analysis_fast(
-        self, finalize_partial: bool = False, include_refresh_candidates: bool = False
+        self,
+        finalize_partial: bool = False,
+        include_refresh_candidates: bool = False,
+        view: str = "all",
     ) -> BranchAnalysisResult:
         """Load cached analysis rows without processing branches.
 
@@ -874,9 +879,10 @@ class BranchKeeper:
             include_refresh_candidates: If True, include cached rows even when
                 they are scheduled for refresh. This is useful for a provisional
                 cache-first UI that will update rows in the background.
+            view: Limit cached rows and refresh candidates to this branch view.
         """
         try:
-            branches = self._get_filtered_branches()
+            branches = self._get_filtered_branches(view=view)
             if not branches:
                 return BranchAnalysisResult(local_branch_names=[])
 
@@ -929,7 +935,7 @@ class BranchKeeper:
             # fresh listing rather than crash the whole analysis.
             logger.debug(f"Error fast-loading cached analysis: {e}")
             try:
-                branches = self._get_filtered_branches()
+                branches = self._get_filtered_branches(view=view)
                 return BranchAnalysisResult(
                     local_branch_names=branches,
                     branches_to_process=branches,
@@ -975,10 +981,10 @@ class BranchKeeper:
     def _apply_dynamic_worktree_status(self, branch_rows: list) -> None:
         """Refresh dynamic worktree flags for local branch rows.
 
-        Worktree membership is intentionally not trusted from cache; it can
-        change independently of branch commits or status.
+        Worktree membership and file changes are not trusted from cache; both
+        can change independently of the commit used to cache merge evidence.
         """
-        worktree_infos = self.git_service.worktree_service.get_other_worktrees()
+        worktree_infos = self.git_service.worktree_service.get_other_worktrees(refresh=True)
         worktree_by_branch = {wt.branch_name: wt for wt in worktree_infos if wt.branch_name}
         worktree_branches = set(worktree_by_branch)
         logger.debug(f"Worktree branches detected: {worktree_branches}")
@@ -987,8 +993,23 @@ class BranchKeeper:
         for branch in branch_rows:
             is_current = branch.name == current_branch if current_branch else False
             branch.in_worktree = branch.name in worktree_branches and not is_current
-            if branch.in_worktree and branch.worktree_path is None:
-                branch.worktree_path = worktree_by_branch[branch.name].path
+            branch.worktree_path = (
+                worktree_by_branch[branch.name].path if branch.in_worktree else None
+            )
+            branch.worktree_is_orphaned = (
+                worktree_by_branch[branch.name].is_orphaned if branch.in_worktree else False
+            )
+            if is_current or branch.in_worktree:
+                details = self.git_service.get_branch_status_details(branch.name)
+                # Failed probes stay unknown, never inherit a cached clean result.
+                branch.modified_files = details.get("modified")
+                branch.untracked_files = details.get("untracked")
+                branch.staged_files = details.get("staged")
+            else:
+                # Uncommitted files belong to a checkout, not a branch ref.
+                branch.modified_files = False
+                branch.untracked_files = False
+                branch.staged_files = False
             logger.debug(f"Setting in_worktree={branch.in_worktree} for {branch.name}")
 
     def _finalize_branch_analysis(
@@ -1053,7 +1074,7 @@ class BranchKeeper:
             self._console_print("")
         return True
 
-    def _get_filtered_branches(self) -> list:
+    def _get_filtered_branches(self, view: str = "all") -> list:
         """Get branch names to analyze, excluding ignored patterns.
 
         Local rows come only from ``refs/heads/*``. Never iterate ``repo.refs`` for
@@ -1063,24 +1084,33 @@ class BranchKeeper:
         to these branch rows.
 
         Remote-only branches (on ``refs/remotes/<remote>/*`` with no local head) are
-        appended unless ``include_remote_branches`` is off. They are the larger and more
+        appended unless the view is local or ``include_remote_branches`` is off.
+        They are the larger and more
         interesting population - a branch you deleted locally but left on the remote is
         invisible to a local-only listing, which is exactly how remotes accumulate
-        hundreds of them. They are analyzed read-only and are never deletable; see
-        ``BranchValidationService.is_deletable``.
+        hundreds of them. Deletion requires separate remote opt-in and merge evidence.
 
         Names are plain (``feat/mermaid``, not ``origin/feat/mermaid``) so ignore and
         protection patterns, cache keys, and TUI marks work identically for both.
         """
+        if view not in ("local", "remote", "all"):
+            raise ValueError(f"Unknown branch view: {view}")
         branches = [head.name for head in self.repo.heads]
+        if view == "local":
+            # Remote discovery normally refreshes this snapshot. Local-only
+            # discovery must also notice newly created or removed local refs.
+            self.git_service.ref_resolver.invalidate()
 
-        if self.config.get("include_remote_branches", True):
+        if view != "local" and self.config.get("include_remote_branches", True):
             local = set(branches)
             branches.extend(
                 name
                 for name in self.git_service.get_remote_only_branches()
                 if name not in local and name != self.main_branch
             )
+
+        if view == "remote":
+            branches = [name for name in branches if self.git_service.has_remote_branch(name)]
 
         # Only filter out ignored branches, keep protected ones
         return [b for b in branches if not self.branch_status_service.should_ignore_branch(b)]
@@ -1673,10 +1703,6 @@ class BranchKeeper:
                     failed_worktrees.append((wt.worktree_path, error_message or "Unknown error"))
                     message = "Failed to remove worktree"
                 update_progress(message)
-
-            # Prune worktree metadata to update Git's internal state
-            if worktrees_to_remove and not self.dry_run:
-                self.git_service.worktree_service.prune_worktrees()
 
             # Delete branches
             for branch in branches_to_delete:

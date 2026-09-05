@@ -19,6 +19,7 @@ from git_branch_keeper.formatters import (
     format_remote_status,
     get_branch_style_type,
 )
+from git_branch_keeper.formatters.status import format_cleanup_reason
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.utils.logging import get_logger
@@ -92,6 +93,13 @@ class DisplayService:
             table.add_row(
                 branch_name,
                 status_text,
+                format_cleanup_reason(
+                    branch,
+                    protected_branches,
+                    current_branch_name,
+                    allow_remote_deletion=delete_remote,
+                    remote_deletion_enabled=delete_remote,
+                ),
                 last_commit_date,
                 str(branch.age_days),
                 changes_indicator,
