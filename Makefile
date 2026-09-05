@@ -1,9 +1,10 @@
-.PHONY: help build update check fix format lint type-check test clean
+.PHONY: help build update update-bounds check fix format lint type-check test clean
 
 help:
 	@echo "Available targets:"
 	@echo "  make build        - Set up development environment"
 	@echo "  make update       - Update all dependencies to latest allowed versions"
+	@echo "  make update-bounds - Upgrade lock, then raise pyproject >= floors to the locked versions"
 	@echo "  make check        - Run all quality checks (lint, type-check, test, format)"
 	@echo "  make fix          - Auto-fix issues (ruff, black)"
 	@echo "  make format       - Format code with black"
@@ -18,6 +19,14 @@ build:
 
 update:
 	uv sync --dev --upgrade
+
+# Raise the ">=" floors in pyproject.toml to whatever the upgraded lock resolved.
+# `uv add <pkg>` with no specifier keeps the existing floor, so the version must be passed explicitly.
+update-bounds:
+	uv lock --upgrade
+	uv tree --depth 1 | awk '/^[├└]── / && !/group: dev/ {printf "%s>=%s ", $$2, substr($$3,2)}' | xargs uv add --no-sync
+	uv tree --depth 1 | awk '/^[├└]── / &&  /group: dev/ {printf "%s>=%s ", $$2, substr($$3,2)}' | xargs uv add --no-sync --dev
+	uv sync --dev
 
 check:
 	@echo "\n========================================================"

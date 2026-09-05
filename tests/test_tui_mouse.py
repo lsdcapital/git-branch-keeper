@@ -48,6 +48,9 @@ def isolated_home(temp_dir, monkeypatch):
 
 @pytest.fixture
 def make_app(git_repo, isolated_home):
+    # Link rendering needs GitHub identity; authentication remains isolated.
+    git_repo.remote().set_url("https://github.com/test/test-repo.git")
+
     def _make(branches):
         keeper = BranchKeeper(
             git_repo.working_dir,

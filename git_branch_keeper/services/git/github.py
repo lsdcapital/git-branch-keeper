@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from github import Auth, Github
 from rich.console import Console
 
-from git_branch_keeper.exceptions import GITHUB_ERRORS
+from git_branch_keeper.exceptions import GITHUB_ERRORS, GitHubAPIError
 from git_branch_keeper.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -91,6 +91,7 @@ class GitHubService:
         self.github_repo: str | None = None
         self.github: Github | None = None
         self.gh_repo: Repository | None = None
+        self.setup_failed = False
 
     def is_enabled(self) -> bool:
         """Check if GitHub integration is enabled and configured."""
@@ -119,11 +120,13 @@ class GitHubService:
             assert self.github_token is not None, "GitHub token must be set"
             self.github = Github(auth=Auth.Token(self.github_token))
             self.gh_repo = self.github.get_repo(self.github_repo)
+            self.setup_failed = False
 
             logger.debug(f"[GitHub] GitHub API URL: {self.gh_repo.url}")
             logger.debug(f"[GitHub] GitHub integration enabled for: {path}")
 
         except Exception as e:
+            self.setup_failed = True
             logger.error(f"[GitHub] Failed to setup GitHub API: {e}")
             raise  # Re-raise since this is now a critical error
 
@@ -131,7 +134,12 @@ class GitHubService:
         """Check if a branch has any open PRs.
 
         Returns False if GitHub integration is not enabled.
+        Raises GitHubAPIError when configured protection cannot be verified.
         """
+        if self.setup_failed:
+            raise GitHubAPIError(
+                "verify open pull requests", "GitHub setup failed; deletion blocked"
+            )
         if not self.is_enabled():
             logger.debug(f"[GitHub] Skipping PR check for {branch_name} - integration disabled")
             return False
@@ -146,8 +154,10 @@ class GitHubService:
             )
             return pulls.totalCount > 0
         except GITHUB_ERRORS as e:
-            logger.debug(f"[GitHub] Error checking PR status for {branch_name}: {e}")
-            return False
+            raise GitHubAPIError(
+                "verify open pull requests",
+                f"Could not verify PR protection for {branch_name}; deletion blocked",
+            ) from e
 
     def _empty_pr_data(self) -> dict:
         """Return the default PR data shape used throughout the app."""
@@ -279,7 +289,9 @@ class GitHubService:
         except GITHUB_ERRORS as e:
             logger.debug(f"[GitHub] Error fetching PRs for branch {branch_name}: {e}")
             # Return default values if branch PR fetch fails
-            return (branch_name, self._empty_pr_data())
+            data = self._empty_pr_data()
+            data["error"] = "Could not verify PR protection"
+            return (branch_name, data)
 
     def get_pr_data_for_branch(self, branch_name: str) -> dict[str, dict]:
         """Get PR data for one branch.

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -160,3 +163,34 @@ class Config:
 
         filtered = {k: v for k, v in config_dict.items() if k in known_fields}
         return cls(**filtered)
+
+
+def load_config(path: str | None = None) -> dict:
+    """Load the first configured file; malformed protection rules must stop startup."""
+    candidates = (
+        [Path(path)]
+        if path
+        else [
+            Path.cwd() / "git-branch-keeper.json",
+            Path.home() / ".git-branch-keeper.json",
+        ]
+    )
+    for candidate in candidates:
+        if not path and not candidate.exists():
+            continue
+        with candidate.open(encoding="utf-8") as source:
+            data = json.load(source)
+        if not isinstance(data, dict):
+            raise TypeError(f"Configuration must be a JSON object: {candidate}")
+        for key in ("protected_branches", "ignore_patterns"):
+            if key in data and (
+                not isinstance(data[key], list)
+                or not all(isinstance(value, str) for value in data[key])
+            ):
+                raise ValueError(f"{key} must be a list of strings")
+        if isinstance(data.get("github_token"), str):
+            data["github_token"] = os.path.expandvars(data["github_token"])
+            if "${" in data["github_token"]:
+                raise ValueError("Unresolved environment variable in github_token")
+        return data
+    return {}

@@ -8,7 +8,7 @@ from typing import Any
 from rich.console import Console
 
 from git_branch_keeper.cli.args import parse_args
-from git_branch_keeper.config import Config
+from git_branch_keeper.config import Config, load_config
 from git_branch_keeper.core import BranchKeeper
 from git_branch_keeper.utils.logging import setup_logging
 
@@ -76,25 +76,41 @@ def main():
         delete_requested = parsed_args.delete or parsed_args.cleanup or parsed_args.force
         cleanup_enabled = delete_requested or parsed_args.dry_run
 
-        config = Config(
+        settings = load_config(parsed_args.config)
+        for argument, key in (
+            ("stale_days", "stale_days"),
+            ("main_branch", "main_branch"),
+            ("filter", "status_filter"),
+            ("sort_by", "sort_by"),
+            ("sort_order", "sort_order"),
+            ("workers", "workers"),
+        ):
+            value = getattr(parsed_args, argument)
+            if value is not None:
+                settings[key] = value
+        for argument, key, default in (
+            ("protected", "protected_branches", ["main", "master"]),
+            ("ignore", "ignore_patterns", []),
+        ):
+            if getattr(parsed_args, argument) is not None:
+                settings[key] = list(
+                    dict.fromkeys(settings.get(key, default) + getattr(parsed_args, argument))
+                )
+        # Destructive modes require explicit invocation, never a saved file setting.
+        settings.update(
             interactive=not parsed_args.force,
             dry_run=True if output_json else parsed_args.dry_run,
             force=parsed_args.force,
             delete_remote=parsed_args.remote,
             verbose=parsed_args.verbose,
-            stale_days=parsed_args.stale_days,
-            protected_branches=parsed_args.protected,
-            ignore_patterns=parsed_args.ignore,
-            status_filter=parsed_args.filter,
-            include_remote_branches=not parsed_args.no_remote_branches,
-            main_branch=parsed_args.main_branch,
             debug=parsed_args.debug,
-            sort_by=parsed_args.sort_by,
-            sort_order=parsed_args.sort_order,
             refresh=parsed_args.refresh,
-            sequential=parsed_args.sequential,
-            workers=parsed_args.workers,
         )
+        if parsed_args.no_remote_branches:
+            settings["include_remote_branches"] = False
+        if parsed_args.sequential:
+            settings["sequential"] = True
+        config = Config.from_dict(settings)
 
         # Determine if we should use interactive mode.
         # JSON output is always non-interactive to keep stdout machine-readable.
@@ -129,7 +145,8 @@ def main():
 
             console.print("[yellow]Configuration:[/yellow]")
             for key, value in config.to_dict().items():
-                console.print(f"  {key}: {value}")
+                display_value = "[configured]" if key == "github_token" and value else value
+                console.print(f"  {key}: {display_value}")
             console.print(
                 "[dim]Note: Debug mode forces sequential processing for readable logs[/dim]"
             )

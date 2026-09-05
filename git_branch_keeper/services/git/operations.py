@@ -402,6 +402,21 @@ class GitOperations:
                 # Capture the tip SHA before deletion so the branch is recoverable
                 deleted_sha = local_head.commit.hexsha
 
+                if should_delete_remote:
+                    live_sha, error = self.get_live_remote_branch_sha(branch_name)
+                    if error:
+                        raise ValueError(f"Could not verify remote tip: {error}")
+                    if live_sha is None:
+                        should_delete_remote = False
+                    elif live_sha != deleted_sha:
+                        raise ValueError(
+                            "Remote tip differs from local tip; remote work must be reviewed"
+                        )
+                    elif not self.is_branch_merged(
+                        branch_name, self.config.get("main_branch", "main"), force_refresh=True
+                    ):
+                        raise ValueError("Remote deletion requires positive merge proof")
+
                 # Delete local branch. Prefer `-d` so git independently confirms the
                 # branch is reachable before anything is discarded; fall back to `-D`
                 # only where `-d` structurally cannot succeed (rebase/squash merges,
@@ -422,10 +437,12 @@ class GitOperations:
                     if should_delete_remote:
                         if not dry_run:
                             try:
-                                # Only get remote when we need to push
-                                remote = repo.remote(self.remote_name)
                                 console.print(f"Deleting remote branch {branch_name}...")
-                                remote.push(refspec=f":{branch_name}")
+                                repo.git.push(
+                                    self.remote_name,
+                                    f":refs/heads/{branch_name}",
+                                    force_with_lease=f"refs/heads/{branch_name}:{deleted_sha}",
+                                )
                                 remote_deleted = True
                                 console.print(
                                     f"[green]Deleted branch {branch_name} (local and remote)[/green]"

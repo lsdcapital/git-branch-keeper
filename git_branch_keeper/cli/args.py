@@ -33,6 +33,7 @@ def parse_args():
         action="store_true",
         help="With 'undo': list recent deletions for this repository",
     )
+    parser.add_argument("-c", "--config", help="Path to JSON configuration file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show verbose output")
     parser.add_argument("--version", action="version", version=f"git-branch-keeper {__version__}")
     parser.add_argument(
@@ -93,31 +94,33 @@ def parse_args():
         action="store_true",
         help="Alias for --cli",
     )
-    parser.add_argument("--stale-days", type=int, default=30, help="Days until branch is stale")
+    parser.add_argument("--stale-days", type=int, default=None, help="Days until branch is stale")
     parser.add_argument(
-        "--protected", nargs="*", default=["main", "master"], help="Protected branches"
+        "--protected", nargs="*", action="extend", default=None, help="Protected branches"
     )
-    parser.add_argument("--ignore", nargs="*", default=[], help="Branch patterns to ignore")
+    parser.add_argument(
+        "--ignore", nargs="*", action="extend", default=None, help="Branch patterns to ignore"
+    )
     parser.add_argument(
         "--filter",
         choices=["all", "stale", "merged", "unstarted"],
-        default="all",
+        default=None,
         help="Filter which branches to show and process (all/stale/merged/unstarted)",
     )
-    parser.add_argument("--main-branch", default="main", help="Main branch name")
+    parser.add_argument("--main-branch", default=None, help="Main branch name")
     parser.add_argument(
         "--debug", action="store_true", help="Show debug information for troubleshooting"
     )
     parser.add_argument(
         "--sort-by",
         choices=["name", "age", "date", "status"],
-        default="age",
+        default=None,
         help="Sort branches by name, age, date, or status (default: age)",
     )
     parser.add_argument(
         "--sort-order",
         choices=["asc", "desc"],
-        default="asc",
+        default=None,
         help="Sort order: ascending or descending (default: asc)",
     )
     parser.add_argument(

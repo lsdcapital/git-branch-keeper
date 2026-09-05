@@ -12,7 +12,12 @@ from rich.console import Console
 from rich.progress import Progress
 
 from git_branch_keeper.config import Config
-from git_branch_keeper.exceptions import GIT_ERRORS, GITHUB_ERRORS, GitBranchKeeperError
+from git_branch_keeper.exceptions import (
+    GIT_ERRORS,
+    GITHUB_ERRORS,
+    GitBranchKeeperError,
+    GitHubAPIError,
+)
 from git_branch_keeper.formatters import format_deletion_confirmation_items, format_deletion_reason
 from git_branch_keeper.models.branch import (
     BranchAnalysisProgress,
@@ -163,7 +168,9 @@ class BranchKeeper:
                 # IndexError: malformed remote_url doesn't match the expected
                 # git@github.com:org/repo or https://github.com/org/repo shape.
                 logger.debug(f"Failed to setup GitHub API: {e}")
-                logger.warning("[GitHub] Setup failed - PR detection disabled")
+                logger.warning(
+                    "[GitHub] Setup failed - deletion blocked until PR protection can be verified"
+                )
         else:
             logger.debug("[GitHub] Integration disabled (no token or non-GitHub repo)")
 
@@ -1528,6 +1535,14 @@ class BranchKeeper:
                     update_progress("Would remove worktree")
                     continue
 
+                try:
+                    if self.github_service.has_open_pr(wt.name):
+                        raise GitHubAPIError("verify open pull requests", "Has open pull request")
+                except GitHubAPIError as error:
+                    failed_worktrees.append((wt.worktree_path, str(error)))
+                    update_progress("PR protection blocked worktree removal")
+                    continue
+
                 is_orphaned = wt.notes and "[ORPHANED]" in wt.notes
                 force = is_orphaned or force_mode
 
@@ -1789,6 +1804,9 @@ class BranchKeeper:
         # Step 1: Determine status based on PR data (if available) or git analysis
         if pr_data and branch in pr_data:
             pr_info = pr_data[branch]
+            if pr_info.get("error"):
+                status = BranchStatus.ACTIVE
+                append_note("PR protection could not be verified; deletion blocked")
             self._annotate_pr_head_match(branch, pr_info)
 
             # Keep the selected source PR visible regardless of whether it is open,

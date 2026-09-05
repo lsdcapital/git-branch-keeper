@@ -267,6 +267,15 @@ Create a configuration file to customize behavior. The tool looks for config fil
 2. `git-branch-keeper.json` in current directory
 3. `.git-branch-keeper.json` in home directory
 
+The first file found is loaded. Explicit CLI values override file values; `--protected`
+and `--ignore` add entries to the configured lists. Invalid or missing explicitly
+selected files stop startup. Saved settings cannot enable `--force` or remote deletion.
+
+When GitHub protection is configured, API failures block deletion until verification
+succeeds. For local branches with matching remotes, remote cleanup requires the live
+remote tip to equal the local tip and Git to confirm it is merged. A differing tip
+blocks the operation for review; pushes use a lease to preserve concurrent updates.
+
 ### Example Configuration
 
 ```json

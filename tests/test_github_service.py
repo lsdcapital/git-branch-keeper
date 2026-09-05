@@ -2,6 +2,9 @@
 
 from unittest.mock import Mock, patch
 
+import pytest
+
+from git_branch_keeper.exceptions import GitHubAPIError
 from git_branch_keeper.services.git import GitHubService
 
 
@@ -130,9 +133,8 @@ class TestGitHubServicePROperations:
             status=500, data={"message": "API Error"}
         )
 
-        result = service.has_open_pr("feature/test")
-
-        assert result is False
+        with pytest.raises(GitHubAPIError, match="deletion blocked"):
+            service.has_open_pr("feature/test")
 
 
 class TestGitHubServiceBulkOperations:
@@ -280,10 +282,8 @@ class TestGitHubServiceEdgeCases:
             status=403, data={"message": "API rate limit exceeded"}
         )
 
-        result = service.has_open_pr("feature/test")
-
-        # Should handle gracefully
-        assert result is False
+        with pytest.raises(GitHubAPIError, match="deletion blocked"):
+            service.has_open_pr("feature/test")
 
     def test_operations_with_network_error(self, mock_git_repo, mock_config):
         """Test handling network errors."""
@@ -296,7 +296,5 @@ class TestGitHubServiceEdgeCases:
         # Simulate network error (requests errors, which PyGithub raises, subclass OSError)
         service.gh_repo.get_pulls.side_effect = OSError("Network error")
 
-        result = service.has_open_pr("feature/test")
-
-        # Should handle gracefully
-        assert result is False
+        with pytest.raises(GitHubAPIError, match="deletion blocked"):
+            service.has_open_pr("feature/test")

@@ -61,6 +61,8 @@ class BranchStatusService:
         # branch processing work item when GitHub integration is enabled.
         if pr_data and branch_name in pr_data:
             pr_info = pr_data[branch_name]
+            if pr_info.get("error"):
+                return BranchStatus.ACTIVE
             # A merged PR is only authoritative when the local tip is confirmed to be
             # the head that was merged. head_matches_local is None when the comparison
             # could not run (no head SHA from the API), and "could not verify" must

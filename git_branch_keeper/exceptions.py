@@ -19,8 +19,8 @@ from github import GithubException
 #: in GBK surface instead of being silently swallowed as "git failed".
 GIT_ERRORS = (git.GitError, git.exc.ODBError, LookupError, ValueError)
 
-#: Exceptions raised when a GitHub API call fails. GitHub integration is optional
-#: and advisory, so these are caught wherever GBK degrades to git-only behaviour:
+#: Exceptions raised when a GitHub API call fails. Analysis can report unavailable
+#: metadata, but destructive verification must raise GitHubAPIError and fail closed:
 #:
 #: - ``GithubException``            - the API answered with an error status
 #: - ``OSError``                    - transport failure (``requests`` errors subclass this)

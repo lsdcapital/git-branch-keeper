@@ -11,6 +11,15 @@ from git_branch_keeper.exceptions import GIT_ERRORS
 from git_branch_keeper.models.branch import BranchStatus, SyncStatus
 
 
+@pytest.fixture(autouse=True)
+def isolate_user_state(monkeypatch, tmp_path):
+    """Tests must never use the developer's credentials, configuration or journal."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("GBK_DISABLE_GH_AUTH_FALLBACK", "1")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for testing."""
@@ -62,9 +71,11 @@ def git_repo(temp_dir):
     except GIT_ERRORS:
         pass
 
-    # Add a fake GitHub remote for testing
+    # Local integration fixtures do not contact GitHub; API tests use mocks.
     try:
-        repo.create_remote("origin", "git@github.com:test/test-repo.git")
+        remote_path = temp_dir / "remote.git"
+        git.Repo.init(remote_path, bare=True).close()
+        repo.create_remote("origin", str(remote_path))
     except GIT_ERRORS:
         pass
 

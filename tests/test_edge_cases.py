@@ -6,6 +6,7 @@ import git
 import pytest
 
 from git_branch_keeper.core import BranchKeeper
+from git_branch_keeper.exceptions import GitHubAPIError
 from git_branch_keeper.models.branch import SyncStatus
 from git_branch_keeper.services.git import GitHubService, GitOperations
 
@@ -116,9 +117,8 @@ class TestNetworkErrors:
         # Simulate network error (requests errors, which PyGithub raises, subclass OSError)
         service.gh_repo.get_pulls.side_effect = OSError("Network unreachable")
 
-        # Should handle gracefully
-        result = service.has_open_pr("feature/test")
-        assert result is False
+        with pytest.raises(GitHubAPIError, match="deletion blocked"):
+            service.has_open_pr("feature/test")
 
 
 class TestInvalidBranchNames:

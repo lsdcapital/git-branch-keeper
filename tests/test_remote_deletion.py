@@ -25,6 +25,8 @@ def _ops_with_mocked_remote(git_repo, mock_config):
     mock_remote = Mock()
     mock_repo.remote.return_value = mock_remote
     mock_repo.delete_head = Mock()
+    ops.get_live_remote_branch_sha = Mock(return_value=("a" * 40, None))
+    ops.is_branch_merged = Mock(return_value=True)
     # Tip SHA lookup: repo.heads[name].commit.hexsha
     head = Mock()
     head.commit.hexsha = "a" * 40
@@ -51,7 +53,7 @@ class TestRemoteDeletionOptIn:
         assert entry["remote_deleted"] is False
 
     def test_remote_deleted_when_opted_in(self, git_repo, mock_config, isolated_home):
-        ops, mock_repo, mock_remote = _ops_with_mocked_remote(git_repo, mock_config)
+        ops, mock_repo, _mock_remote = _ops_with_mocked_remote(git_repo, mock_config)
 
         with (
             patch.object(ops, "has_remote_branch", return_value=True),
@@ -61,7 +63,11 @@ class TestRemoteDeletionOptIn:
 
         assert result is True
         mock_repo.delete_head.assert_called_once()
-        mock_remote.push.assert_called_once_with(refspec=":feature/x")
+        mock_repo.git.push.assert_called_once_with(
+            "origin",
+            ":refs/heads/feature/x",
+            force_with_lease=f"refs/heads/feature/x:{'a' * 40}",
+        )
 
         entry = ops.deletion_journal.deletions()[-1]
         assert entry["had_remote"] is True
