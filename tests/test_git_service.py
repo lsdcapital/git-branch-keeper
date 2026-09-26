@@ -56,10 +56,14 @@ class TestGitServiceBranchOperations:
         before = git_repo.git.status("--porcelain")
 
         assert service.get_branch_status_details("feature/unused") == {
-            "modified": False, "untracked": False, "staged": False
+            "modified": False,
+            "untracked": False,
+            "staged": False,
         }
         assert service.get_branch_status_details("main") == {
-            "modified": True, "untracked": True, "staged": True
+            "modified": True,
+            "untracked": True,
+            "staged": True,
         }
         temp_checkout.assert_not_called()
         assert git_repo.git.status("--porcelain") == before
@@ -302,3 +306,24 @@ class TestGitServiceEdgeCases:
 
         assert service.is_tag("refs/tags/v1.0.0") is True
         assert service.is_tag("main") is False
+
+
+class TestMergeDetails:
+    """The Merge tab must not attribute another branch's merge commit to this one."""
+
+    @pytest.mark.parametrize(
+        ("branch", "subject", "expected"),
+        [
+            ("foo", "Merge pull request #1 from org/foo", True),
+            ("foo", "Merge pull request #1 from org/foo-bar", False),
+            ("x", "Merge pull request #1 from org/feature/x", False),
+            ("feature/x", "Merge pull request #1 from org/feature/x", True),
+            ("feature/x", "Merge branch 'feature/x' into main", True),
+            ("a.b", "Merge pull request #2 from org/aXb", False),
+        ],
+    )
+    def test_matches_only_this_branch(self, git_repo, mock_config, branch, subject, expected):
+        git_repo.git.commit("--allow-empty", "-m", subject)
+        service = GitOperations(git_repo.working_dir, mock_config)
+
+        assert service.get_merge_details(branch, "main")["found"] is expected

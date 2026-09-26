@@ -67,16 +67,12 @@ class TestBranchKeeperProcessing:
 
         keeper = BranchKeeper(git_repo_with_branches.working_dir, mock_config)
 
-        def fail_if_called(*args, **kwargs):
-            raise AssertionError("analysis should not call git stash")
-
-        monkeypatch.setattr(keeper.git_service, "stash_changes", fail_if_called)
-        monkeypatch.setattr(keeper.git_service, "restore_stashed_changes", fail_if_called)
-
+        stashes_before = git_repo_with_branches.git.stash("list")
         branches = keeper.get_branch_details(show_progress=False)
 
         assert branches
         assert (repo_path / "untracked-user-work.txt").exists()
+        assert git_repo_with_branches.git.stash("list") == stashes_before
 
 
 class TestBranchKeeperCleanup:

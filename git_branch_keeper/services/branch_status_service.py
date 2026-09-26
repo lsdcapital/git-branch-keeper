@@ -9,12 +9,27 @@ from rich.console import Console
 
 from git_branch_keeper.models.branch import BranchStatus
 from git_branch_keeper.utils.logging import get_logger
+from git_branch_keeper.utils.patterns import is_protected_name
 
 if TYPE_CHECKING:
     from git_branch_keeper.config import Config
 
 console = Console()
 logger = get_logger(__name__)
+
+
+def merged_pr_is_proof(pr_info: dict, main_branch: str) -> bool:
+    """Whether a merged PR proves the branch's current work is in main.
+
+    All three must hold. `head_matches_local` is None when the comparison could not
+    run, and "could not verify" is not proof. The base must be main: a stacked PR
+    merged into `feat-a` says nothing about main if `feat-a` never lands.
+    """
+    return (
+        pr_info.get("merged") is True
+        and pr_info.get("head_matches_local") is True
+        and pr_info.get("base_ref") == main_branch
+    )
 
 
 class BranchStatusService:
@@ -53,7 +68,7 @@ class BranchStatusService:
             return BranchStatus.ACTIVE
 
         # Skip protected branches
-        if branch_name in self.protected_branches:
+        if is_protected_name(branch_name, self.protected_branches):
             logger.debug(f"Branch {branch_name} is protected, marking as active")
             return BranchStatus.ACTIVE
 
@@ -63,12 +78,10 @@ class BranchStatusService:
             pr_info = pr_data[branch_name]
             if pr_info.get("error"):
                 return BranchStatus.ACTIVE
-            # A merged PR is only authoritative when the local tip is confirmed to be
-            # the head that was merged. head_matches_local is None when the comparison
-            # could not run (no head SHA from the API), and "could not verify" must
-            # fall through to the git-native checks below rather than be trusted - if
-            # the branch really is merged, those will say so anyway.
-            if pr_info.get("merged", False) and pr_info.get("head_matches_local") is True:
+            # Anything short of proof falls through to the git-native checks below
+            # rather than being trusted - if the branch really is merged, those will
+            # say so anyway.
+            if merged_pr_is_proof(pr_info, main_branch):
                 logger.debug(f"Branch {branch_name} is merged (PR was merged)")
                 return BranchStatus.MERGED
             if pr_info.get("closed", False):
@@ -109,7 +122,7 @@ class BranchStatusService:
 
     def is_protected_branch(self, branch_name: str) -> bool:
         """Check if a branch is protected."""
-        return branch_name in self.protected_branches
+        return is_protected_name(branch_name, self.protected_branches)
 
     def should_ignore_branch(self, branch_name: str) -> bool:
         """Check if a branch should be ignored based on ignore patterns."""

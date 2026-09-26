@@ -67,6 +67,7 @@ git-branch-keeper --cli --filter merged --delete --force
 - **Confirmations**: NONE
 - **Recommended for**: Never use unless you're 100% certain
 - **Risk**: No second chances at the prompt. Local deletions are journaled and restorable with `git-branch-keeper undo`; combined with `--remote`, the remote branch is also deleted and is much harder to recover.
+- **Still enforced**: `--force` only skips the prompt. Branches and worktrees with uncommitted changes are left alone, and so are protected branches, open PRs, and branches that moved since analysis.
 
 > **Remote deletion is opt-in.** By default every mode (including `--force`) deletes **local-only** and keeps the remote branch. Add `--remote` to also delete it on `origin`.
 
@@ -98,10 +99,12 @@ Based on the project's TODO.md, here are documented data loss risks:
    - **Mitigation**: Plain CLI mode is read-only by default; dry-run never prompts or changes data
    - **Your action**: Use `--cli` for reports and `--dry-run` before any cleanup
 
-5. **Force mode bypasses uncommitted changes check**
-   - **Risk**: `--force` skips safety checks for speed
-   - **Mitigation**: Documented as dangerous
-   - **Your action**: Never use `--force` in scripts
+5. **Force mode skips confirmation**
+   - **Risk**: Nothing asks before deleting every candidate
+   - **Mitigation**: `--force` no longer skips the uncommitted-changes check - dirty
+     worktrees are never removed and dirty branches never deleted. Only an explicit
+     per-row TUI force-mark (`f`) overrides that, and it names each branch first
+   - **Your action**: Run `--dry-run` first; exit code 1 means something failed
 
 6. **Stale branch detection could catch temporarily inactive feature branches**
    - **Risk**: Long-running feature branches marked as stale

@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from rich.console import Console
+from rich.markup import escape
 
 from git_branch_keeper.cli.args import parse_args
 from git_branch_keeper.config import Config, load_config
@@ -183,7 +184,8 @@ def main():
         else:
             # Normal CLI mode is read-only unless cleanup/deletion (or dry-run preview)
             # was explicitly requested.
-            keeper.process_branches(cleanup_enabled=cleanup_enabled)
+            if not keeper.process_branches(cleanup_enabled=cleanup_enabled):
+                return 1
 
         return 0
     except KeyboardInterrupt:
@@ -198,7 +200,7 @@ def main():
             _print_json(_json_error("RUNTIME_ERROR", str(e)))
         else:
             # Display the error message without full stack trace
-            console.print(f"\n[red]{e}[/red]\n")
+            console.print(f"\n[red]{escape(str(e))}[/red]\n")
         return 1
     except Exception as e:  # noqa: BLE001 - CLI entry point must fail closed
         # Deliberately broad: this is the outermost handler for the whole run.
@@ -207,7 +209,7 @@ def main():
         if output_json:
             _print_json(_json_error("UNEXPECTED_ERROR", str(e)))
         else:
-            console.print(f"[red]Error: {e}[/red]")
+            console.print(f"[red]Error: {escape(str(e))}[/red]")
             if parsed_args and parsed_args.debug:
                 console.print_exception()
         return 1

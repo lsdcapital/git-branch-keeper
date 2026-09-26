@@ -10,6 +10,7 @@ from time import perf_counter
 
 import git
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress
 
 from git_branch_keeper.config import Config
@@ -29,13 +30,17 @@ from git_branch_keeper.models.branch import (
     OperationProgressCallback,
     SyncStatus,
 )
-from git_branch_keeper.services.branch_status_service import BranchStatusService
+from git_branch_keeper.services.branch_status_service import (
+    BranchStatusService,
+    merged_pr_is_proof,
+)
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 from git_branch_keeper.services.cache_service import CacheService
 from git_branch_keeper.services.display_service import DisplayService
 from git_branch_keeper.services.git import GitHubService, GitOperations
 from git_branch_keeper.services.git.github import resolve_github_token
 from git_branch_keeper.utils.logging import get_logger
+from git_branch_keeper.utils.patterns import is_protected_name
 from git_branch_keeper.utils.remotes import detect_remote_name, get_remote_url
 from git_branch_keeper.utils.threading import get_optimal_worker_count
 
@@ -105,6 +110,10 @@ class BranchKeeper:
         self.status_filter = config.get("status_filter", "all")
         self.interactive = config.get("interactive", True)
         self.dry_run = config.get("dry_run", True)
+        # CLI --force means "don't prompt", never "discard uncommitted work": it runs
+        # unattended over every candidate, and `undo` restores branches, not working
+        # files. Only an explicit per-row TUI force-mark passes force_mode=True to
+        # perform_deletion()/delete_branch().
         self.force_mode = config.get("force", False)
         self.delete_remote = config.get("delete_remote", False)
         self.owned_remote_only = False
@@ -212,7 +221,7 @@ class BranchKeeper:
 
     def _cached_deletion_evidence(self, branch_name: str) -> tuple[str | None, dict | None]:
         """Return the analysis tip and exact merge evidence retained on disk."""
-        cached = self.cache_service.load_cache().get(branch_name, {})
+        cached = self.cache_service.load_cache(self.main_branch).get(branch_name, {})
         tip_sha = cached.get("tip_sha")
         merge_detection = cached.get("merge_detection")
         return (
@@ -243,7 +252,7 @@ class BranchKeeper:
             and info.get("head_ref") == name
             and info.get("base_ref") == self.main_branch
             and info.get("head_repo") == self.github_service.github_repo
-            and name not in self.protected_branches
+            and not is_protected_name(name, self.protected_branches)
             and name != self.main_branch
         )
 
@@ -262,7 +271,7 @@ class BranchKeeper:
             if not b.is_worktree
             and b.has_remote
             and b.status == BranchStatus.MERGED
-            and b.name not in self.protected_branches
+            and not is_protected_name(b.name, self.protected_branches)
             and b.tip_sha
         ]
 
@@ -357,13 +366,17 @@ class BranchKeeper:
             if expected_tip_sha and current_tip_sha != expected_tip_sha:
                 current_label = current_tip_sha[:12] if current_tip_sha else "missing"
                 error_msg = f"Branch tip changed from {expected_tip_sha[:12]} to {current_label}"
-                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                self._console_print(
+                    f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+                )
                 return False, error_msg
 
             # Check for open PRs first
             if self.github_service.has_open_pr(branch_name):
                 error_msg = "Has open pull request"
-                self._console_print(f"[yellow]Skipping {branch_name} - {error_msg}[/yellow]")
+                self._console_print(
+                    f"[yellow]Skipping {branch_name} - {escape(error_msg)}[/yellow]"
+                )
                 self.stats["skipped_pr"] += 1
                 return False, error_msg
 
@@ -372,7 +385,7 @@ class BranchKeeper:
                 current_branch = self.repo.active_branch.name
                 if branch_name == current_branch:
                     error_msg = "Cannot delete current branch"
-                    self._console_print(f"[yellow]{error_msg}: {branch_name}[/yellow]")
+                    self._console_print(f"[yellow]{escape(error_msg)}: {branch_name}[/yellow]")
                     return False, error_msg
             except TypeError:
                 # Detached HEAD state - no active branch, so we can delete any branch
@@ -390,7 +403,9 @@ class BranchKeeper:
             )
             if worktree is not None:
                 error_msg = f"Branch is checked out in a worktree ({worktree.path})"
-                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                self._console_print(
+                    f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+                )
                 return False, error_msg
 
             # Check for local changes
@@ -399,7 +414,9 @@ class BranchKeeper:
             # Cannot delete while in a worktree - even with force
             if status_details.get("in_worktree"):
                 error_msg = "Branch is checked out in a worktree"
-                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                self._console_print(
+                    f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+                )
                 return False, error_msg
 
             # Check if there was an error checking status
@@ -487,7 +504,9 @@ class BranchKeeper:
             )
             if recheck is not None:
                 error_msg = f"Branch was checked out in a worktree ({recheck.path})"
-                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                self._console_print(
+                    f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+                )
                 return False, error_msg
 
             # Confirm "merged" against live git before discarding anything. The row
@@ -502,7 +521,9 @@ class BranchKeeper:
                 error_msg = (
                     f"Could not re-establish merge proof for unchanged branch tip {tip_label}"
                 )
-                self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+                self._console_print(
+                    f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+                )
                 return False, error_msg
 
             # Delete the branch
@@ -512,11 +533,16 @@ class BranchKeeper:
                     sha == self.owned_remote_tips.get(branch_name)
                     and self._verify_owned_remote(branch_name, sha)
                 )
+            # Lease the delete to the tip validated above. Everything since (PR fetch,
+            # worktree refreshes, the temp-worktree status probe) takes seconds, and
+            # for stale branches nothing else re-checks the tip. This also covers rows
+            # with no recorded tip_sha, which skipped the expected-tip comparison.
             success = self.git_service.delete_branch(
                 branch_name,
                 self.dry_run,
                 delete_remote=delete_remote,
                 batch_id=batch_id,
+                expected_sha=current_tip_sha,
                 **remote_checks,
             )
 
@@ -532,7 +558,7 @@ class BranchKeeper:
             # Deliberately broad: an unexpected failure here must be reported and
             # move on to the next branch, not abort the whole cleanup run.
             error_msg = str(e)
-            self._console_print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
+            self._console_print(f"[red]Error deleting branch {branch_name}: {escape(str(e))}[/red]")
             return False, error_msg
 
     def _delete_remote_only_branch(
@@ -552,38 +578,50 @@ class BranchKeeper:
         """
         if reason != "merged" and not allow_unmerged_remote:
             error_msg = "Remote-only branches require positive merge proof"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            self._console_print(
+                f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+            )
             return False, error_msg
 
         if not self.delete_remote:
             error_msg = "Remote deletion is disabled; enable LOCAL + REMOTE first"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            self._console_print(
+                f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+            )
             return False, error_msg
 
-        if branch_name in self.protected_branches:
+        if is_protected_name(branch_name, self.protected_branches):
             error_msg = "Protected branch"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            self._console_print(
+                f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+            )
             return False, error_msg
 
         if not self.git_service.has_remote_branch(branch_name, refresh=True):
             error_msg = f"No branch exists on {self.remote_name}"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            self._console_print(
+                f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+            )
             return False, error_msg
 
         if self.github_service.has_open_pr(branch_name):
             error_msg = "Has open pull request"
-            self._console_print(f"[yellow]Skipping {branch_name} - {error_msg}[/yellow]")
+            self._console_print(f"[yellow]Skipping {branch_name} - {escape(error_msg)}[/yellow]")
             self.stats["skipped_pr"] += 1
             return False, error_msg
 
         current_tip_sha = self.git_service.get_branch_tip_sha(branch_name)
         if not current_tip_sha:
             error_msg = "Could not resolve remote branch tip"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            self._console_print(
+                f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+            )
             return False, error_msg
         if expected_tip_sha and current_tip_sha != expected_tip_sha:
             error_msg = f"Branch tip changed from {expected_tip_sha[:12]} to {current_tip_sha[:12]}"
-            self._console_print(f"[yellow]Cannot delete {branch_name} - {error_msg}[/yellow]")
+            self._console_print(
+                f"[yellow]Cannot delete {branch_name} - {escape(error_msg)}[/yellow]"
+            )
             return False, error_msg
         expected_sha = expected_tip_sha or current_tip_sha
         if self.owned_remote_only and (
@@ -702,20 +740,25 @@ class BranchKeeper:
 
         return result
 
-    def process_branches(self, cleanup_enabled: bool = False) -> None:
-        """Analyze branches, render the CLI view, and optionally preview/perform cleanup."""
+    def process_branches(self, cleanup_enabled: bool = False) -> bool:
+        """Analyze branches, render the CLI view, and optionally preview/perform cleanup.
+
+        Returns False when the run errored or any deletion failed, so the CLI can
+        exit non-zero; a user declining the confirmation prompt is not a failure.
+        """
         try:
             analysis = self.analyze_branches(show_progress=True)
             if not analysis.local_branch_names:
                 self._console_print("No branches to process")
-                return
+                return True
 
-            self._display_and_cleanup(analysis, cleanup_enabled)
+            return self._display_and_cleanup(analysis, cleanup_enabled)
 
         except Exception as e:  # noqa: BLE001 - top-level run must fail closed
             # Deliberately broad: this wraps the entire analyze+display+cleanup
             # run; report the failure instead of crashing with a raw traceback.
-            self._console_print(f"[red]Error processing branches: {e}[/red]")
+            self._console_print(f"[red]Error processing branches: {escape(str(e))}[/red]")
+            return False
 
     def _emit_operation_progress(
         self,
@@ -798,7 +841,7 @@ class BranchKeeper:
 
         if use_cache:
             self._emit_analysis_progress(progress_callback, "Loading cache")
-            cache_snapshot = self.cache_service.load_cache()
+            cache_snapshot = self.cache_service.load_cache(self.main_branch)
             cached_branches = self.cache_service.get_cached_branches(branches, cache=cache_snapshot)
             logger.debug(f"Loaded {len(cached_branches)} cached branches")
 
@@ -894,7 +937,7 @@ class BranchKeeper:
                     is_complete=False,
                 )
 
-            cache_snapshot = self.cache_service.load_cache()
+            cache_snapshot = self.cache_service.load_cache(self.main_branch)
             cached_branches = self.cache_service.get_cached_branches(branches, cache=cache_snapshot)
             logger.debug(f"Fast-loaded {len(cached_branches)} cached branches")
 
@@ -963,7 +1006,7 @@ class BranchKeeper:
         try:
             return self.analyze_branches(show_progress=show_progress).branches
         except Exception as e:  # noqa: BLE001 - caller expects a list, never a raise
-            self._console_print(f"[red]Error getting branch details: {e}[/red]")
+            self._console_print(f"[red]Error getting branch details: {escape(str(e))}[/red]")
             return []
 
     def _branch_matches_status_filter(self, branch: BranchDetails) -> bool:
@@ -1034,13 +1077,12 @@ class BranchKeeper:
         display_rows = self._insert_worktree_entries(branch_rows)
 
         removable_worktrees = self.get_removable_worktrees(display_rows)
-        deletable_branches = self.get_deletable_branches(display_rows, force_mode=self.force_mode)
+        deletable_branches = self.get_deletable_branches(display_rows)
         deletable_branches.extend(
             self.get_branches_unblocked_by_worktree_removal(
                 display_rows,
                 branches_to_delete=deletable_branches,
                 worktrees_to_remove=removable_worktrees,
-                force_mode=self.force_mode,
             )
         )
 
@@ -1132,7 +1174,7 @@ class BranchKeeper:
             # Sort: protected first, then alphabetically by branch name
             branch_details.sort(
                 key=lambda b: (
-                    0 if b.name in self.protected_branches else 1,
+                    0 if is_protected_name(b.name, self.protected_branches) else 1,
                     b.name.lower() if not reverse else chr(255) + b.name.lower(),
                 ),
                 reverse=reverse if reverse else False,
@@ -1141,7 +1183,7 @@ class BranchKeeper:
             # Sort: protected first, then by age, then newest first within same age
             branch_details.sort(
                 key=lambda b: (
-                    0 if b.name in self.protected_branches else 1,
+                    0 if is_protected_name(b.name, self.protected_branches) else 1,
                     b.age_days if not reverse else -b.age_days,
                     -date_to_int(b.last_commit_date),  # Negative for newest-first
                 )
@@ -1150,7 +1192,7 @@ class BranchKeeper:
             # Sort: protected first, then by date, then alphabetically within same date
             branch_details.sort(
                 key=lambda b: (
-                    0 if b.name in self.protected_branches else 1,
+                    0 if is_protected_name(b.name, self.protected_branches) else 1,
                     b.last_commit_date if not reverse else chr(255) + b.last_commit_date,
                     b.name.lower(),
                 ),
@@ -1166,7 +1208,7 @@ class BranchKeeper:
             }
             branch_details.sort(
                 key=lambda b: (
-                    0 if b.name in self.protected_branches else 1,
+                    0 if is_protected_name(b.name, self.protected_branches) else 1,
                     (
                         status_order.get(b.status, 99)
                         if not reverse
@@ -1456,11 +1498,11 @@ class BranchKeeper:
         except IndexError:
             return None
 
-    def _display_and_cleanup(self, analysis: BranchAnalysisResult, cleanup_enabled: bool) -> None:
-        """Display branch analysis and optionally perform cleanup."""
+    def _display_and_cleanup(self, analysis: BranchAnalysisResult, cleanup_enabled: bool) -> bool:
+        """Display branch analysis and optionally perform cleanup; False if anything failed."""
         if not analysis.branches:
             self._console_print("No branches match the filter criteria")
-            return
+            return True
 
         self.display_service.display_branch_table(
             analysis.branches,
@@ -1473,11 +1515,12 @@ class BranchKeeper:
         )
 
         if cleanup_enabled:
-            self._perform_cleanup(
+            return self._perform_cleanup(
                 analysis.branches,
                 branches_to_delete=analysis.deletable_branches,
                 worktrees_to_remove=analysis.removable_worktrees,
             )
+        return True
 
     def get_deletable_branches(self, branches: list, force_mode: bool = False) -> list:
         """Filter branches to get only those that can be deleted.
@@ -1511,7 +1554,7 @@ class BranchKeeper:
                     self.remote_deletion_allowed(branch)
                     and branch.has_remote
                     and branch.status == BranchStatus.MERGED
-                    and branch.name not in self.protected_branches
+                    and not is_protected_name(branch.name, self.protected_branches)
                 ):
                     deletable.append(branch)
                 continue
@@ -1522,7 +1565,7 @@ class BranchKeeper:
                 # but still respect protected branches and worktree checks
                 is_force_deletable = (
                     branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
-                    and branch.name not in self.protected_branches
+                    and not is_protected_name(branch.name, self.protected_branches)
                     and not branch.in_worktree
                 )
                 if is_force_deletable:
@@ -1550,8 +1593,22 @@ class BranchKeeper:
         return [
             branch
             for branch in branches
-            if branch.is_worktree and BranchValidationService.is_worktree_removable(branch)
+            if branch.is_worktree
+            and BranchValidationService.is_worktree_removable(branch)
+            and not self._worktree_has_uncommitted_work(branch)
         ]
+
+    @staticmethod
+    def _worktree_has_uncommitted_work(branch) -> bool:
+        """Whether removing this worktree would need --force and discard files.
+
+        An orphaned worktree has no directory left to lose. `None` (status unknown)
+        counts as dirty: removal is only planned when it is known to be safe.
+        """
+        if branch.notes and "[ORPHANED]" in branch.notes:
+            return False
+        flags = (branch.modified_files, branch.untracked_files, branch.staged_files)
+        return any(flag is not False for flag in flags)
 
     def get_branches_unblocked_by_worktree_removal(
         self,
@@ -1583,7 +1640,7 @@ class BranchKeeper:
                 continue
             if branch.name not in removable_worktree_names:
                 continue
-            if branch.name in self.protected_branches:
+            if is_protected_name(branch.name, self.protected_branches):
                 continue
             if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
                 continue
@@ -1676,7 +1733,7 @@ class BranchKeeper:
                     progress_callback, "Cleaning up", completed, total_steps, message
                 )
                 if self.dry_run:
-                    self._console_print(f"Would remove worktree at {wt.worktree_path}")
+                    self._console_print(f"Would remove worktree at {escape(str(wt.worktree_path))}")
                     removed_worktrees.append(wt.worktree_path)
                     update_progress("Would remove worktree")
                     continue
@@ -1772,14 +1829,15 @@ class BranchKeeper:
         branch_details: list,
         branches_to_delete: list | None = None,
         worktrees_to_remove: list | None = None,
-    ) -> None:
-        """Delete stale and merged branches and remove worktrees after confirmation."""
+    ) -> bool:
+        """Delete stale and merged branches and remove worktrees after confirmation.
+
+        Returns False if any branch or worktree failed to delete.
+        """
         # Use precomputed analysis data when available; otherwise keep the
         # historical behavior for direct/internal callers.
         if branches_to_delete is None:
-            branches_to_delete = self.get_deletable_branches(
-                branch_details, force_mode=self.force_mode
-            )
+            branches_to_delete = self.get_deletable_branches(branch_details)
         if worktrees_to_remove is None:
             worktrees_to_remove = self.get_removable_worktrees(branch_details)
 
@@ -1790,14 +1848,13 @@ class BranchKeeper:
                 branch_details,
                 branches_to_delete=branches_to_delete,
                 worktrees_to_remove=worktrees_to_remove,
-                force_mode=self.force_mode,
             )
         )
 
         if not branches_to_delete and not worktrees_to_remove:
             self._console_print("\n[green]No branches or worktrees to clean up![/green]")
             self._print_blocked_summary(branch_details)
-            return
+            return True
 
         if self.dry_run:
             self._console_print(
@@ -1816,7 +1873,7 @@ class BranchKeeper:
             and not self._confirm_deletion_with_worktrees(branches_to_delete, worktrees_to_remove)
         ):
             self._console_print("[yellow]Cleanup cancelled[/yellow]")
-            return
+            return True
 
         # Perform the deletion using shared method
         self._console_print("")
@@ -1824,7 +1881,6 @@ class BranchKeeper:
             self.perform_deletion(
                 branches_to_delete,
                 worktrees_to_remove,
-                force_mode=self.force_mode,
                 show_progress=not self.dry_run and not self.verbose and not self.debug_mode,
             )
         )
@@ -1832,10 +1888,12 @@ class BranchKeeper:
         # Display results
         for wt_path in removed_worktrees:
             if not self.dry_run:
-                self._console_print(f"[green]✓ Removed worktree at {wt_path}[/green]")
+                self._console_print(f"[green]✓ Removed worktree at {escape(str(wt_path))}[/green]")
 
         for wt_path, error in failed_worktrees:
-            self._console_print(f"[red]✗ Failed to remove worktree at {wt_path}: {error}[/red]")
+            self._console_print(
+                f"[red]✗ Failed to remove worktree at {escape(str(wt_path))}: {escape(str(error))}[/red]"
+            )
 
         total_deleted = len(deleted_branches)
         total_removed = len(removed_worktrees)
@@ -1855,7 +1913,25 @@ class BranchKeeper:
         if failed_branches:
             self._console_print(f"\n[red]Failed to delete {len(failed_branches)} branches:[/red]")
             for branch_name, error in failed_branches:
-                self._console_print(f"[red]  • {branch_name}: {error}[/red]")
+                self._console_print(f"[red]  • {branch_name}: {escape(str(error))}[/red]")
+
+        return not failed_branches and not failed_worktrees
+
+    @staticmethod
+    def _ask_yes_no(prompt: str) -> bool:
+        """Ask on the terminal; refuse to guess when there is no one to ask.
+
+        Without a TTY `console.input` raises EOFError, which the run-level handler
+        used to swallow - so `--cli --delete` in CI printed an error and exited 0.
+        """
+        try:
+            response = console.input(prompt)
+        except EOFError:
+            raise RuntimeError(
+                "Deletion needs confirmation but stdin is not a terminal. "
+                "Re-run with --force to skip the prompt, or --dry-run to preview."
+            ) from None
+        return response.lower() == "y"
 
     def _confirm_deletion(self, branches_to_delete: list) -> bool:
         """Show branches to delete and ask for confirmation."""
@@ -1864,8 +1940,7 @@ class BranchKeeper:
             format_deletion_confirmation_items(branches_to_delete, self.delete_remote)
         )
 
-        response = console.input("\nProceed with deletion? [y/N] ")
-        return response.lower() == "y"
+        return self._ask_yes_no("\nProceed with deletion? [y/N] ")
 
     def _confirm_deletion_with_worktrees(
         self, branches_to_delete: list, worktrees_to_remove: list
@@ -1885,10 +1960,11 @@ class BranchKeeper:
                     if wt.notes and "[ORPHANED]" in wt.notes
                     else format_deletion_reason(wt.status)
                 )
-                self._console_print(f"  • {wt.worktree_path} (branch: {wt.name}, {status})")
+                self._console_print(
+                    f"  • {escape(str(wt.worktree_path))} (branch: {wt.name}, {escape(str(status))})"
+                )
 
-        response = console.input("\nProceed with cleanup? [y/N] ")
-        return response.lower() == "y"
+        return self._ask_yes_no("\nProceed with cleanup? [y/N] ")
 
     def _annotate_pr_head_match(self, branch: str, pr_info: dict) -> None:
         """Add local-tip comparison fields to PR metadata when a PR head SHA is available."""
@@ -1933,7 +2009,7 @@ class BranchKeeper:
         if not pr_info:
             return False
         self._annotate_pr_head_match(branch, pr_info)
-        return bool(pr_info.get("merged") and pr_info.get("head_matches_local") is True)
+        return merged_pr_is_proof(pr_info, self.main_branch)
 
     def _determine_branch_status(self, branch: str, pr_data: dict | None = None) -> tuple:
         """
@@ -1988,12 +2064,15 @@ class BranchKeeper:
             elif pr_info["merged"]:
                 # Don't mark main branch as merged - PRs are merged INTO main
                 if branch != self.main_branch:
-                    if pr_info.get("head_matches_local", True) is False:
-                        number = pr_info.get("number")
-                        pr_label = f"PR #{number}" if number else "merged PR"
-                        append_note(f"{pr_label} merged but local tip differs from PR head")
-                    else:
+                    number = pr_info.get("number")
+                    pr_label = f"PR #{number}" if number else "merged PR"
+                    base_ref = pr_info.get("base_ref")
+                    if merged_pr_is_proof(pr_info, self.main_branch):
                         status = BranchStatus.MERGED
+                    elif pr_info.get("head_matches_local") is False:
+                        append_note(f"{pr_label} merged but local tip differs from PR head")
+                    elif base_ref and base_ref != self.main_branch:
+                        append_note(f"{pr_label} merged into {base_ref}, not {self.main_branch}")
 
             # If branch had PR that was closed without merging
             elif pr_info["closed"]:
@@ -2220,9 +2299,9 @@ class BranchKeeper:
 
         return details
 
-    def cleanup(self):
+    def cleanup(self) -> bool:
         """Clean up branches."""
-        self.process_branches(cleanup_enabled=True)
+        return self.process_branches(cleanup_enabled=True)
 
     def update_main(self):
         """Update the main branch from remote."""

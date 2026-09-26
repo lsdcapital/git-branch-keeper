@@ -35,7 +35,7 @@ git-branch-keeper --cli --filter merged --dry-run
 # Delete merged branches with confirmation (CLI mode)
 git-branch-keeper --cli --filter merged --delete
 
-# Delete with force (no confirmation - DANGEROUS!)
+# Delete without confirmation (still skips anything with uncommitted changes)
 git-branch-keeper --cli --filter merged --delete --force
 
 # Debug mode for troubleshooting
@@ -43,35 +43,58 @@ git-branch-keeper --debug
 ```
 
 **Important**:
-- CLI mode (`--cli` / `--no-interactive`) is read-only by default
+- CLI mode (`--cli` / `--no-interactive`) is read-only by default. It exits 1 if the run
+  errors or any deletion fails (declining the prompt still exits 0); a confirmation
+  prompt with no TTY is an explicit error, not a silent skip
 - Deletion requires explicit `--delete` (deprecated `--cleanup` remains an alias; legacy `--force` also implies delete)
+- `--force` (`config.force` / `BranchKeeper.force_mode`) means **"don't prompt" only**. It runs
+  unattended over every candidate and `undo` restores branches, not working files, so it
+  must never discard uncommitted work: planning excludes dirty worktrees
+  (`_worktree_has_uncommitted_work`) and never passes `force_mode=True` to
+  `perform_deletion()`. Only the per-row TUI force-mark passes `force_mode=True`.
 - For branches with local and remote refs, deletion is **local-only by default**; the
   matching remote is kept unless `--remote` is passed (`config.delete_remote`)
-- Use `--dry-run` to preview cleanup candidates without prompts or changes
+- Use `--dry-run` to preview cleanup candidates without prompts or changes. In the TUI
+  it runs every guard, titles the confirm dialog "(dry run)", and keeps rows and marks
+  afterwards - it must never report a deletion (or offer undo) that did not happen
 - Branches that exist only on the remote are analyzed by default for visibility.
   `--no-remote-branches` restores the local-only view. Every remote mutation requires
   explicit opt-in with TUI `d` or CLI `--remote`; only then can positively merged
-  remote-only refs become cleanup candidates. Stale/unmerged ones are never deleted.
+  remote-only refs become cleanup candidates. Unmerged ones are never *auto*-selected;
+  see "Remote-only branches" for the one explicit override (TUI force-mark).
 
 ## Architecture
 
-The codebase follows a service-oriented architecture:
+The codebase follows a service-oriented architecture (all paths under `git_branch_keeper/`):
 
-- **core.py**: Main BranchKeeper class that orchestrates all operations
+- **core/branch_keeper.py**: `BranchKeeper` — orchestrates analysis, the deletion planner,
+  and the destructive boundary (`delete_branch`, `_delete_remote_only_branch`). Large;
+  most safety invariants below are enforced here.
 - **services/**:
-  - `git_service.py`: Handles Git operations (branch listing, deletion, merge detection)
-  - `github_service.py`: GitHub API integration for PR status
-  - `branch_status_service.py`: Determines branch status (merged, stale, has PR)
+  - `git/operations.py`: `GitOperations` facade — deletes local/remote refs, owns the
+    shared `WorktreeService`, `BranchRefResolver`, `MergeDetector`, and deletion journal
+  - `git/merge_detector.py`: `MergeDetector` — the merge-detection strategy below
+  - `git/branch_queries.py`: branch listing, sync/divergence, commit and diff queries
   - `git/refs.py`: `BranchRefResolver` — maps a branch name to the rev git should be
     handed (`<name>` or `<remote>/<name>`); see "Remote-only branches"
-  - `deletion_journal.py`: Records every deleted branch (with tip SHA) to `~/.git-branch-keeper/deletions.jsonl`; powers `git-branch-keeper undo` (see `cli/undo.py`)
-  - `display_service.py`: Terminal UI using Rich library
-- **models/branch.py**: Data models for branch information and status
-- **config.py**: Configuration management with JSON file support
-- **ui/**: Interactive TUI (Terminal User Interface) using Textual framework
-  - `app.py`: Main BranchKeeperApp with DataTable-based interface
-  - `screens.py`: Modal dialogs (ConfirmScreen, InfoScreen, TabbedInfoScreen)
-  - `widgets.py`: Custom widgets (NonExpandingHeader)
+  - `git/worktrees.py`: `WorktreeService` — see "Worktrees"
+  - `git/github.py`: optional GitHub API integration (PR status, PyGithub)
+  - `branch_status_service.py`: branch status (merged, stale, unstarted, has PR) and
+    `merged_pr_is_proof()`
+  - `branch_validation_service.py`: `is_deletable` / `is_protected` rules
+  - `cache_service.py`: on-disk analysis cache (fast startup; tied to tip SHAs)
+  - `deletion_journal.py`: records every deleted branch (with tip SHA) to
+    `~/.git-branch-keeper/deletions.jsonl`; powers `undo` (`undo_service.py`, `cli/undo.py`)
+  - `display_service.py`: CLI table output (Rich)
+- **formatters/**: shared status/age/link formatting for CLI and TUI, plus
+  `json_output.py` (`--json`)
+- **models/**: `BranchDetails`, `BranchStatus`, `SyncStatus`, worktree models
+- **cli/**: `main.py` (entry point, mode selection, exit codes), `args.py`, `undo.py`
+- **config.py**: configuration management with JSON file support
+- **ui/**: interactive TUI (Textual)
+  - `app.py`: `BranchKeeperApp` with DataTable-based interface
+  - `screens.py`: modal dialogs (ConfirmScreen, InfoScreen, TabbedInfoScreen)
+  - `widgets.py`: custom widgets (NonExpandingHeader)
 
 ### TUI Architecture
 
@@ -105,9 +128,23 @@ caps clamp its 90%x80% dialog to 81%x64%.
 blocks. Delete and restore callers build the same question → scope → selection → warning
 anatomy instead of concatenating a presentation-shaped message. The structured dialog
 uses a fixed-height scrolling review region and a fixed action row so long selections
-cannot push the buttons off-screen. Keep caller-provided content on
-`Static(markup=False)`: branch names such as `feature/[wip]` must stay literal.
-Plain-string prompts remain supported for simple one-question confirmations.
+cannot push the buttons off-screen. Plain-string prompts remain supported for simple
+one-question confirmations.
+
+**Never parse untrusted text as markup.** Commit messages, authors, diffs, untracked file
+contents, paths, notes and git error output reach Rich/Textual renderers everywhere. Parsed
+as markup, `[/]` in a diff raises `MarkupError` and takes down the TUI, and a commit
+message containing `[@click=app.delete_marked]` renders a link that runs an app action.
+(Branch names are the *least* likely vector: git refuses `[` in ref names.) The rules:
+- Plain text in a widget: `Static(text, markup=False)` (ConfirmScreen, InfoScreen).
+- Mixed styled + untrusted text in `TabbedInfoScreen`: build `textual.content.Content`
+  with `_m("[bold]Label:[/bold] $v", v=value)` and `_join(parts)` (`ui/screens.py`).
+  `$var` values are inserted after parsing. Do not use `rich.markup.escape()` there: a
+  value ending in `\` escapes the *next* closing tag.
+- DataTable cells: pass `Text(...)`, never a plain `str` - DataTable parses strings.
+- CLI `console.print(f"...")`: wrap interpolated errors/paths in `escape(...)`; URLs that
+  embed a branch name are percent-encoded (`formatters/links.py::_tree_url`).
+See `tests/test_tui_marking.py::TestInfoScreenRendersUntrustedTextLiterally`.
 
 **Background Operations:**
 - Async workers use `@work` decorator for non-blocking operations
@@ -125,6 +162,13 @@ branches unblocked by removing a clean worktree. Counting rows made the status b
 advertise `Deletable: 1 | Marked: 0` for a current branch nothing could ever mark -
 routine when GBK runs from a linked worktree, where the checked-out branch is a
 feature branch. See `tests/test_tui_app.py::test_status_bar_*`.
+
+**A normal mark (Space) requires a cleanup candidate** (`_is_markable_status`: STALE,
+MERGED, orphaned, or a removable worktree row). Because marks light up worktree rows too,
+marking an ACTIVE branch used to mark its worktree, and confirm - which filters branches
+through `is_deletable` but took worktree rows unconditionally - removed the worktree
+(and its ignored files) while silently skipping the branch. Confirm now also only removes
+worktrees that `is_worktree_removable` accepts, unless force-marked.
 
 **Cached rows are painted before the real analysis lands**, so startup applies two
 results in a row. The second apply preserves marks (the user may have marked
@@ -147,10 +191,18 @@ checks, ordered cheapest-first. Each maps to a real merge style; see
    cherry-picks, and single-commit squashes (work in main under different SHAs). This is
    what catches rebase-merges, which the older diff-only approach missed.
 3. **Combined patch-id exact match** (`_check_squash_merge`, last resort) — branch's
-   combined diff has the same stable patch-id as a first-parent commit on main since
+   combined diff has the same patch-id as a first-parent commit on main since
    the branch fork point (capped by `squash_scan_limit`, default 500). Covers
    multi-commit squash merges (N commits collapsed into 1, so no per-commit patch-id
    match).
+
+   **Whitespace is significant here.** Diffs are built without `--ignore-space-change` /
+   `--ignore-blank-lines`, and hashed with `git patch-id --verbatim` (git ≥ 2.39). Both
+   the diff flags and patch-id's default whitespace stripping made a post-squash commit
+   that only re-indents code (a behavior change in Python/YAML) vanish, so the branch
+   exact-matched the squash commit and became deletable. On older git, `--verbatim` is
+   rejected and squash detection returns "not merged" rather than guess. See
+   `test_merge_detection_accuracy.py::test_whitespace_only_commit_after_squash_is_not_merged`.
 
 **Unstarted branches are excluded before any of this runs.** A branch created from main
 that was never committed to has no commits of its own, so check 1 matches trivially — its
@@ -159,7 +211,9 @@ merge that never happened and making a freshly-cut branch (e.g. a Conductor `git
 add -b` workspace whose work is still uncommitted) a cleanup candidate.
 `MergeDetector.is_unstarted_branch()` catches these first, and `BranchStatusService` returns
 `BranchStatus.UNSTARTED` / `SyncStatus.NO_COMMITS`. That status is deliberately absent from
-every `[STALE, MERGED]` check in the codebase, so such branches are never deletable.
+every `[STALE, MERGED]` check in the codebase, so such branches are never auto-selected or
+bulk-marked. Only an explicit TUI force-mark can delete one, and it does so under reason
+`"unstarted"`, never `"merged"` (see "Remote-only branches").
 
 Do not reduce that check to `git rev-list --count main..branch == 0`. **A fast-forward-merged
 branch also has zero unique commits** — its commits became main's — and refs alone cannot
@@ -172,6 +226,11 @@ detection. Erring toward `merged` is safe (the deletion guards below re-verify);
 toward `unstarted` would hide a genuinely merged branch behind a never-deletable label.
 See `tests/test_unstarted_branches.py`, whose `TestMergedBranchesStayMerged` is the
 regression guard for exactly this.
+
+The creation entry must name a **local** source. `git checkout feat` to review a PR records
+`branch: Created from refs/remotes/origin/feat` - one entry, but the branch carries someone
+else's history, and after that PR merges it would read UNSTARTED forever. A
+`refs/remotes/…` or `<remote>/…` source falls through to merge detection.
 
 **Squash detection has two confidence levels.** An *exact* combined patch-id match counts as
 merged/deletable. A *fuzzy* high-similarity substring match does NOT mark the branch
@@ -203,9 +262,12 @@ When GitHub auth is available (`github_token`, `GITHUB_TOKEN`, `GH_TOKEN`, or
 authenticated `gh` CLI), PR metadata is fetched inside each branch processing worker
 rather than as a separate prefetch phase. GitHub-enabled branch workers are capped below
 PyGithub/urllib3's default API connection pool size to avoid connection-pool warning
-spam. Open PRs keep branches active/protected. A merged PR is authoritative only when
-the local branch tip still matches the PR head SHA; if the local tip differs, GBK adds
-a warning note and falls through to the git-native checks above.
+spam. Open PRs keep branches active/protected. A merged PR is authoritative only via
+`merged_pr_is_proof()` (`services/branch_status_service.py`), the single rule used by
+analysis and the deletion-time recheck: merged, `head_matches_local is True`, **and**
+`base_ref == main_branch`. A stacked PR merged into another feature branch proves
+nothing about main (note: "PR #N merged into X, not main"); a differing tip adds a
+warning note. Either way GBK falls through to the git-native checks above.
 
 ### Remote-only branches
 
@@ -252,11 +314,20 @@ ahead/behind and a silently downgraded confidence. On one real repo that was 37 
 tabs call them directly, bypassing the analysis path, so each needs its own remote-only
 short-circuit rather than relying on the one in `get_branch_status_details`.
 
-**Only explicitly opted-in, positively merged remote-only branches are deletable.** Stale
-age is not enough when the only mutation is `git push <remote> --delete`;
-`BranchValidationService` and the force-mode planner therefore require both `MERGED` and
-`config.delete_remote`. Without opt-in they remain visible but blocked. The TUI calls
-this out in both the status bar and confirmation dialog.
+**Remote-only branches are deletable automatically only when opted-in and positively
+merged.** Stale age is not enough when the only mutation is `git push <remote> --delete`;
+`BranchValidationService`, bulk marking, and the CLI `--force` planner therefore require
+both `MERGED` and `config.delete_remote`. Without opt-in they remain visible but blocked.
+The TUI calls this out in both the status bar and confirmation dialog.
+
+**The one deliberate override is TUI force-mark (`f`) in the broad `--remote` scope.** It
+can select stale, merged or unstarted remote-only rows, and deletes them with
+`allow_unmerged_remote=True` (no merge proof), as documented in `docs/usage.md`. It is a
+per-row, explicit choice shown as `· force` in the confirm dialog; protected branches, open
+PRs, remote access failures and changed tips (the lease) still block it. It never bypasses
+merge proof in the owned "LOCAL + MY MERGED REMOTES" scope. Unstarted rows are deleted
+under reason `"unstarted"`, never `"merged"` (`format_deletion_reason`): an unstarted tip
+is trivially reachable, so a "merged" re-check would pass and journal a fake merge.
 
 `BranchKeeper._delete_remote_only_branch()` re-runs merge detection at the destructive
 boundary and captures the remote-tracking tip. `GitOperations.delete_remote_only_branch()`
@@ -321,11 +392,14 @@ Four independent guards stand between "analysis said merged" and an irreversible
 delete. They exist because analysis results are reused across time - from the
 on-disk cache between runs, and across however long the TUI waits for the user.
 
-1. **Cached rows are tied to a commit.** `_serialize_branch` records `tip_sha`, and
+1. **Cached rows are tied to a commit - and to main.** `_serialize_branch` records `tip_sha`, and
    `get_stale_branches()` re-analyses any branch whose tip has moved or whose entry
    predates the field. Without this a MERGED branch is cached as `stable` and never
    re-examined, so the ordinary "merge the PR, keep working on the branch" flow
-   would delete the new commits.
+   would delete the new commits. Every stable row is a "merged into *this* main"
+   verdict, so the cache also records `main_tip_sha` and `load_cache(main_branch)`
+   discards it when the main branch changes or is rewritten (cached tip no longer an
+   ancestor). Main merely moving forward keeps it.
 2. **Merge status is re-verified live.** `BranchKeeper.delete_branch()` re-runs
    Git detection with `force_refresh=True` for anything being deleted as `merged`.
    If Git cannot prove a squash/rebase merge, it re-fetches PR data and accepts it
@@ -336,7 +410,12 @@ on-disk cache between runs, and across however long the TUI waits for the user.
    `git branch -d` when the branch is an ancestor of HEAD, and only falls back to
    `-D` where `-d` structurally cannot succeed (rebase/squash merges, and stale
    branches, which are unmerged by definition). Do not "simplify" this back to an
-   unconditional `-D`.
+   unconditional `-D`. The `-D` fallback is itself leased: `_force_delete_local_branch()`
+   runs `git update-ref -d refs/heads/<name> <validated-sha>` (plus removing the
+   `branch.<name>` config, as `-D` would), so a commit that lands during the seconds of
+   PR/worktree/status checks makes the delete fail with `BranchMovedError` instead of
+   being discarded. Stale branches have no live merge re-check, so this lease is their
+   only protection against that window.
 4. **Remote-only deletion is leased to the analyzed tip.** There is no local ref for
    `git branch -d` to verify, so the remote push carries an exact expected SHA. If
    the upstream branch advanced after analysis or after the last fetch, deletion
@@ -348,13 +427,32 @@ so every worktree of a repo shares one scope. Do not scope it by the invocation
 path: deletions made from a linked worktree would be invisible to `undo` run from
 the repo root, and orphaned outright once that worktree is removed.
 
-A merged PR is authoritative only when `head_matches_local is True`. `None` means
-the comparison could not run and must fall through to the git-native checks.
+`--output json` `recommended_actions` follow the same rule: commands are pinned to the
+row's `expected_sha` (`git update-ref -d refs/heads/X <sha>`,
+`git push --force-with-lease=refs/heads/X:<sha> <remote> :refs/heads/X`), never bare
+`git branch -D` / `git push --delete`. An agent may run them long after the scan.
+
+A merged PR is authoritative only via `merged_pr_is_proof()`: `head_matches_local is
+True` (`None` means the comparison could not run) and `base_ref == main_branch`.
+
+**Local + remote deletion is ordered local-first**, so a push failure after the local
+delete is a *partial success*: `GitOperations.delete_branch()` prints git's stderr,
+journals `remote_deleted=false`, and returns True. Do not classify push errors by
+searching `str(e)` - it contains the command line, so a branch named
+`feature/protected-routes` matched a "protected" check. Use `_git_error_detail()`.
 
 ### Error Handling
 - Services use exceptions for error propagation
 - The core BranchKeeper class handles errors gracefully with user-friendly messages
 - Debug mode provides detailed stack traces
+
+### Protected branches
+
+`protected_branches` entries are exact names **or globs** (`release/*`), matched
+case-sensitively by `utils/patterns.py::is_protected_name()`. Every protection check goes
+through it (or `BranchValidationService.is_protected()`, which delegates) - never
+`name in protected_branches`, which silently ignored patterns. Globs can't collide with
+real names: git forbids `*`, `?` and `[` in refs.
 
 ### Configuration
 Configuration follows a hierarchy:

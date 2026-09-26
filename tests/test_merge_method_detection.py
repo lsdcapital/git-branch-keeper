@@ -1,6 +1,7 @@
 """Tests for merge method detection (merged-pr vs merged-git)."""
 
 from pathlib import Path
+from unittest.mock import Mock
 
 from git_branch_keeper.core.branch_keeper import BranchKeeper
 from git_branch_keeper.models.branch import BranchStatus, SyncStatus
@@ -97,6 +98,7 @@ class TestMergeMethodDetection:
                 "closed": False,
                 "number": 42,
                 "head_sha": local_tip,
+                "base_ref": "main",
             }
         }
 
@@ -143,6 +145,63 @@ class TestMergeMethodDetection:
         assert "PR #35 merged but local tip differs from PR head" in notes
         assert pr_data["feature/pr-head-mismatch"]["local_head_sha"] == local_tip
         assert pr_data["feature/pr-head-mismatch"]["head_matches_local"] is False
+
+    def _unmerged_branch(self, repo, name):
+        repo_path = Path(repo.working_dir)
+        repo.git.checkout("-b", name)
+        (repo_path / "stacked.txt").write_text("stacked work\n")
+        repo.index.add(["stacked.txt"])
+        repo.index.commit("Stacked work")
+        tip = repo.head.commit.hexsha
+        repo.git.checkout("main")
+        return tip
+
+    def test_merged_pr_into_non_main_base_is_not_merged(self, git_repo, mock_config):
+        """A stacked PR merged into another feature branch never reached main."""
+        tip = self._unmerged_branch(git_repo, "feature/stacked")
+        keeper = BranchKeeper(git_repo.working_dir, mock_config)
+        pr_data = {
+            "feature/stacked": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "number": 7,
+                "head_sha": tip,
+                "base_ref": "feature/base",
+            }
+        }
+
+        status, sync_status, _, notes = keeper._determine_branch_status("feature/stacked", pr_data)
+
+        assert status != BranchStatus.MERGED
+        assert sync_status != SyncStatus.MERGED_PR.value
+        assert "PR #7 merged into feature/base, not main" in notes
+
+        # Deletion-time recheck re-fetches the PR; the same base rule must apply.
+        live = {"feature/stacked": dict(pr_data["feature/stacked"], local_head_sha=None)}
+        keeper.github_service.get_pr_data_for_branch = Mock(return_value=live)
+        assert keeper._has_current_merge_proof("feature/stacked") is False
+        assert live["feature/stacked"]["head_matches_local"] is True
+
+    def test_merged_pr_without_head_sha_is_not_merged(self, git_repo, mock_config):
+        """No head SHA means the tip comparison never ran; that is not proof."""
+        self._unmerged_branch(git_repo, "feature/no-head")
+        keeper = BranchKeeper(git_repo.working_dir, mock_config)
+        pr_data = {
+            "feature/no-head": {
+                "count": 0,
+                "merged": True,
+                "closed": False,
+                "number": 8,
+                "head_sha": None,
+                "base_ref": "main",
+            }
+        }
+
+        status, sync_status, _, _ = keeper._determine_branch_status("feature/no-head", pr_data)
+
+        assert status != BranchStatus.MERGED
+        assert sync_status != SyncStatus.MERGED_PR.value
 
     def test_branch_merged_via_git_shows_merged_git(self, git_repo, mock_config):
         """Test that a branch merged directly via git shows 'merged-git' status."""

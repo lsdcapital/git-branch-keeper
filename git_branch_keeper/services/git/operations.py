@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 
 import git
 from rich.console import Console
+from rich.markup import escape
 
-from git_branch_keeper.exceptions import GIT_ERRORS
+from git_branch_keeper.exceptions import GIT_ERRORS, BranchMovedError
 from git_branch_keeper.services.deletion_journal import DeletionJournal
 from git_branch_keeper.services.git.branch_queries import BranchQueries
 from git_branch_keeper.services.git.merge_detector import MergeDetector
@@ -302,47 +303,6 @@ class GitOperations:
     # Core Git Operations (not delegated)
     # ============================================================================
 
-    def stash_changes(self) -> bool:
-        """Stash uncommitted changes temporarily.
-
-        Returns:
-            bool: True if changes were stashed, False if nothing to stash
-        """
-        try:
-            repo = self._get_repo()
-            # Check if there's anything to stash
-            status = repo.git.status("--porcelain")
-            if not status.strip():
-                logger.debug("No uncommitted changes to stash")
-                return False
-
-            # Stash with untracked files
-            repo.git.stash("push", "-u", "-m", "git-branch-keeper-temp")
-            logger.debug("Stashed uncommitted changes")
-            return True
-        except Exception as e:
-            logger.warning(f"Could not stash changes: {e}")
-            raise
-
-    def restore_stashed_changes(self, was_stashed: bool) -> None:
-        """Restore previously stashed changes.
-
-        Args:
-            was_stashed: Whether changes were actually stashed (from stash_changes return value)
-        """
-        if not was_stashed:
-            logger.debug("Nothing was stashed, skipping restore")
-            return
-
-        try:
-            repo = self._get_repo()
-            repo.git.stash("pop")
-            logger.debug("Restored stashed changes")
-        except Exception as e:
-            logger.warning(f"Could not restore stashed changes: {e}")
-            logger.warning("Your changes are still in the stash. Run 'git stash pop' manually.")
-            raise
-
     def _git_can_verify_deletion(self, repo, branch_name: str) -> bool:
         """Whether `git branch -d` would accept this branch on its own.
 
@@ -372,6 +332,7 @@ class GitOperations:
         delete_remote: bool = False,
         batch_id: str | None = None,
         verify_remote: Callable[[str], bool] | None = None,
+        expected_sha: str | None = None,
     ) -> bool:
         """Delete a branch locally, and remotely only when explicitly requested.
 
@@ -381,6 +342,10 @@ class GitOperations:
 
         Every real deletion is recorded in the deletion journal (with the
         branch's tip SHA) so it can be restored with `git-branch-keeper undo`.
+
+        expected_sha is the tip the caller validated. When given, a force delete is
+        an atomic compare-and-delete against it, so a commit that lands during the
+        seconds of checks before this call is never discarded.
         """
         with self._git_operation():
             try:
@@ -400,9 +365,14 @@ class GitOperations:
                 # Refresh remote state at the same execution boundary.
                 has_remote = self.has_remote_branch(branch_name, refresh=True)
                 should_delete_remote = has_remote and delete_remote
+                remote_kept_reason: str | None = None
 
                 # Capture the tip SHA before deletion so the branch is recoverable
                 deleted_sha = local_head.commit.hexsha
+                if expected_sha is not None and deleted_sha != expected_sha:
+                    raise BranchMovedError(
+                        f"Branch tip changed from {expected_sha[:12]} to {deleted_sha[:12]}"
+                    )
 
                 if should_delete_remote:
                     live_sha, error = self.get_live_remote_branch_sha(branch_name)
@@ -420,7 +390,12 @@ class GitOperations:
                     elif not self.is_branch_merged(
                         branch_name, self.config.get("main_branch", "main"), force_refresh=True
                     ):
-                        raise ValueError("Remote deletion requires positive merge proof")
+                        # A stale branch is unmerged by definition, so its remote is
+                        # never deleted - but that is no reason to refuse the local
+                        # delete the user asked for. Keep the remote, as the default
+                        # local-only scope would.
+                        should_delete_remote = False
+                        remote_kept_reason = "not merged into main"
 
                 # Delete local branch. Prefer `-d` so git independently confirms the
                 # branch is reachable before anything is discarded; fall back to `-D`
@@ -430,8 +405,10 @@ class GitOperations:
                 local_deleted = False
                 if not dry_run:
                     console.print(f"Deleting local branch {branch_name}...")
-                    safe_delete = self._git_can_verify_deletion(repo, branch_name)
-                    repo.delete_head(branch_name, force=not safe_delete)
+                    if self._git_can_verify_deletion(repo, branch_name):
+                        repo.delete_head(branch_name)
+                    else:
+                        self._force_delete_local_branch(repo, branch_name, deleted_sha)
                     local_deleted = True
 
                 # Delete remote branch only when requested. Journal in `finally` so
@@ -453,17 +430,22 @@ class GitOperations:
                                     f"[green]Deleted branch {branch_name} (local and remote)[/green]"
                                 )
                             except git.exc.GitCommandError as e:
-                                # Check if it's a protected branch error
-                                if "protected" in str(e).lower() or "prohibited" in str(e).lower():
-                                    console.print(
-                                        f"[yellow]Warning: Remote branch {branch_name} is protected and cannot be deleted remotely[/yellow]"
-                                    )
-                                    console.print(
-                                        f"[green]Deleted local branch {branch_name} only[/green]"
-                                    )
-                                else:
-                                    # Re-raise if it's a different error
-                                    raise
+                                # The local branch is already gone (and journaled), so
+                                # this is a partial success, not a failure: returning
+                                # False would leave callers showing a branch that no
+                                # longer exists. Report git's own reason - whether
+                                # protection, a lease rejection, or the network - rather
+                                # than guessing from str(e), which includes the branch
+                                # name and so matched "feature/protected-routes".
+                                detail = escape(self._git_error_detail(e))
+                                console.print(
+                                    f"[yellow]Could not delete remote branch "
+                                    f"{self.remote_name}/{branch_name}: {detail}[/yellow]"
+                                )
+                                console.print(
+                                    f"[green]Deleted local branch {branch_name} only "
+                                    "(remote kept)[/green]"
+                                )
                         else:
                             console.print(
                                 f"[yellow]Would delete branch {branch_name} (local and remote)[/yellow]"
@@ -471,7 +453,9 @@ class GitOperations:
                     elif has_remote:
                         # Remote exists but we're keeping it
                         kept = (
-                            f"remote {self.remote_name}/{branch_name} kept; "
+                            f"remote {self.remote_name}/{branch_name} kept ({remote_kept_reason})"
+                            if remote_kept_reason
+                            else f"remote {self.remote_name}/{branch_name} kept; "
                             "use --remote to also delete it"
                         )
                         if not dry_run:
@@ -504,13 +488,36 @@ class GitOperations:
 
                 return True
 
+            except BranchMovedError:
+                # Nothing was deleted; let the caller report the real reason.
+                raise
             except Exception as e:  # noqa: BLE001 - deletion must fail closed
                 # Deliberately broad: report the failure and keep the branch rather than
                 # letting anything unexpected propagate mid-way through a cleanup run.
-                console.print(f"[red]Error deleting branch {branch_name}: {e}[/red]")
+                console.print(f"[red]Error deleting branch {branch_name}: {escape(str(e))}[/red]")
                 return False
             finally:
                 self.ref_resolver.invalidate()
+
+    def _force_delete_local_branch(self, repo, branch_name: str, expected_sha: str) -> None:
+        """`git branch -D`, but only if the branch still points at expected_sha.
+
+        `-D` deletes whatever the tip is when it runs. `update-ref -d <ref> <old>`
+        compares and deletes atomically, so a commit that landed after validation
+        makes this fail instead of silently discarding it. The branch's config section
+        (upstream tracking) is then removed the way `git branch -D` would.
+        """
+        ref = f"refs/heads/{branch_name}"
+        try:
+            repo.git.update_ref("-d", ref, expected_sha)
+        except git.exc.GitCommandError as e:
+            raise BranchMovedError(
+                f"Branch moved during deletion; kept it: {self._git_error_detail(e)}"
+            ) from e
+        try:
+            repo.git.config("--remove-section", f"branch.{branch_name}")
+        except git.exc.GitCommandError:
+            pass  # no upstream/tracking config to remove
 
     def delete_remote_only_branch(
         self,
@@ -559,7 +566,7 @@ class GitOperations:
                     if not dry_run:
                         self._discard_remote_tracking_ref(repo, branch_name, expected_sha)
                     message = f"Remote branch {self.remote_name}/{branch_name} was already absent"
-                    console.print(f"[green]{message}[/green]")
+                    console.print(f"[green]{escape(message)}[/green]")
                     return RemoteDeletionResult(
                         success=True,
                         outcome="already_absent",
@@ -588,7 +595,7 @@ class GitOperations:
 
                 if dry_run:
                     message = f"Would delete remote-only branch {self.remote_name}/{branch_name}"
-                    console.print(f"[yellow]{message}[/yellow]")
+                    console.print(f"[yellow]{escape(message)}[/yellow]")
                     return RemoteDeletionResult(
                         success=True,
                         outcome="dry_run",
@@ -628,7 +635,9 @@ class GitOperations:
                     remote_deleted=True,
                 )
             except Exception as e:  # noqa: BLE001 - deletion must fail closed
-                console.print(f"[red]Error deleting remote branch {branch_name}: {e}[/red]")
+                console.print(
+                    f"[red]Error deleting remote branch {branch_name}: {escape(str(e))}[/red]"
+                )
                 return RemoteDeletionResult(
                     success=False,
                     outcome="error",

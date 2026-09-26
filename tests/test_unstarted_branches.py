@@ -119,6 +119,26 @@ class TestMergedBranchesStayMerged:
 
         assert "feature/done" in [b.name for b in result.deletable_branches]
 
+    def test_branch_checked_out_from_remote_then_merged_is_merged(self, git_repo):
+        """Reviewing a PR (`git checkout feat`) then pulling its merge is not UNSTARTED.
+
+        The only reflog entry is "Created from refs/remotes/origin/feat", which says
+        nothing about whether work happened on the branch.
+        """
+        _commit_on(git_repo, "feat", "feat.txt")
+        git_repo.git.push("origin", "main", "feat")
+        git_repo.git.branch("-D", "feat")
+        git_repo.git.fetch("origin")
+        git_repo.git.checkout("feat")  # DWIM: creates feat from origin/feat
+        git_repo.git.checkout("main")
+        reflog = git_repo.git.reflog("show", "--format=%gs", "feat")
+        assert reflog.strip() == "branch: Created from refs/remotes/origin/feat"
+        git_repo.git.merge("feat", "--no-ff", "-m", "Merge feat")
+
+        branch, _ = _row(git_repo, "feat")
+
+        assert branch.status == BranchStatus.MERGED
+
     def test_merge_commit_branch_is_still_merged(self, git_repo):
         _commit_on(git_repo, "feature/done", "done.txt")
         git_repo.git.merge("feature/done", "--no-ff", "-m", "Merge feature/done")
@@ -171,3 +191,26 @@ class TestFallsBackWhenItCannotProve:
         branch, _ = _row(unstarted_repo, "main")
 
         assert branch.status != BranchStatus.UNSTARTED
+
+
+class TestForceDeletedUnstartedBranch:
+    def test_force_deletion_is_recorded_as_unstarted_not_merged(self, unstarted_repo, monkeypatch):
+        """A force-marked unstarted branch must not be deleted under the "merged" reason.
+
+        Its tip is trivially reachable from main, so the "merged" re-check would pass
+        and the deletion would be reported as a merge that never happened.
+        """
+        keeper = _keeper(unstarted_repo)
+        branch, _ = _row(unstarted_repo, "feature/not-started")
+        reasons = []
+        real_delete = keeper.delete_branch
+
+        def spy(name, reason, *args, **kwargs):
+            reasons.append(reason)
+            return real_delete(name, reason, *args, **kwargs)
+
+        monkeypatch.setattr(keeper, "delete_branch", spy)
+        deleted, failed, _, _ = keeper.perform_deletion([branch], [], force_mode=True)
+
+        assert reasons == ["unstarted"]
+        assert deleted == ["feature/not-started"] and not failed

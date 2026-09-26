@@ -122,6 +122,55 @@ class CacheService:
         tips = self._get_current_branch_tips()
         return None if tips is None else set(tips)
 
+    def _main_tip(self, main_branch: str) -> str | None:
+        """Current tip of main (local head, else the remote-tracking ref), or None."""
+        try:
+            repo = git.Repo(self.repo_path)
+            try:
+                rev = self.ref_resolver.resolve(main_branch, repo)
+                return repo.commit(rev).hexsha
+            finally:
+                repo.close()
+        except (*GIT_ERRORS, ValueError) as e:
+            logger.debug(f"Could not resolve main tip for cache: {e}")
+            return None
+
+    def _main_still_contains(self, cache_data: dict, main_branch: str) -> bool:
+        """Whether cached MERGED verdicts can still hold against the current main.
+
+        Every stable row is a "merged into main" verdict, and it is only as good as
+        the main it was made against. Main moving forward keeps it true, so the cache
+        survives ordinary commits. A different main branch, or a main rewritten so the
+        cached tip is no longer an ancestor (force-push dropping a squash commit),
+        invalidates every verdict at once. Caches without a recorded tip predate this
+        check and are only held to the branch-name comparison.
+        """
+        if cache_data.get("main_branch") != main_branch:
+            logger.debug(
+                f"Cache was built against '{cache_data.get('main_branch')}', not "
+                f"'{main_branch}' - ignoring it"
+            )
+            return False
+        cached_tip = cache_data.get("main_tip_sha")
+        if not cached_tip:
+            return True
+        current_tip = self._main_tip(main_branch)
+        if current_tip is None:
+            return False
+        if cached_tip == current_tip:
+            return True
+        try:
+            repo = git.Repo(self.repo_path)
+            try:
+                if repo.is_ancestor(repo.commit(cached_tip), repo.commit(current_tip)):
+                    return True
+            finally:
+                repo.close()
+        except (*GIT_ERRORS, ValueError) as e:
+            logger.debug(f"Could not compare cached main tip: {e}")
+        logger.debug(f"'{main_branch}' was rewritten since caching - ignoring cache")
+        return False
+
     def _branches_reachable_from(self, main_branch: str) -> set[str] | None:
         """Return local branches whose tip is currently reachable from main_branch.
 
@@ -189,8 +238,12 @@ class CacheService:
             logger.warning(f"Error validating cache: {e}")
             return False
 
-    def load_cache(self) -> dict[str, dict]:
+    def load_cache(self, main_branch: str | None = None) -> dict[str, dict]:
         """Load cached branch data from disk with file locking and validation.
+
+        When main_branch is given, the cache is discarded if its merge verdicts no
+        longer apply to that main (see :meth:`_main_still_contains`). Callers that
+        make analysis or deletion decisions must pass it.
 
         Returns:
             Dictionary mapping branch names to cached branch details
@@ -207,6 +260,8 @@ class CacheService:
             # Validate cache data
             if not self._validate_cache_data(cache_data):
                 logger.warning("Cache validation failed, ignoring cache")
+                return {}
+            if main_branch is not None and not self._main_still_contains(cache_data, main_branch):
                 return {}
 
             logger.debug(f"Loaded cache with {len(cache_data.get('branches', {}))} branches")
@@ -231,7 +286,8 @@ class CacheService:
         """
         try:
             # Load existing cache to preserve data for branches that still exist locally.
-            existing_cache = self.load_cache()
+            # Entries made against a different or rewritten main are dropped here too.
+            existing_cache = self.load_cache(main_branch)
 
             branch_states = self._get_current_branch_states()
             current_local_branches = None if branch_states is None else set(branch_states)
@@ -270,6 +326,7 @@ class CacheService:
             cache_data = {
                 "repo_path": str(self.repo_path),
                 "main_branch": main_branch,
+                "main_tip_sha": self._main_tip(main_branch),
                 "last_updated": datetime.now(UTC).isoformat(),
                 "branches": existing_cache,
             }
@@ -476,7 +533,7 @@ class CacheService:
             List of branch names that need to be refreshed
         """
         if cache is None:
-            cache = self.load_cache()
+            cache = self.load_cache(main_branch)
         # None means the repo could not be read; then nothing can be validated, so
         # every cached entry has to be treated as stale.
         branch_states: dict[str, BranchRefState] | None = None

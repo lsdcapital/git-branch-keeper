@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from git_branch_keeper.formatters import format_deletion_reason
 from git_branch_keeper.models.branch import BranchAnalysisResult, BranchDetails, BranchStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
+from git_branch_keeper.utils.patterns import is_protected_name
 
 if TYPE_CHECKING:
     from git_branch_keeper.core import BranchKeeper
@@ -148,11 +149,11 @@ def _branch_deletion_blockers(
                 ),
             )
         )
-    if branch.name in protected_branches:
+    if is_protected_name(branch.name, protected_branches):
         blockers.append(
             _blocker(
                 "PROTECTED_BRANCH",
-                "Branch name is listed in protected_branches configuration.",
+                "Branch name matches an entry in the protected_branches configuration.",
             )
         )
     if _has_uncommitted_changes(branch):
@@ -484,10 +485,39 @@ def _summary(analysis: BranchAnalysisResult, protected_branches: list[str]) -> d
         "stale": sum(1 for branch in branch_rows if branch.status == BranchStatus.STALE),
         "merged": sum(1 for branch in branch_rows if branch.status == BranchStatus.MERGED),
         "unstarted": sum(1 for branch in branch_rows if branch.status == BranchStatus.UNSTARTED),
-        "protected": sum(1 for branch in branch_rows if branch.name in protected_branches),
+        "protected": sum(
+            1 for branch in branch_rows if is_protected_name(branch.name, protected_branches)
+        ),
         "deletable_branches": len(analysis.deletable_branches),
         "removable_worktrees": len(analysis.removable_worktrees),
     }
+
+
+def _leased_delete_commands(
+    branch: BranchDetails, delete_remote: bool, remote_name: str
+) -> list[dict[str, Any]]:
+    """Delete commands pinned to the analysed tip, as GBK's own deletion is.
+
+    An agent may run these long after the scan. `git branch -D` and a bare
+    `git push --delete` act on whatever the tip is by then, discarding commits that
+    arrived since; both forms here fail instead. Without a recorded tip, fall back
+    to `git branch -d` (git verifies reachability, so it may refuse a squash-merged
+    branch) and emit no remote command at all.
+    """
+    ref = f"refs/heads/{branch.name}"
+    sha = branch.tip_sha
+    commands = []
+    if branch.has_local:
+        if sha:
+            commands.append(_command(["git", "update-ref", "-d", ref, sha]))
+        else:
+            commands.append(_command(["git", "branch", "-d", branch.name]))
+    wants_remote = branch.has_remote and (not branch.has_local or delete_remote)
+    if wants_remote and sha:
+        commands.append(
+            _command(["git", "push", f"--force-with-lease={ref}:{sha}", remote_name, f":{ref}"])
+        )
+    return commands
 
 
 def _recommended_actions(
@@ -505,18 +535,11 @@ def _recommended_actions(
             continue
 
         reason = format_deletion_reason(branch.status)
-        if not branch.has_local:
-            commands = [_command(["git", "push", remote_name, "--delete", branch.name])]
-        else:
-            # GBK deletes local refs with force after its own validation because
-            # branches can be merged by PR, rebase, cherry-pick, or squash without
-            # satisfying `git branch -d` reachability checks.
-            commands = [_command(["git", "branch", "-D", branch.name])]
-        if branch.has_local and delete_remote and branch.has_remote:
-            commands.append(_command(["git", "push", remote_name, "--delete", branch.name]))
+        commands = _leased_delete_commands(branch, delete_remote, remote_name)
 
         actions.append(
             {
+                "expected_sha": branch.tip_sha,
                 "type": (
                     "delete_remote_branch"
                     if not branch.has_local

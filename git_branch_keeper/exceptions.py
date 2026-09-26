@@ -82,3 +82,11 @@ class DetachedHeadError(GitOperationError):
 
     def __init__(self):
         super().__init__("check_state", message="Repository is in detached HEAD state")
+
+
+class BranchMovedError(GitBranchKeeperError):
+    """The branch tip is no longer the one that was validated for deletion.
+
+    Raised through `GitOperations.delete_branch`'s fail-closed handler so the caller
+    can report *why* the branch was kept, rather than a generic failure.
+    """

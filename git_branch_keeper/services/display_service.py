@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import git
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from git_branch_keeper.constants import CLI_COLORS, COLUMNS
 from git_branch_keeper.formatters import (
@@ -103,10 +104,10 @@ class DisplayService:
                 last_commit_date,
                 str(branch.age_days),
                 changes_indicator,
-                branch.sync_status,
+                Text(branch.sync_status or ""),
                 location,
                 pr_display,
-                branch.notes if branch.notes else "",
+                Text(branch.notes or ""),
                 style=row_style,
             )
 

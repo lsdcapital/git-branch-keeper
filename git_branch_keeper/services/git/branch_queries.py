@@ -14,6 +14,7 @@ from git_branch_keeper.models.branch import SyncStatus
 from git_branch_keeper.services.git.refs import BranchRefResolver
 from git_branch_keeper.services.git.worktrees import WorktreeService
 from git_branch_keeper.utils.logging import get_logger
+from git_branch_keeper.utils.patterns import is_protected_name
 
 if TYPE_CHECKING:
     from git_branch_keeper.config import Config
@@ -108,41 +109,12 @@ class BranchQueries:
         try:
             repo = self._get_repo()
 
-            # Main branch cannot be merged into itself - skip merge checks
-            if branch_name == main_branch:
-                if not self.has_remote_branch(branch_name):
-                    return SyncStatus.LOCAL_ONLY.value
-
-                # For main branch, just check sync status with remote
-                ahead = list(repo.iter_commits(f"{self.remote_name}/{branch_name}..{branch_name}"))
-                behind = list(repo.iter_commits(f"{branch_name}..{self.remote_name}/{branch_name}"))
-
-                if ahead and behind:
-                    return SyncStatus.DIVERGED.value
-                elif ahead:
-                    return f"ahead {len(ahead)}"
-                elif behind:
-                    return f"behind {len(behind)}"
-                else:
-                    return SyncStatus.SYNCED.value
-
-            # Skip merge checks for protected branches
-            if branch_name in self.config.get("protected_branches", ["main", "master"]):
-                if not self.has_remote_branch(branch_name):
-                    return SyncStatus.LOCAL_ONLY.value
-
-                # For protected branches, just check sync status
-                ahead = list(repo.iter_commits(f"{self.remote_name}/{branch_name}..{branch_name}"))
-                behind = list(repo.iter_commits(f"{branch_name}..{self.remote_name}/{branch_name}"))
-
-                if ahead and behind:
-                    return SyncStatus.DIVERGED.value
-                elif ahead:
-                    return f"ahead {len(ahead)}"
-                elif behind:
-                    return f"behind {len(behind)}"
-                else:
-                    return SyncStatus.SYNCED.value
+            # Main and protected branches are never merge candidates - only report
+            # how they compare with the remote. Main cannot be merged into itself.
+            if branch_name == main_branch or is_protected_name(
+                branch_name, self.config.get("protected_branches", ["main", "master"])
+            ):
+                return self._remote_sync_status(repo, branch_name)
 
             # Never committed to: report that, rather than the merged-git the
             # reachability check would produce. Must precede the merge check for the
@@ -154,31 +126,35 @@ class BranchQueries:
             if self.merge_detector.is_branch_merged(branch_name, main_branch):
                 return SyncStatus.MERGED_GIT.value
 
-            # Check if branch exists on remote
-            if not self.has_remote_branch(branch_name):
-                return SyncStatus.LOCAL_ONLY.value
-
-            # The mirror image: on the remote with no local head. There is nothing to
-            # compare against, so return before the ahead/behind revs below - they
-            # would name a local ref that does not exist.
-            if not self.refs.has_local(branch_name, repo):
-                return SyncStatus.REMOTE_ONLY.value
-
-            # Check ahead/behind status
-            ahead = list(repo.iter_commits(f"{self.remote_name}/{branch_name}..{branch_name}"))
-            behind = list(repo.iter_commits(f"{branch_name}..{self.remote_name}/{branch_name}"))
-
-            if ahead and behind:
-                return SyncStatus.DIVERGED.value
-            elif ahead:
-                return f"ahead {len(ahead)}"
-            elif behind:
-                return f"behind {len(behind)}"
-            else:
-                return SyncStatus.SYNCED.value
+            return self._remote_sync_status(repo, branch_name)
         except GIT_ERRORS as e:
             logger.debug(f"Error checking sync status for {branch_name}: {e}")
             return SyncStatus.LOCAL_ONLY.value  # Return local-only instead of unknown for better UX
+
+    def _remote_sync_status(self, repo, branch_name: str) -> str:
+        """Local-only, remote-only, or ahead/behind between the local and remote refs.
+
+        Location is checked first: the ahead/behind revs name both refs, and with one
+        missing git fails - which the caller's GIT_ERRORS handler used to turn into a
+        plausible-looking LOCAL_ONLY for an origin-only `develop`.
+        """
+        if not self.has_remote_branch(branch_name):
+            return SyncStatus.LOCAL_ONLY.value
+        if not self.refs.has_local(branch_name, repo):
+            return SyncStatus.REMOTE_ONLY.value
+
+        remote_ref = f"{self.remote_name}/{branch_name}"
+        ahead = list(repo.iter_commits(f"{remote_ref}..{branch_name}"))
+        behind = list(repo.iter_commits(f"{branch_name}..{remote_ref}"))
+
+        if ahead and behind:
+            return SyncStatus.DIVERGED.value
+        elif ahead:
+            return f"ahead {len(ahead)}"
+        elif behind:
+            return f"behind {len(behind)}"
+        else:
+            return SyncStatus.SYNCED.value
 
     def get_last_commit_at(self, branch_name: str) -> str:
         """Get the full timestamp of the last commit on a branch."""
@@ -520,11 +496,16 @@ class BranchQueries:
         try:
             repo = self._get_repo()
 
-            # Find merge commit in main branch
+            # Find merge commit in main branch. The name is escaped (it is a regex
+            # otherwise: `.` and `+` are legal in branch names) and must end the
+            # token, and the GitHub owner is a single path segment - an unanchored
+            # `from .*/x` also matched PRs from `org/feature/x` and `org/x-2`.
+            name = re.escape(branch_name)
+            end = r"(?=\s|$)"
             merge_patterns = [
-                f"Merge branch '{branch_name}'",
-                f"Merge pull request .* from .*/{branch_name}",
-                f"Merge pull request .* from .*:{branch_name}",
+                rf"^Merge branch '{name}'",
+                rf"^Merge pull request #\d+ from [^/\s]+/{name}{end}",
+                rf"^Merge pull request #\d+ from [^:\s]+:{name}{end}",
             ]
 
             for commit in repo.iter_commits(main_branch, max_count=200):
@@ -534,8 +515,9 @@ class BranchQueries:
                     else commit.message.decode("utf-8", errors="ignore")
                 )
 
+                subject = message.strip().split("\n")[0]
                 for pattern in merge_patterns:
-                    if re.search(pattern, message):
+                    if re.search(pattern, subject):
                         return {
                             "found": True,
                             "merge_sha": commit.hexsha[:7],

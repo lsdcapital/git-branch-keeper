@@ -4,6 +4,9 @@ import json
 import sys
 from pathlib import Path
 
+import git
+import pytest
+
 from git_branch_keeper.cli.main import main
 from git_branch_keeper.core import BranchKeeper
 from git_branch_keeper.formatters.json_output import (
@@ -104,6 +107,7 @@ def test_merged_remote_only_json_action_requires_remote_flag():
         has_remote=True,
         has_local=False,
         sync_status="remote-only",
+        tip_sha="a" * 40,
     )
     analysis = BranchAnalysisResult(
         branches=[branch],
@@ -120,6 +124,7 @@ def test_merged_remote_only_json_action_requires_remote_flag():
     assert _deletion_scope(branch, delete_remote=True) == "remote-only"
     assert actions == [
         {
+            "expected_sha": "a" * 40,
             "type": "delete_remote_branch",
             "branch": "feature/remote-only",
             "reason": "merged",
@@ -131,11 +136,13 @@ def test_merged_remote_only_json_action_requires_remote_flag():
                     "argv": [
                         "git",
                         "push",
+                        "--force-with-lease=refs/heads/feature/remote-only:" + "a" * 40,
                         "upstream",
-                        "--delete",
-                        "feature/remote-only",
+                        ":refs/heads/feature/remote-only",
                     ],
-                    "shell": "git push upstream --delete feature/remote-only",
+                    "shell": "git push --force-with-lease=refs/heads/feature/remote-only:"
+                    + "a" * 40
+                    + " upstream :refs/heads/feature/remote-only",
                 }
             ],
         }
@@ -213,3 +220,47 @@ def test_unsupported_json_command_returns_json_error(monkeypatch, capsys):
 
     assert payload["ok"] is False
     assert payload["error"]["code"] == "JSON_UNSUPPORTED_FOR_COMMAND"
+
+
+def test_json_local_delete_commands_are_leased_and_work(git_repo):
+    """Commands run later must fail if the branch moved, and succeed if it did not."""
+    git_repo.git.checkout("-b", "feature/x")
+    git_repo.git.commit("--allow-empty", "-m", "work")
+    git_repo.git.push("origin", "feature/x")
+    git_repo.git.checkout("main")
+    tip = git_repo.heads["feature/x"].commit.hexsha
+    branch = BranchDetails(
+        name="feature/x",
+        last_commit_date="2024-01-01",
+        age_days=10,
+        status=BranchStatus.STALE,
+        modified_files=False,
+        untracked_files=False,
+        staged_files=False,
+        has_remote=True,
+        has_local=True,
+        sync_status="synced",
+        tip_sha=tip,
+    )
+    analysis = BranchAnalysisResult(branches=[branch], deletable_branches=[branch])
+    [action] = _recommended_actions(analysis, delete_remote=True, remote_name="origin")
+    shells = [c["shell"] for c in action["commands"]]
+    assert all("branch -D" not in c and "--delete" not in c for c in shells)
+
+    git_repo.git.checkout("feature/x")
+    git_repo.git.commit("--allow-empty", "-m", "arrived after the scan")
+    git_repo.git.push("origin", "feature/x")
+    git_repo.git.checkout("main")
+    for command in action["commands"]:
+        with pytest.raises(git.exc.GitCommandError):
+            git_repo.git.execute(command["argv"])
+    assert "feature/x" in [h.name for h in git_repo.heads]
+    assert "origin/feature/x" in [r.name for r in git_repo.remote().refs]
+
+    git_repo.git.update_ref("refs/heads/feature/x", tip)
+    git_repo.git.push("origin", "+feature/x")
+    for command in action["commands"]:
+        git_repo.git.execute(command["argv"])
+    git_repo.git.fetch("--prune")
+    assert "feature/x" not in [h.name for h in git_repo.heads]
+    assert "origin/feature/x" not in [r.name for r in git_repo.remote().refs]

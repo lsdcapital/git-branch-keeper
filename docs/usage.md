@@ -24,7 +24,7 @@ git-branch-keeper [OPTIONS]
 - `--dry-run` - Preview cleanup candidates without deleting or prompting
 - `--remote` - Enable remote deletion for matching remotes and positively merged remote-only branches (default: all remote refs are kept)
 - `--no-remote-branches` - Only analyze branches that exist locally (default: remote-only branches are analyzed and shown)
-- `--force` - Delete without confirmation (legacy behavior: also implies `--delete`; use with caution!)
+- `--force` - Delete without confirmation (legacy behavior: also implies `--delete`; use with caution!). It skips the prompt only: branches and worktrees with uncommitted changes are still skipped
 - `--refresh` - Fetch/prune the selected remote, bypass cache, and refresh all data
 
 **Subcommands:**
@@ -169,6 +169,7 @@ The tool automatically protects:
 - ✅ Current branch you're on
 - ✅ Branches checked out in any other worktree, including the main working tree
 - ✅ The worktree GBK is running in (never removed, even with `--force`)
+- ✅ Worktrees and branches with uncommitted changes (CLI `--force` included; only a per-row TUI force-mark overrides this)
 - ✅ Remote-only branches unless positively confirmed merged (stale alone is not enough)
 
 You can run GBK from inside a linked worktree. It protects whatever the *other*

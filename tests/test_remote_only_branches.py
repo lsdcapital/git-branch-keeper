@@ -469,6 +469,7 @@ def test_delete_boundary_accepts_live_merged_pr_proof_for_remote_only_branch(
                 "merged": True,
                 "closed": False,
                 "head_sha": head_sha,
+                "base_ref": "main",
             }
         }
     )
@@ -1043,3 +1044,64 @@ def test_remote_deletion_lease_protects_changes_during_merge_verification(repo_w
     with git.Repo(Path(path).parent / "origin.git") as bare:
         assert bare.heads["feat/race"].commit.hexsha == replacement
     assert not keeper.git_service.deletion_journal.deletions()
+
+
+# --- local + remote deletion when the push is rejected ---------------------
+
+
+def _reject_deletes_on_origin(path: str) -> None:
+    """Install a pre-receive hook on the bare origin that rejects every push."""
+    hook = Path(path).parent / "origin.git" / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'rejected by policy hook' >&2\nexit 1\n")
+    hook.chmod(0o755)
+
+
+@pytest.mark.parametrize("branch", ["feature/protected-routes", "feature/plain"])
+def test_rejected_remote_push_is_partial_success_not_failure(repo_with_remote, branch, capsys):
+    """The local branch is gone once the push runs, so a rejection is partial success.
+
+    Previously a branch *named* like `protected` matched the "protected branch"
+    heuristic on str(e) (which includes the command line), and any other name
+    re-raised, returning False after the local branch had already been deleted.
+    """
+    path, repo = repo_with_remote
+    repo.git.checkout("-b", branch)
+    _commit(repo, path, "f.md", "feature", BODY)
+    repo.git.push("origin", branch)
+    repo.git.checkout("main")
+    repo.git.merge(branch)  # fast-forward: positively merged
+    repo.git.push("origin", "main")
+    _reject_deletes_on_origin(path)
+    keeper = _keeper(path, {"delete_remote": True, "dry_run": False})
+
+    assert keeper.git_service.delete_branch(branch, delete_remote=True) is True
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert "rejected by policy hook" in out
+    assert "is protected" not in out
+    assert branch not in [h.name for h in repo.heads]
+    assert f"origin/{branch}" in [r.name for r in repo.remote("origin").refs]
+    entry = keeper.git_service.deletion_journal.deletions()[-1]
+    assert entry["branch"] == branch
+    assert entry["remote_deleted"] is False
+
+
+@pytest.mark.parametrize("branch", ["develop", "main"])
+def test_remote_only_protected_branch_reports_remote_only(repo_with_remote, branch):
+    """Protected and main branches used to be compared as `origin/X..X` unconditionally.
+
+    With no local head that is a bad revision; GIT_ERRORS swallowed it and the row
+    was labeled LOCAL_ONLY - the opposite of where the branch actually lives.
+    """
+    path, repo = repo_with_remote
+    if branch == "main":
+        repo.git.checkout("-b", "work")
+        repo.git.branch("-D", "main")
+    else:
+        repo.git.branch(branch)
+        _push_and_drop_local(repo, branch)
+    keeper = _keeper(path, {"protected_branches": ["main", "develop"]})
+
+    status = keeper.git_service.get_branch_sync_status(branch, "main")
+
+    assert status == SyncStatus.REMOTE_ONLY.value

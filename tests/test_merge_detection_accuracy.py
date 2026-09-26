@@ -152,3 +152,23 @@ class TestMergeStyles:
         r.git.cherry_pick("feature/x~1")  # only the first commit
         md = _detector(path)
         assert md.is_branch_merged("feature/x", "main") is False
+
+    def test_whitespace_only_commit_after_squash_is_not_merged(self, repo):
+        """A re-indent after a squash-merge is unmerged work, not noise.
+
+        In Python (or YAML, or a Makefile) indentation is behavior: moving `b()` into
+        the `if` block changes what runs. The combined diff must not drop it, or the
+        branch exact-matches the squash commit and becomes deletable.
+        """
+        r, path = repo
+        r.git.checkout("-b", "feature/x")
+        _commit(r, path, "m.py", "def f(x):\n    if x:\n        a()\n    b()\n", "c1")
+        _commit(r, path, "n.txt", "n\n" * 15, "c2")
+        r.git.checkout("main")
+        r.git.merge("feature/x", "--squash")
+        r.git.commit("-m", "squashed (#3)")
+        r.git.checkout("feature/x")
+        _commit(r, path, "m.py", "def f(x):\n    if x:\n        a()\n        b()\n", "reindent")
+        r.git.checkout("main")
+        md = _detector(path)
+        assert md.is_branch_merged("feature/x", "main") is False

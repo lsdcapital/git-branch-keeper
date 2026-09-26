@@ -275,3 +275,56 @@ def test_stale_unmerged_branch_still_deletes(git_repo):
     success, error = keeper.delete_branch("feature/abandoned", "stale")
     assert success is True, error
     assert "feature/abandoned" not in [h.name for h in repo.heads]
+
+
+def _abandoned_branch(repo) -> None:
+    repo_path = Path(repo.working_dir)
+    repo.git.checkout("-b", "feature/abandoned")
+    (repo_path / "abandoned.txt").write_text("never merged\n")
+    repo.index.add(["abandoned.txt"])
+    repo.index.commit("Abandoned work")
+    repo.git.checkout("main")
+
+
+def test_stale_delete_keeps_commit_that_lands_during_the_checks(git_repo, monkeypatch):
+    """A commit arriving while delete_branch probes status must not be force-deleted.
+
+    Stale branches get no live merge re-check, and `git branch -D` deletes whatever
+    the tip is when it runs, so the delete is leased to the tip validated up front.
+    """
+    repo = git_repo
+    _abandoned_branch(repo)
+    keeper = _keeper(repo)
+    real_probe = keeper.git_service.get_branch_status_details
+    landed = {}
+
+    def probe_while_someone_commits(name):
+        result = real_probe(name)
+        tree = repo.heads["feature/abandoned"].commit.tree.hexsha
+        parent = repo.heads["feature/abandoned"].commit.hexsha
+        landed["sha"] = repo.git.commit_tree(tree, "-p", parent, "-m", "late work")
+        repo.git.update_ref("refs/heads/feature/abandoned", landed["sha"])
+        return result
+
+    monkeypatch.setattr(
+        keeper.git_service, "get_branch_status_details", probe_while_someone_commits
+    )
+
+    success, error = keeper.delete_branch("feature/abandoned", "stale")
+
+    assert success is False
+    assert "changed" in error or "moved" in error
+    assert repo.heads["feature/abandoned"].commit.hexsha == landed["sha"]
+
+
+def test_force_delete_removes_upstream_config_like_branch_D(git_repo):
+    repo = git_repo
+    _abandoned_branch(repo)
+    repo.git.config("branch.feature/abandoned.remote", "origin")
+    repo.git.config("branch.feature/abandoned.merge", "refs/heads/feature/abandoned")
+
+    success, error = _keeper(repo).delete_branch("feature/abandoned", "stale")
+
+    assert success is True, error
+    assert "feature/abandoned" not in [h.name for h in repo.heads]
+    assert "branch.feature/abandoned" not in repo.git.config("--list")

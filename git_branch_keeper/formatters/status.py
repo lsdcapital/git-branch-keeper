@@ -2,6 +2,7 @@
 
 from git_branch_keeper.constants import STATUS_DISPLAY, BranchStyleType
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.utils.patterns import is_protected_name
 
 
 def format_status(status: BranchStatus) -> str:
@@ -31,7 +32,7 @@ def has_cleanup_blockers(
     if branch.status not in [BranchStatus.STALE, BranchStatus.MERGED]:
         return False
 
-    if branch.name in protected_branches:
+    if is_protected_name(branch.name, protected_branches):
         return True
 
     if not branch.has_local and not (branch.has_remote and branch.status == BranchStatus.MERGED):
@@ -67,7 +68,7 @@ def format_cleanup_reason(
     """Explain eligibility without hiding the branch's merge/stale status."""
     from git_branch_keeper.services.branch_validation_service import BranchValidationService
 
-    if branch.name in protected_branches:
+    if is_protected_name(branch.name, protected_branches):
         return "protected"
     if branch.name == current_branch and not branch.is_worktree:
         return "currently checked out"
@@ -100,9 +101,17 @@ def format_deletion_reason(status: BranchStatus) -> str:
         status: Branch status enum value
 
     Returns:
-        Deletion reason string ("stale" or "merged")
+        Deletion reason string ("stale", "unstarted" or "merged")
+
+    UNSTARTED must not become "merged": an unstarted tip is trivially reachable from
+    main, so the deletion-time merge re-check would pass and the journal would record
+    a merge that never happened.
     """
-    return "stale" if status == BranchStatus.STALE else "merged"
+    if status == BranchStatus.STALE:
+        return "stale"
+    if status == BranchStatus.UNSTARTED:
+        return "unstarted"
+    return "merged"
 
 
 def format_deletion_confirmation_items(
@@ -151,7 +160,7 @@ def get_branch_style_type(
     Returns:
         BranchStyleType constant
     """
-    if branch.name in protected_branches:
+    if is_protected_name(branch.name, protected_branches):
         return BranchStyleType.PROTECTED
 
     if branch.status in [BranchStatus.STALE, BranchStatus.MERGED]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
+from git_branch_keeper.utils.patterns import is_protected_name
 
 
 class BranchValidationService:
@@ -35,7 +36,7 @@ class BranchValidationService:
                 allow_remote_deletion
                 and branch.has_remote
                 and branch.status == BranchStatus.MERGED
-                and branch.name not in protected_branches
+                and not is_protected_name(branch.name, protected_branches)
             )
 
         # Check if branch has issues preventing deletion
@@ -48,7 +49,7 @@ class BranchValidationService:
 
         return (
             branch.status in [BranchStatus.STALE, BranchStatus.MERGED]
-            and branch.name not in protected_branches
+            and not is_protected_name(branch.name, protected_branches)
             and not has_uncommitted
             and not is_in_worktree
         )
@@ -77,7 +78,7 @@ class BranchValidationService:
             return "remote-only and not confirmed merged"
         if not branch.has_local and not allow_remote_deletion:
             return "remote deletion is disabled"
-        if branch.name in protected_branches:
+        if is_protected_name(branch.name, protected_branches):
             return "protected"
         if current_branch is not None and branch.name == current_branch:
             return "currently checked out"
@@ -128,7 +129,7 @@ class BranchValidationService:
         Returns:
             True if branch is protected
         """
-        return branch_name in protected_branches
+        return is_protected_name(branch_name, protected_branches)
 
     @staticmethod
     def is_worktree_removable(branch: BranchDetails) -> bool:

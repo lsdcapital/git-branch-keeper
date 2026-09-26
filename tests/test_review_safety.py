@@ -79,7 +79,10 @@ def test_remote_race_rejected_by_lease(local_remote, monkeypatch):
         return result
 
     monkeypatch.setattr(ops, "get_live_remote_branch_sha", advance_after_check)
-    assert not ops.delete_branch("feature", delete_remote=True)
+    # The lease protects the advanced remote. The local branch is already gone by
+    # then, so the call reports that (partial) success rather than a failure.
+    assert ops.delete_branch("feature", delete_remote=True)
+    assert "feature" not in repo.heads
     assert "feature" in remote.heads
     entry = ops.deletion_journal.deletions()[-1]
     assert entry["remote_deleted"] is False
@@ -91,8 +94,12 @@ def test_unmerged_matching_remote_preserved(local_remote):
     repo.git.commit("--allow-empty", "-m", "unmerged")
     repo.remote().push("feature:feature")
     repo.heads.main.checkout()
-    assert not ops.delete_branch("feature", delete_remote=True)
-    assert "feature" in repo.heads and "feature" in remote.heads
+    # Without merge proof the remote is never deleted. The local delete (which the
+    # caller already validated, e.g. as stale) still happens rather than being
+    # refused wholesale.
+    assert ops.delete_branch("feature", delete_remote=True)
+    assert "feature" not in repo.heads and "feature" in remote.heads
+    assert ops.deletion_journal.deletions()[-1]["remote_deleted"] is False
 
 
 def test_config_precedence_and_cli_protection(monkeypatch, tmp_path):

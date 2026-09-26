@@ -7,6 +7,7 @@ test coverage at all.
 """
 
 import pytest
+from textual.widgets import Static
 
 from git_branch_keeper.config import Config
 from git_branch_keeper.core import BranchKeeper
@@ -144,6 +145,50 @@ class TestMarkWithHierarchy:
         assert app.marked_branches == set()
 
 
+class TestOnlyCleanupCandidatesAreMarkable:
+    """Space on a non-candidate used to mark it; confirm then dropped the branch but
+    still removed its worktree - with any ignored files such as .env."""
+
+    @pytest.mark.parametrize("status", [BranchStatus.ACTIVE, BranchStatus.UNSTARTED])
+    def test_normal_mark_rejects_non_candidates(self, app, status):
+        app.branches = [
+            _branch("feature/live", status=status, in_worktree=True, worktree_path="/tmp/live"),
+            _branch("feature/live", status=status, is_worktree=True, worktree_path="/tmp/live"),
+        ]
+        ok, err = app._mark_with_hierarchy("feature/live", app.marked_branches)
+        assert ok is False
+        assert "stale or merged" in err
+        assert app.marked_branches == set()
+
+    def test_confirm_never_removes_worktree_of_active_branch(self, app, monkeypatch):
+        app.branches = [
+            _branch(
+                "feature/live",
+                status=BranchStatus.ACTIVE,
+                in_worktree=True,
+                worktree_path="/tmp/live",
+            ),
+            _branch(
+                "feature/live",
+                status=BranchStatus.ACTIVE,
+                is_worktree=True,
+                worktree_path="/tmp/live",
+            ),
+        ]
+        app.marked_branches.add("feature/live")  # e.g. a mark that predates a refresh
+        captured = {}
+        monkeypatch.setattr(app, "_set_refreshing", lambda *a, **k: None)
+        monkeypatch.setattr(
+            app, "delete_marked_items", lambda *args: captured.setdefault("args", args)
+        )
+
+        app._handle_delete_confirmation(True)
+
+        if "args" in captured:
+            _, _, normal_branches, normal_worktrees, _ = captured["args"]
+            assert normal_worktrees == [] and normal_branches == []
+
+
 class TestWorktreeCleanupPlanning:
     def test_clean_worktree_removal_unblocks_parent_branch_deletion(self, app):
         parent = _branch("feature/wt", in_worktree=True, worktree_path="/tmp/wt")
@@ -223,6 +268,88 @@ class TestInfoDeletionBlockers:
         assert "Branch is checked out in worktree: /tmp/feature-wt" in blockers
         assert "Worktree/branch has modified files" in blockers
         assert "Worktree/branch has untracked files" in blockers
+
+
+HOSTILE = [
+    "[@click=app.delete_marked]CLICK ME[/]",  # would render a link that runs an action
+    're.split(r"[/\\]", p)',  # `[/]` closing nothing crashed the whole TUI
+    "chore: [skip ci] bump",  # a valid-looking tag silently vanished
+    "trailing backslash \\",  # defeats string escaping: escapes the next closing tag
+]
+
+
+class TestInfoScreenRendersUntrustedTextLiterally:
+    """Commit messages, diffs, file contents, paths and notes are data, never markup."""
+
+    @pytest.fixture
+    def screen(self, app, monkeypatch):
+        git = app.keeper.git_service
+        commits = [
+            {"sha": "abc1234", "date": "2024-01-01", "author": h, "message": h} for h in HOSTILE
+        ]
+        monkeypatch.setattr(git, "get_branch_commits", lambda *a, **k: commits)
+        monkeypatch.setattr(
+            git,
+            "get_divergence_info",
+            lambda *a, **k: {
+                "ahead": 4,
+                "behind": 0,
+                "ahead_commits": commits,
+                "behind_commits": [],
+            },
+        )
+        monkeypatch.setattr(git, "get_diff", lambda **k: "\n".join(HOSTILE))
+        monkeypatch.setattr(
+            git,
+            "get_file_status_detailed",
+            lambda **k: {"staged": HOSTILE, "modified": [], "untracked": []},
+        )
+        monkeypatch.setattr(
+            git,
+            "get_merge_details",
+            lambda *a: {
+                "found": True,
+                "merge_sha": "abc1234",
+                "merge_message": HOSTILE[0],
+                "merge_author": HOSTILE[3],
+                "merge_date": "2024-01-01",
+            },
+        )
+        branch = _branch("feature/x", modified=True)
+        branch.notes = "[ERROR] " + " ".join(HOSTILE)
+        return TabbedInfoScreen(branch, app.keeper, "main")
+
+    @pytest.mark.parametrize(
+        "builder",
+        [
+            "_build_info_tab",
+            "_build_files_tab",
+            "_build_diff_tab",
+            "_build_merge_tab",
+            "_build_commits_tab",
+            "_build_divergence_tab",
+            "_build_history_tab",
+        ],
+    )
+    def test_tab_keeps_hostile_text_verbatim(self, screen, builder):
+        widget = getattr(screen, builder)()
+        # Tabs other than Info wrap their Static in an unmounted ScrollableContainer.
+        static = widget if isinstance(widget, Static) else widget._pending_children[0]
+        content = static.content
+
+        expected = [HOSTILE[0], HOSTILE[3]] if builder == "_build_merge_tab" else HOSTILE
+        for text in expected:
+            assert text in content.plain, f"{builder} altered {text!r}"
+        assert not any("click" in str(span.style) for span in content.spans)
+
+    def test_error_label_still_styled(self, screen):
+        content = screen._build_info_tab().content
+        assert "ERROR:" in content.plain
+        assert "[ERROR]" not in content.plain
+        start = content.plain.index("ERROR:")
+        assert any(
+            span.start <= start < span.end and "red" in str(span.style) for span in content.spans
+        )
 
 
 class TestUnmark:

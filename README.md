@@ -9,7 +9,7 @@ Works with any Git repository, including GitHub, GitLab, Bitbucket, and local re
 
 ## Install and try it
 
-Requires **Git**, **Python 3.12+**, and [pipx](https://pipx.pypa.io/stable/installation/).
+Requires **Git 2.39+**, **Python 3.12+**, and [pipx](https://pipx.pypa.io/stable/installation/).
 
 ```bash
 pipx install 'git+https://github.com/lsdcapital/git-branch-keeper.git'

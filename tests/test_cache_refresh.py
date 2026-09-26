@@ -390,3 +390,57 @@ def test_cached_merged_file_flags_follow_live_worktree_state(git_repo):
     assert restored.in_worktree is False
     assert restored.worktree_path is None
     assert restored.untracked_files is False
+
+
+class TestCacheIsTiedToMain:
+    """Every stable row is a "merged into main" verdict made against one main."""
+
+    def _merged(self, git_repo):
+        git_repo.git.checkout("-b", "feature/done")
+        git_repo.git.commit("--allow-empty", "-m", "work")
+        git_repo.git.checkout("main")
+        git_repo.git.merge("--no-ff", "feature/done", "-m", "merge")
+        return git_repo.head.commit.hexsha
+
+    def _cache_with_row(self, git_repo, main="main"):
+        from git_branch_keeper.services.cache_service import CacheService
+
+        service = CacheService(git_repo.working_dir)
+        row = BranchDetails(
+            name="feature/done",
+            last_commit_date="2024-01-01",
+            age_days=1,
+            status=BranchStatus.MERGED,
+            modified_files=False,
+            untracked_files=False,
+            staged_files=False,
+            has_remote=False,
+            has_local=True,
+            sync_status=SyncStatus.MERGED_GIT.value,
+        )
+        service.save_cache([row], main)
+        return service
+
+    def test_survives_main_moving_forward(self, git_repo):
+        self._merged(git_repo)
+        service = self._cache_with_row(git_repo)
+        git_repo.git.commit("--allow-empty", "-m", "main advances")
+
+        assert "feature/done" in service.load_cache("main")
+
+    def test_discarded_when_main_is_rewritten(self, git_repo):
+        before_merge = git_repo.head.commit.hexsha
+        self._merged(git_repo)
+        service = self._cache_with_row(git_repo)
+        git_repo.git.reset("--hard", before_merge)  # force-push-style rewrite dropping the merge
+
+        assert service.load_cache("main") == {}
+        assert "feature/done" in service.get_stale_branches(["feature/done"], "main")
+
+    def test_discarded_when_main_branch_changes(self, git_repo):
+        self._merged(git_repo)
+        git_repo.git.branch("develop")
+        service = self._cache_with_row(git_repo)
+
+        assert service.load_cache("develop") == {}
+        assert "feature/done" in service.load_cache("main")

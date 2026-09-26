@@ -64,6 +64,7 @@ class TestBranchStatusDetection:
                 "merged": True,
                 "closed": False,
                 "head_matches_local": True,
+                "base_ref": "main",
             }
         }
 

@@ -96,7 +96,11 @@ def parse_args():
     )
     parser.add_argument("--stale-days", type=int, default=None, help="Days until branch is stale")
     parser.add_argument(
-        "--protected", nargs="*", action="extend", default=None, help="Protected branches"
+        "--protected",
+        nargs="*",
+        action="extend",
+        default=None,
+        help="Protected branch names or glob patterns (e.g. 'release/*')",
     )
     parser.add_argument(
         "--ignore", nargs="*", action="extend", default=None, help="Branch patterns to ignore"

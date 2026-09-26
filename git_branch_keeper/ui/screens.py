@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar
@@ -10,11 +11,12 @@ from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TabbedContent, TabPane
 
 from git_branch_keeper.exceptions import GIT_ERRORS
-from git_branch_keeper.formatters import format_display_status, format_pr_link
+from git_branch_keeper.formatters import format_display_status, format_pr_text
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
 
@@ -31,6 +33,22 @@ def _format_location(branch: BranchDetails) -> str:
     if branch.has_remote and not branch.has_local:
         return "Remote only (deletion requires remote opt-in)"
     return "Yes" if branch.has_remote else "No"
+
+
+def _m(markup: str, **values: object) -> Content:
+    """Render trusted markup, inserting each `$name` value as literal text.
+
+    Commit messages, diffs, file contents, paths and git errors must never be
+    parsed: `[/]` in a diff crashes the screen, and `[@click=app.delete_marked]`
+    in a commit message becomes a link that runs an app action. Escaping the
+    string is not enough - a trailing backslash escapes the *next* closing tag.
+    Textual's variable substitution inserts values outside the parser.
+    """
+    return Content.from_markup(markup, **{name: str(value) for name, value in values.items()})
+
+
+def _join(parts: Iterable[Content]) -> Content:
+    return Content("").join(parts)
 
 
 ScreenResultT = TypeVar("ScreenResultT")
@@ -594,11 +612,9 @@ class TabbedInfoScreen(BaseModal[None]):
         ):
             # Check if there's an error in notes to reference
             if self.branch.notes and "[ERROR]" in self.branch.notes:
-                changes_text = (
-                    "[yellow]Unknown - see [bold]Notes[/bold] below for error details[/yellow]"
-                )
+                changes = _m("[yellow]Unknown - see [bold]Notes[/bold] below for error details[/]")
             else:
-                changes_text = "[yellow]Unknown (could not check)[/yellow]"
+                changes = _m("[yellow]Unknown (could not check)[/yellow]")
         else:
             change_details = []
             if self.branch.modified_files:
@@ -607,29 +623,26 @@ class TabbedInfoScreen(BaseModal[None]):
                 change_details.append("Untracked files")
             if self.branch.staged_files:
                 change_details.append("Staged files")
-            changes_text = ", ".join(change_details) if change_details else "Clean"
+            changes = Content(", ".join(change_details) if change_details else "Clean")
 
-        # Build notes section - highlight errors
-        notes_text = "None"
+        # Build notes section - highlight errors. Notes carry git error text and
+        # worktree paths, so everything around the ERROR label stays literal.
+        notes: Content = Content("None")
         if self.branch.notes:
-            if "[ERROR]" in self.branch.notes:
-                # Highlight errors in red
-                notes_text = self.branch.notes.replace("[ERROR]", "[red][bold]ERROR:[/bold][/red]")
-            else:
-                notes_text = self.branch.notes
+            error_label = _m("[red][bold]ERROR:[/bold][/red]")
+            notes = error_label.join(Content(part) for part in self.branch.notes.split("[ERROR]"))
 
         # Format PR/status display using shared formatters
         github_base_url = self.keeper._get_github_base_url()
-        pr_display = format_pr_link(self.branch.pr_status, github_base_url) or "None"
+        pr_text = format_pr_text(self.branch.pr_status, github_base_url)
+        pr_display = Content.from_rich_text(pr_text) if pr_text.plain else Content("None")
         display_status = format_display_status(
             self.branch,
             self.keeper.protected_branches,
             allow_remote_deletion=self.keeper.remote_deletion_allowed(self.branch),
         )
-        status_lines = f"[bold]Status:[/bold] {display_status}"
 
         worktree_path = self._worktree_path_for_branch()
-        deletion_blockers = self._format_deletion_blockers()
         is_deletable = (
             False
             if self.branch.is_worktree
@@ -639,32 +652,40 @@ class TabbedInfoScreen(BaseModal[None]):
                 allow_remote_deletion=self.keeper.remote_deletion_allowed(self.branch),
             )
         )
+        is_protected = BranchValidationService.is_protected(
+            self.branch.name, self.keeper.protected_branches
+        )
 
-        # Format detailed info
-        info = f"""[bold]Branch:[/bold] {self.branch.name}
-{status_lines}
-[bold]Age:[/bold] {self.branch.age_days} days
-[bold]Last Commit:[/bold] {self.branch.last_commit_date}
-[bold]Branch State:[/bold] {changes_text}
-[bold]Sync:[/bold] {self.branch.sync_status}
-[bold]Remote:[/bold] {_format_location(self.branch)}
-[bold]PRs:[/bold] {pr_display}
-[bold]Notes:[/bold] {notes_text}
-[bold]Protected:[/bold] {"Yes" if BranchValidationService.is_protected(self.branch.name, self.keeper.protected_branches) else "No"}
-[bold]Deletable:[/bold] {"Yes" if is_deletable else "No"}
-[bold]Deletion Blockers:[/bold]
-{deletion_blockers}
-        """.strip()
+        parts = [
+            _m("[bold]Branch:[/bold] $v\n", v=self.branch.name),
+            _m("[bold]Status:[/bold] $v\n", v=display_status),
+            _m("[bold]Age:[/bold] $v days\n", v=self.branch.age_days),
+            _m("[bold]Last Commit:[/bold] $v\n", v=self.branch.last_commit_date),
+            _m("[bold]Branch State:[/bold] "),
+            changes,
+            _m("\n[bold]Sync:[/bold] $v\n", v=self.branch.sync_status),
+            _m("[bold]Remote:[/bold] $v\n", v=_format_location(self.branch)),
+            _m("[bold]PRs:[/bold] "),
+            pr_display,
+            _m("\n[bold]Notes:[/bold] "),
+            notes,
+            _m("\n[bold]Protected:[/bold] $v\n", v="Yes" if is_protected else "No"),
+            _m("[bold]Deletable:[/bold] $v\n", v="Yes" if is_deletable else "No"),
+            _m("[bold]Deletion Blockers:[/bold]\n$v", v=self._format_deletion_blockers()),
+        ]
 
         if self.branch.is_worktree:
-            info += (
-                "\n[bold]Row Type:[/bold] Worktree entry (remove worktree before deleting branch)"
+            parts.append(
+                _m(
+                    "\n[bold]Row Type:[/bold] Worktree entry "
+                    "(remove worktree before deleting branch)"
+                )
             )
 
         if worktree_path:
-            info += f"\n[bold]Worktree Path:[/bold] {worktree_path}"
+            parts.append(_m("\n[bold]Worktree Path:[/bold] $v", v=worktree_path))
 
-        return Static(info, markup=True)
+        return Static(_join(parts))
 
     def _build_files_tab(self) -> ScrollableContainer:
         """Build the files tab showing uncommitted files."""
@@ -678,30 +699,22 @@ class TabbedInfoScreen(BaseModal[None]):
         else:
             file_status = git_service.get_file_status_detailed(branch_name=self.branch.name)
 
-        content = "[bold]Uncommitted Files[/bold]\n\n"
+        parts = [_m("[bold]Uncommitted Files[/bold]\n\n")]
 
-        if file_status.get("staged"):
-            content += "[green bold]Staged files:[/green bold]\n"
-            for f in file_status["staged"]:
-                content += f"  • {f}\n"
-            content += "\n"
-
-        if file_status.get("modified"):
-            content += "[yellow bold]Modified files:[/yellow bold]\n"
-            for f in file_status["modified"]:
-                content += f"  • {f}\n"
-            content += "\n"
-
-        if file_status.get("untracked"):
-            content += "[red bold]Untracked files:[/red bold]\n"
-            for f in file_status["untracked"]:
-                content += f"  • {f}\n"
-            content += "\n"
+        for key, heading in (
+            ("staged", "[green bold]Staged files:[/green bold]\n"),
+            ("modified", "[yellow bold]Modified files:[/yellow bold]\n"),
+            ("untracked", "[red bold]Untracked files:[/red bold]\n"),
+        ):
+            if file_status.get(key):
+                parts.append(_m(heading))
+                parts.extend(Content(f"  • {f}\n") for f in file_status[key])
+                parts.append(Content("\n"))
 
         if not any(file_status.values()):
-            content += "[dim]No uncommitted files[/dim]"
+            parts.append(_m("[dim]No uncommitted files[/dim]"))
 
-        return ScrollableContainer(Static(content, markup=True))
+        return ScrollableContainer(Static(_join(parts)))
 
     def _build_diff_tab(self) -> ScrollableContainer:
         """Build the diff tab showing changes."""
@@ -722,22 +735,22 @@ class TabbedInfoScreen(BaseModal[None]):
             file_status = git_service.get_file_status_detailed(branch_name=self.branch.name)
             base_path = self.keeper.repo_path
 
-        content = ""
+        parts: list[Content] = []
 
         if staged_diff and staged_diff != "No changes":
-            content += "[green bold]Staged Changes:[/green bold]\n\n"
-            content += f"{staged_diff}\n\n"
+            parts.append(_m("[green bold]Staged Changes:[/green bold]\n\n"))
+            parts.append(Content(f"{staged_diff}\n\n"))
 
         if unstaged_diff and unstaged_diff != "No changes":
-            content += "[yellow bold]Unstaged Changes:[/yellow bold]\n\n"
-            content += f"{unstaged_diff}\n\n"
+            parts.append(_m("[yellow bold]Unstaged Changes:[/yellow bold]\n\n"))
+            parts.append(Content(f"{unstaged_diff}\n\n"))
 
         # If no diffs but there are untracked files, show their contents
-        if not content and file_status.get("untracked") and base_path:
-            content += "[red bold]Untracked Files:[/red bold]\n\n"
+        if not parts and file_status.get("untracked") and base_path:
+            parts.append(_m("[red bold]Untracked Files:[/red bold]\n\n"))
             for filepath in file_status["untracked"]:
                 full_path = os.path.join(base_path, filepath)
-                content += f"[cyan]--- {filepath}[/cyan]\n"
+                parts.append(_m("[cyan]--- $v[/cyan]\n", v=filepath))
 
                 try:
                     # Try to read file content
@@ -748,21 +761,23 @@ class TabbedInfoScreen(BaseModal[None]):
                         # Limit content to first 50 lines to avoid huge output
                         lines = file_content.split("\n")
                         if len(lines) > 50:
-                            content += "\n".join(lines[:50])
-                            content += f"\n\n[dim]... ({len(lines) - 50} more lines)[/dim]\n"
+                            parts.append(Content("\n".join(lines[:50])))
+                            parts.append(
+                                _m("\n\n[dim]... ($v more lines)[/dim]\n", v=len(lines) - 50)
+                            )
                         else:
-                            content += file_content
+                            parts.append(Content(file_content))
                     else:
-                        content += "[dim]<file not found>[/dim]\n"
+                        parts.append(_m("[dim]<file not found>[/dim]\n"))
                 except OSError as e:
-                    content += f"[red]<error reading file: {e}>[/red]\n"
+                    parts.append(_m("[red]<error reading file: $v>[/red]\n", v=e))
 
-                content += "\n\n"
+                parts.append(Content("\n\n"))
 
-        if not content:
-            content = "[dim]No changes to display[/dim]"
+        if not parts:
+            parts.append(_m("[dim]No changes to display[/dim]"))
 
-        return ScrollableContainer(Static(content, markup=True))
+        return ScrollableContainer(Static(_join(parts)))
 
     def _build_merge_tab(self) -> ScrollableContainer:
         """Build the merge details tab."""
@@ -770,65 +785,95 @@ class TabbedInfoScreen(BaseModal[None]):
         merge_details = git_service.get_merge_details(self.branch.name, self.main_branch)
 
         if merge_details.get("found"):
-            content = f"""[bold]Merge Information[/bold]
-
-[bold]Merge Commit:[/bold] {merge_details['merge_sha']}
-[bold]Message:[/bold] {merge_details['merge_message']}
-[bold]Author:[/bold] {merge_details['merge_author']}
-[bold]Date:[/bold] {merge_details['merge_date']}
-"""
+            content = _m(
+                "[bold]Merge Information[/bold]\n\n"
+                "[bold]Merge Commit:[/bold] $sha\n"
+                "[bold]Message:[/bold] $message\n"
+                "[bold]Author:[/bold] $author\n"
+                "[bold]Date:[/bold] $date\n",
+                sha=merge_details["merge_sha"],
+                message=merge_details["merge_message"],
+                author=merge_details["merge_author"],
+                date=merge_details["merge_date"],
+            )
         else:
-            content = f"""[bold]Merge Information[/bold]
+            content = _m(
+                "[bold]Merge Information[/bold]\n\n$v\n",
+                v=merge_details.get("message", "Unable to determine merge details"),
+            )
 
-{merge_details.get('message', 'Unable to determine merge details')}
-"""
+        return ScrollableContainer(Static(content))
 
-        return ScrollableContainer(Static(content, markup=True))
+    @staticmethod
+    def _commit_lines(commits: list[dict]) -> list[Content]:
+        """Render commits as `sha date - author` over an indented message line."""
+        return [
+            _m(
+                "[cyan]$sha[/cyan] $date - [dim]$author[/dim]\n  $message\n\n",
+                sha=commit["sha"],
+                date=commit["date"],
+                author=commit["author"],
+                message=commit["message"],
+            )
+            for commit in commits
+        ]
 
     def _build_commits_tab(self) -> ScrollableContainer:
         """Build the commits tab showing branch commits."""
         git_service = self.keeper.git_service
         commits = git_service.get_branch_commits(self.branch.name, self.main_branch, limit=20)
 
-        content = f"[bold]Commits on {self.branch.name} (not on {self.main_branch})[/bold]\n\n"
+        parts = [
+            _m(
+                "[bold]Commits on $branch (not on $main)[/bold]\n\n",
+                branch=self.branch.name,
+                main=self.main_branch,
+            )
+        ]
 
         if commits:
-            for commit in commits:
-                content += f"[cyan]{commit['sha']}[/cyan] {commit['date']} - [dim]{commit['author']}[/dim]\n"
-                content += f"  {commit['message']}\n\n"
+            parts.extend(self._commit_lines(commits))
         else:
-            content += "[dim]No unique commits on this branch[/dim]"
+            parts.append(_m("[dim]No unique commits on this branch[/dim]"))
 
-        return ScrollableContainer(Static(content, markup=True))
+        return ScrollableContainer(Static(_join(parts)))
 
     def _build_divergence_tab(self) -> ScrollableContainer:
         """Build the divergence tab showing ahead/behind info."""
         git_service = self.keeper.git_service
         divergence = git_service.get_divergence_info(self.branch.name, self.main_branch)
 
-        content = f"""[bold]Branch Divergence vs {self.main_branch}[/bold]
+        parts = [
+            _m(
+                "[bold]Branch Divergence vs $main[/bold]\n\n"
+                "[bold]Ahead:[/bold] $ahead commits\n"
+                "[bold]Behind:[/bold] $behind commits\n\n",
+                main=self.main_branch,
+                ahead=divergence["ahead"],
+                behind=divergence["behind"],
+            )
+        ]
 
-[bold]Ahead:[/bold] {divergence['ahead']} commits
-[bold]Behind:[/bold] {divergence['behind']} commits
-
-"""
+        def commit_line(commit: dict) -> Content:
+            return _m(
+                "  [cyan]$sha[/cyan] $date - $message\n",
+                sha=commit["sha"],
+                date=commit["date"],
+                message=commit["message"],
+            )
 
         if divergence["ahead_commits"]:
-            content += "[green bold]Commits ahead (on this branch):[/green bold]\n"
-            for commit in divergence["ahead_commits"]:
-                content += (
-                    f"  [cyan]{commit['sha']}[/cyan] {commit['date']} - {commit['message']}\n"
-                )
-            content += "\n"
+            parts.append(_m("[green bold]Commits ahead (on this branch):[/green bold]\n"))
+            parts.extend(commit_line(commit) for commit in divergence["ahead_commits"])
+            parts.append(Content("\n"))
 
         if divergence["behind_commits"]:
-            content += f"[yellow bold]Commits behind (on {self.main_branch}):[/yellow bold]\n"
-            for commit in divergence["behind_commits"]:
-                content += (
-                    f"  [cyan]{commit['sha']}[/cyan] {commit['date']} - {commit['message']}\n"
-                )
+            parts.append(
+                _m("[yellow bold]Commits behind (on $v):[/yellow bold]\n", v=self.main_branch)
+            )
+            parts.extend(commit_line(commit) for commit in divergence["behind_commits"])
 
-        return ScrollableContainer(Static(content, markup=True))
+        return ScrollableContainer(Static(_join(parts)))
 
     def _build_history_tab(self) -> ScrollableContainer:
         """Build the history tab for active branches."""
@@ -837,6 +882,7 @@ class TabbedInfoScreen(BaseModal[None]):
         # For main branch, show recent commits on main (not unique comparison)
         # For feature branches, show commits unique to that branch
         if self.branch.name == self.main_branch:
+            title = _m("[bold]Recent commits on $v[/bold]\n\n", v=self.main_branch)
             # Show recent commits on main branch
             try:
                 repo = git_service._get_repo()
@@ -852,31 +898,23 @@ class TabbedInfoScreen(BaseModal[None]):
                             ),
                         }
                     )
-                content_title = f"[bold]Recent commits on {self.main_branch}[/bold]\n\n"
             except GIT_ERRORS:
                 commits = []
-                content_title = f"[bold]Recent commits on {self.main_branch}[/bold]\n\n"
         else:
             # Show commits unique to feature branch
             commits = git_service.get_branch_commits(self.branch.name, self.main_branch, limit=10)
-            content_title = f"[bold]Commits unique to {self.branch.name}[/bold]\n\n"
+            title = _m("[bold]Commits unique to $v[/bold]\n\n", v=self.branch.name)
 
-        content = content_title
+        parts = [title]
 
         if commits:
-            for commit in commits:
-                content += (
-                    f"[cyan]{commit['sha']}[/cyan] {commit['date']} - "
-                    f"[dim]{commit['author']}[/dim]\n"
-                )
-                content += f"  {commit['message']}\n\n"
+            parts.extend(self._commit_lines(commits))
+        elif self.branch.name == self.main_branch:
+            parts.append(_m("[dim]No commits found[/dim]"))
         else:
-            if self.branch.name == self.main_branch:
-                content += "[dim]No commits found[/dim]"
-            else:
-                content += "[dim]No commits unique to this branch[/dim]"
+            parts.append(_m("[dim]No commits unique to this branch[/dim]"))
 
-        return ScrollableContainer(Static(content, markup=True))
+        return ScrollableContainer(Static(_join(parts)))
 
     def _build_comparison_tab(self) -> ScrollableContainer:
         """Build the comparison tab showing diff with main or remote status."""
@@ -891,25 +929,25 @@ class TabbedInfoScreen(BaseModal[None]):
                     # Show difference between local main and <remote>/main
                     remote_name = git_service.remote_name
                     diff = repo.git.diff(f"{remote_name}/{self.main_branch}...{self.main_branch}")
-                    content = f"[bold]Local vs Remote {self.main_branch}[/bold]\n\n"
+                    title = _m("[bold]Local vs Remote $v[/bold]\n\n", v=self.main_branch)
                     if diff:
-                        content += f"{diff}"
+                        content = title + Content(diff)
                     else:
-                        content += "[dim]Local and remote are in sync[/dim]"
+                        content = title + _m("[dim]Local and remote are in sync[/dim]")
                 except GIT_ERRORS:
-                    content = "[dim]Cannot compare with remote - remote may not exist[/dim]"
+                    content = _m("[dim]Cannot compare with remote - remote may not exist[/dim]")
             else:
                 # For feature branches, show diff compared to main
                 diff = repo.git.diff(f"{self.main_branch}...{self.branch.name}")
-                content = f"[bold]Changes compared to {self.main_branch}[/bold]\n\n"
+                title = _m("[bold]Changes compared to $v[/bold]\n\n", v=self.main_branch)
                 if diff:
-                    content += f"{diff}"
+                    content = title + Content(diff)
                 else:
-                    content += f"[dim]No differences with {self.main_branch}[/dim]"
+                    content = title + _m("[dim]No differences with $v[/dim]", v=self.main_branch)
         except GIT_ERRORS as e:
-            content = f"[red]Error getting comparison: {e}[/red]"
+            content = _m("[red]Error getting comparison: $v[/red]", v=e)
 
-        return ScrollableContainer(Static(content, markup=True))
+        return ScrollableContainer(Static(content))
 
     def on_mount(self) -> None:
         dialog = self.query_one("#tabbed-info-dialog", Vertical)

@@ -1,441 +1,167 @@
-# Data Loss Risk Documentation & Mitigation Plan
-
-> This document tracks identified data loss risks and potential data corruption scenarios in git-branch-keeper. Each item includes detailed analysis, code references, and recommended mitigations.
-
-## Priority Levels
-
-- **🔴 Critical**: Could result in permanent loss of branch history or uncommitted work
-- **🟠 High**: Could cause unexpected branch deletion or data integrity issues
-- **🟡 Medium**: Could cause confusion or workaround needs, minor data loss scenarios
-- **🟢 Low**: Edge cases with low probability or minimal impact
-
----
-
-## Critical Risks
-
-### 🔴 1. Local Branch Deleted Before Remote Protection Check
-
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
-
-**Severity**: Critical
-**Impact**: User loses local branch even when remote is protected (non-recoverable locally)
-
-**Code Location**: `git_branch_keeper/services/git_service.py:1082-1136` (`delete_branch` method)
-
-**Problem Description**:
-The deletion logic deletes the local branch first (line 1094), then attempts remote deletion. If the remote deletion fails due to branch protection, the local branch is already deleted and cannot be recovered through this tool.
-
-```python
-# Line 1094 - Local deletion happens FIRST
-repo.delete_head(branch_name, force=True)
-
-# Lines 1097-1118 - Remote deletion AFTER local is gone
-if has_remote:
-    try:
-        remote.push(refspec=f":{branch_name}")
-    except git.exc.GitCommandError as e:
-        if "protected" in str(e).lower():
-            console.print(f"Warning: Remote branch is protected...")
-            # But local is already deleted!
-```
-
-**Scenario**:
-1. User runs cleanup on a merged branch
-2. Branch exists both locally and remotely
-3. Remote branch is protected (GitHub branch protection rules)
-4. Tool deletes local branch ✓
-5. Tool fails to delete remote branch (protected) ✗
-6. User has no local copy; branch is still on remote
-
-**Recommended Fix**:
-- Check remote branch protection **before** deleting local
-- Or: Delete remote first, then local
-- Or: Implement transaction-like behavior with rollback capability
-
-**Implementation Complexity**: Medium (requires checking branch protection status via GitHub API)
-
----
-
-### 🔴 2. Merge Detection False Positives (Squash Merge Heuristic)
-
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
-
-**Severity**: Critical
-**Impact**: Active branches mistakenly identified as merged and deleted
-
-**Code Location**: `git_branch_keeper/services/git_service.py:913-945` (Method 0: `_check_squash_merge`)
-
-**Problem Description**:
-The squash merge detection uses a string comparison heuristic that could have false positives:
-
-```python
-def _check_squash_merge(self, branch_name: str, main_branch: str) -> bool:
-    # ...
-    branch_diff = repo.git.diff(f"{main_branch}...{branch_name}", "--no-color")
-
-    for commit in repo.iter_commits(main_branch, max_count=100):
-        commit_diff = repo.git.show(commit.hexsha, "--no-color", "--format=")
-
-        # ⚠️ PROBLEMATIC: Simple string containment check
-        if len(branch_diff) > 50 and branch_diff in commit_diff:
-            logger.debug(f"Found squash merge in commit {commit.hexsha}")
-            return True
-    return False
-```
-
-**Problem Scenarios**:
-1. Branch A modifies `src/utils.py` with 100 lines of changes
-2. Branch B independently modifies `src/utils.py` with 200 lines of changes (including all of Branch A's changes)
-3. Both branches are merged separately via PRs (Branch A into main first, then Branch B)
-4. When checking Branch B for merge, the tool finds Branch A's diff inside Branch B's commit diff
-5. False positive: Branch B is incorrectly marked as squash-merged when checking other branches
-
-**Real-world Example**:
-- Feature branch adds utility functions
-- Later feature branch adds more utilities (includes all previous ones)
-- Both are independent PRs merged normally
-- Second branch could be marked as already merged due to diff containment
-
-**Current Safeguard**:
-Method detection order has this as first check, but if it returns true, merges are cached and other methods aren't tried.
-
-**Recommended Fix**:
-- Use more robust merge detection (check commit ancestry more carefully)
-- Only use squash detection after confirming with other methods
-- Add configurable threshold or disable this method by default
-- Compare commit hashes, not diffs
-
-**Implementation Complexity**: Medium-High (requires rethinking merge detection strategy)
-
----
-
-### 🔴 3. Branch Checkout Without Proper Isolation
-
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
-
-**Severity**: Critical
-**Impact**: User left on wrong branch if checkout/restore fails; risk of commits on unintended branch
-
-**Code Location**: `git_branch_keeper/services/git_service.py:393-486` (get_branch_status_details method)
-
-**Problem Description**:
-When checking branch status, the tool checks out branches in the main working tree. If restoration fails or is interrupted, user could be left on the wrong branch:
-
-```python
-try:
-    if need_restore:
-        repo.git.checkout(branch_name)  # Switch to branch being checked
-
-    status = repo.git.status("--porcelain")
-
-    return {"modified": bool(...), "untracked": bool(...), ...}
-finally:
-    if need_restore:
-        # ⚠️ What if this fails? User is left on wrong branch
-        if (not is_detached and current != branch_name) or is_detached:
-            repo.git.checkout(current)  # Try to restore - can fail!
-```
-
-**Failure Scenarios**:
-1. Restoration checkout fails (merge conflict, locked file, etc.)
-2. Process is killed between checkout and restore
-3. Permission issues on restore
-4. Result: User finds themselves on a different branch than expected, risking accidental commits
-
-**Compounding Risk**: Combined with cleanup mode running automatically, user might not notice until they've committed work on the wrong branch.
-
-**Recommended Fix**:
-- Use `git worktree` to check branch status without switching branches
-- Or: Use `git show` and other non-checkout commands to determine file status
-- Or: Implement proper error handling with rollback and user notification
-- Store current branch SHA and verify restoration succeeded
-
-**Implementation Complexity**: High (requires architectural change to status checking)
-
----
-
-## High Severity Risks
-
-### 🟠 4. Default Cleanup Mode (No Confirmation By Default)
-
-**Status**: [x] Complete
-
-**Severity**: High
-**Impact**: First-time users may accidentally delete branches without realizing
-
-**Resolution**:
-CLI mode is now read-only by default. Cleanup requires explicit `--delete` (with deprecated `--cleanup` retained as an alias). `--dry-run` previews cleanup candidates without prompting or changing data. Legacy `--force` still implies cleanup for backwards compatibility, but remains documented as dangerous.
-
-**Implementation Complexity**: Low-Medium (configuration and CLI semantics)
-
----
-
-### 🟠 5. Stash Restore Failures Leave Changes Unrecoverable
-
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
-
-**Severity**: High
-**Impact**: Uncommitted changes left in stash, user must manually recover
-
-**Code Location**: `git_branch_keeper/services/git_service.py:1041-1080` (stash methods)
-
-**Problem Description**:
-If restoring stashed changes fails, the tool warns the user but changes remain in the stash. This could be confusing and lead to perceived data loss:
-
-```python
-def restore_stashed_changes(self, was_stashed: bool) -> None:
-    if not was_stashed:
-        return
-
-    try:
-        repo = self._get_repo()
-        repo.git.stash("pop")  # ⚠️ If this fails, warning is shown
-        logger.debug("Restored stashed changes")
-    except Exception as e:
-        logger.warning(f"Could not restore stashed changes: {e}")
-        logger.warning("Your changes are still in the stash. Run 'git stash pop' manually.")
-        raise  # Raises to caller
-```
-
-**Failure Scenarios**:
-1. Stash pop fails due to merge conflict
-2. Stash pop fails due to file permissions
-3. Process interrupted during stash restore
-4. User sees warning but might not notice, unaware changes are in stash
-5. Result: Changes appear "lost" until user manually checks stash
-
-**Compounding Risk**: If user doesn't see the warning (e.g., running in background script), they think changes are gone.
-
-**Recommended Fix**:
-- Explicitly list stash contents on failure
-- Don't suppress the error - propagate clearly to user
-- Provide recovery command in error message
-- Implement automated recovery with user confirmation
-
-**Implementation Complexity**: Low-Medium (improved error handling and recovery)
-
----
-
-### 🟠 6. "origin" Remote Hardcoded - Other Remotes Ignored
-
-**Status**: [x] Mostly complete (single-remote auto-detection done; full multi-remote tracking not done)
-
-**Severity**: High (in multi-remote repositories)
-**Impact**: Branches on non-"origin" remotes treated as local-only, incorrectly marked for deletion
-
-**Code Location**: `git_branch_keeper/utils/remotes.py` (`detect_remote_name`), consumed by
-`services/git/operations.py`, `services/git/branch_queries.py`, `core/branch_keeper.py`.
-
-**What was fixed**:
-The remote name is no longer hardcoded. `detect_remote_name(repo)` picks the remote to use:
-prefers `origin` if present (so existing behavior is unchanged), otherwise uses the sole remote
-if there is exactly one, otherwise falls back to `origin` and logs a warning. The detected name
-is threaded through sync-status/divergence queries, `has_remote_branch`, deletion, the GitHub
-URL lookup, and the TUI comparison view. A repo whose only remote is e.g. `upstream` is now
-handled correctly (verified end-to-end).
-
-**Still open (lower priority)**:
-- A branch tracked on *multiple* remotes is still only checked against the single detected remote.
-- No explicit `--remote-name` override flag yet (auto-detection covers the common cases).
-- When multiple remotes exist and none is `origin`, the tool warns and falls back rather than
-  letting the user choose.
-
-**Implementation Complexity**: Medium (remaining: per-branch multi-remote tracking)
-
----
-
-### 🟠 7. Force Mode Bypasses Uncommitted Changes Check
-
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
-
-**Severity**: High
-**Impact**: Branches with uncommitted work deleted without warning in force mode
-
-**Code Location**: `git_branch_keeper/core.py:206-243` (delete_branch method)
-
-**Problem Description**:
-When using `--force` flag, the tool skips the uncommitted changes check:
-
-```python
-def delete_branch(self, branch_name: str, reason: str, force_mode: bool = False) -> tuple:
-    # ...
-
-    # ⚠️ Skipped entirely if force_mode=True
-    if not force_mode and (
-        status_details.get("modified")
-        or status_details.get("untracked")
-        or status_details.get("staged")
-    ):
-        # Safety prompts here
-        ...
-    else:
-        # No prompts in force mode - branch is deleted!
-```
-
-**Scenario**:
-1. User runs: `git-branch-keeper --filter merged --cleanup --force`
-2. A "merged" branch actually has uncommitted work (merge detection false positive, or stale changes)
-3. Branch is deleted without prompting about uncommitted changes
-4. Uncommitted work is lost
-
-**Compounding Risk**: Force mode also skips confirmation dialogs, so this could be silent data loss.
-
-**Recommended Fix**:
-- Always check for uncommitted changes, even in force mode
-- Force mode should skip **confirmation** dialogs, not safety checks
-- Add `--force-unsafe` for truly no-safety-checks mode with prominent warnings
-- Separate "force deletion" from "force safety bypass"
-
-**Implementation Complexity**: Low (logic restructuring)
-
----
-
-## Medium Severity Risks
-
-### 🟡 8. Worktree Race Condition
-
-**Status**: [ ] Not started | [ ] In progress | [x] Complete
-
-**Severity**: Medium
-**Impact**: Low probability - branch could be checked out in worktree between check and deletion
-
-**Code Location**: `git_branch_keeper/core/branch_keeper.py` (`delete_branch`) and
-`git_branch_keeper/services/git/worktrees.py`
-
-**Problem Description**:
-The window was not the microseconds between two adjacent calls - it was the whole
-gap between analysis and deletion. Worktree membership is read once during
-analysis and cached, and the TUI then sits on that cache for as long as the user
-takes to review, so a worktree created in between was invisible.
-
-Two things made it worse:
-- `GitOperations` and `BranchQueries` each built their own `WorktreeService`, so
-  they held **separate caches** that could disagree with each other.
-- With a stale cache, `get_branch_status_details()` tried to build a temporary
-  worktree for a branch that was already checked out, failing with an opaque
-  `fatal: '<branch>' is already used by worktree at ...`.
-
-**Fix implemented**:
-- `WorktreeService.get_worktree_info(refresh=True)` bypasses the cache;
-  `find_worktree_for_branch(branch, refresh=True)` is the pre-deletion probe.
-- `BranchKeeper.delete_branch()` refreshes *before* the status probe (fail fast
-  with a real message, and keep the probe from tripping over the checkout) and
-  once more immediately before the delete itself.
-- `GitOperations` now constructs one `WorktreeService` and injects it into
-  `BranchQueries`, so a refresh is visible to every caller.
-- `remove_worktree()` refuses the worktree GBK is running in. Git only protects
-  the *main* working tree; it will happily remove your current linked worktree,
-  and with `force=True` that discards uncommitted work.
-
-Git itself refuses `git branch -D` for a branch checked out in any worktree, so
-the race was never a data-loss path for branches - the fix turns an opaque
-mid-cleanup git error into a clear "checked out in a worktree (<path>)" skip.
-
-**Tests**: `tests/test_worktree_toctou.py` (both directions of the race, plus a
-racing branch failing without aborting the run).
-
-**Implementation Complexity**: Low-Medium
-
----
-
-### 🟡 9. Interactive Input in Non-TTY Could Hang
-
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
-
-**Severity**: Medium
-**Impact**: Process hangs if run in automation context without TTY
-
-**Code Location**: `git_branch_keeper/core.py:238` and `cli.py:42-44`
-
-**Problem Description**:
-If running without TTY but interactive mode is triggered, `input()` call could hang:
-
-```python
-# cli.py - TTY detection exists but might not always work
-use_interactive = parsed_args.interactive or (
-    sys.stdin.isatty() and not parsed_args.no_interactive
-)
-
-# core.py - But if we get here and there's no TTY...
-if self.interactive and not self.tui_mode:
-    response = input(f"Still want to delete branch {branch_name}? [y/N] ")
-    # ⚠️ Hangs if no TTY available
-```
-
-**Scenario**:
-1. Running in CI/CD without proper TTY setup
-2. TTY detection passes (or is bypassed)
-3. Tool prompts for confirmation
-4. No input available
-5. Process hangs indefinitely
-
-**Recommended Fix**:
-- Robust TTY detection with fallback to non-interactive
-- Timeout on input() with sensible default
-- Error rather than hang if TTY required but unavailable
-
-**Implementation Complexity**: Low-Medium
-
----
-
-### 🟡 10. Cache Staleness Could Lead to Incorrect Status
-
-**Status**: [ ] Not started | [ ] In progress | [ ] Complete
-
-**Severity**: Medium
-**Impact**: Outdated cached status could lead to deletion of branches that have changed
-
-**Code Location**: `git_branch_keeper/services/cache_service.py` (cache operations)
-
-**Problem Description**:
-Cached branch status might become outdated between runs. A branch marked as "merged" in cache could have new commits added before cache expires.
-
-**Scenario**:
-1. Run 1: Branch marked as merged, cached with status=merged
-2. Between runs: Someone pushes commits to the branch
-3. Run 2: Cache is used, branch still shows as merged (cached data)
-4. Branch is marked for deletion based on stale cache
-5. Actual branch has recent work
-
-**Current Safeguard**:
-Cache invalidation on certain conditions, but timing could be an issue.
-
-**Recommended Fix**:
-- Shorter cache TTL for branches in deleted state
-- Always re-check merge status for branches about to be deleted
-- Add cache validation step
-- Warn when using cached data for deletion decisions
-
-**Implementation Complexity**: Low-Medium
-
----
-
-## Summary & Priorities
-
-| Priority | Count | Next Steps |
-|----------|-------|-----------|
-| 🔴 Critical | 3 | Address before next release |
-| 🟠 High | 4 | Address in upcoming sprints |
-| 🟡 Medium | 3 | Plan improvements |
-
-**Immediate Action Items** (Critical fixes):
-- [ ] Fix merge detection false positives
-- [ ] Implement worktree-based status checking
-- [ ] Change branch deletion order (check remote before local)
-
-**High Priority** (Next release):
-- [ ] First-run safety detection
-- [ ] Improve stash error recovery
-- [ ] Add multi-remote support
-
----
-
-## Testing Recommendations
-
-For each fix, include tests for:
-1. Normal case (happy path)
-2. Error cases (permissions, network, etc.)
-3. Concurrent/race conditions
-4. Integration with full deletion workflow
-5. Data recovery scenarios
-
+# TODO — Review Findings (2026-09-26)
+
+Findings from a full review of deletion safety, merge detection, and the TUI/CLI layer.
+Each item was traced in code; items marked *(repro)* were reproduced in a throwaway repo.
+Ordered by severity. Check the box and add the fixing commit when done.
+
+## 🔴 High — can delete unmerged work or misreport a deletion
+
+- [x] **1. Whitespace-only commits make an unmerged branch look squash-merged** *(repro)*
+  - `services/git/merge_detector.py:207`, `:277`, `:680` pass
+    `--ignore-space-change --ignore-blank-lines` when building patch-id diffs.
+  - A post-squash commit that only re-indents code (behavior change in Python/YAML)
+    vanishes from the combined diff, so the branch exact-matches the squash commit.
+    The deletion-time re-check uses the same flags, and `-D` is used because the branch
+    is not an ancestor of HEAD.
+  - Fix: drop both flags in all three places (`git patch-id` already normalizes
+    intra-line whitespace). Add a regression test.
+  - **Done:** flags dropped *and* `git patch-id --verbatim` — the default patch-id strips
+    all whitespace, so a re-indent inside a file the branch adds still collided. Requires
+    git ≥ 2.39 (README updated); older git disables squash detection rather than guess.
+    Test: `test_merge_detection_accuracy.py::test_whitespace_only_commit_after_squash_is_not_merged`.
+
+- [x] **2. (resolved: documented behavior) TUI force-mark deletes stale/unstarted remote-only branches without merge proof**
+  - `ui/app.py:719` accepts `is_force` for remote-only rows; `ui/app.py:1230` passes
+    `allow_unmerged_remote=True` → `verify_merge=None` at `core/branch_keeper.py:609`.
+  - Contradicts CLAUDE.md: "Stale/unmerged ones are never deleted".
+  - Related: `formatters/status.py:105` maps `UNSTARTED` → reason `"merged"`, and an
+    unstarted branch is trivially reachable, so it passes the merge re-check; its
+    worktree is then removed with `--force`, discarding uncommitted work.
+  - **Conflict:** `docs/usage.md:119` documents this as intended ("`f` can force-mark
+    stale, merged or unstarted remote-only branches without merge proof" under `--remote`),
+    CLAUDE.md says the opposite. Decide which is right before changing code.
+  - Independent of that decision: UNSTARTED should never get reason `"merged"` — the
+    journal records a merge that never happened.
+  - **Decided:** `docs/usage.md` is correct; CLAUDE.md was stale and now documents the
+    override. **Done:** UNSTARTED deletes under reason `"unstarted"`. Test:
+    `test_unstarted_branches.py::TestForceDeletedUnstartedBranch`.
+
+- [x] **3. Merged PR accepted as proof regardless of base branch**
+  - `services/branch_status_service.py:71`, `core/branch_keeper.py:1936`, `:1988`.
+    Only `_owned_merged_pr` (`:244`) checks `base_ref == main_branch`.
+  - Stacked PR merged into `feat-a` (which never lands) → reported merged/deletable.
+  - Fix: require `base_ref == main_branch` everywhere a merged PR counts as proof.
+  - **Done:** single rule `merged_pr_is_proof()` in `branch_status_service.py`, used by
+    analysis, the status-service fallback, and the deletion-time recheck. Also closed a
+    second hole: `_determine_branch_status` treated `head_matches_local=None` (no head SHA
+    from the API) as a match. Stacked PRs now get a "PR #N merged into X, not main" note.
+
+- [x] **4. Failed remote push can be reported as success** *(repro)*
+  - `services/git/operations.py:457` searches all of `str(e)` for "protected"/"prohibited";
+    that string includes the command line, i.e. the branch name.
+  - `feature/protected-routes` with a rejected push → "protected, deleted local only".
+  - Fix: match only `e.stderr`, against specific rejection text.
+
+- [x] **5. Local branch deleted, then call returns failure** *(repro)*
+  - `services/git/operations.py:434-466`: local delete happens before the remote push;
+    any other push error re-raises → `False`, but the local branch is already gone.
+    Cache/TUI keep showing a branch that no longer exists.
+  - Fix: report partial success (local deleted, remote kept) instead of failure.
+  - **Done (4+5):** any push failure after the local delete now prints git's stderr and
+    returns True with `remote_deleted=false` journaled. Test:
+    `test_remote_only_branches.py::test_rejected_remote_push_is_partial_success_not_failure`.
+  - Follow-up: in the TUI, "remote kept" is only console output, so a user who asked for
+    LOCAL + REMOTE sees a plain success. `delete_branch` should return a result object
+    (like `RemoteDeletionResult`) so the TUI can surface it.
+
+## 🟠 Medium
+
+- [x] **6. Markup injection in TUI and CLI output** *(repro)*
+  - `ui/screens.py` uses `markup=True` at 8 sites (667–912) for commit messages, diffs,
+    file contents, notes. Nothing in the package escapes markup.
+  - A diff containing `[/]` crashes the TUI; a commit message containing
+    `[@click=app.delete_marked]` renders a link that runs app actions.
+  - Also: table Notes/Sync cells (`ui/app.py:631`, `:634`), CLI output
+    (`formatters/links.py:80,108`, `services/display_service.py:109`,
+    `core/branch_keeper.py:1858,1888`).
+  - Note: git forbids `[` in ref names, so CLAUDE.md's `feature/[wip]` example can't
+    occur; the real vectors are commit text, paths, and git error output.
+  - **Done:** info-screen tabs build `textual.content.Content` via `_m()` (trusted markup
+    + `$var` substitution, never parsed) — plain `escape()` is defeated by a trailing
+    backslash. Table Notes/Sync cells are `Text`. CLI prints `escape()` error/path values;
+    branch URLs are percent-encoded. Tests: `test_tui_marking.py::TestInfoScreenRendersUntrustedTextLiterally`.
+
+- [x] **7. `--dry-run` in the TUI reports deletions that never happened**
+  - `cli/main.py:181` only disables auto-marking. Marking + confirming shows
+    "deleted N branches (press u to undo)" while nothing was deleted.
+  - **Done:** confirm dialog is titled "(dry run)"; afterwards rows and marks stay and the
+    status bar says "Dry run: would … - nothing changed". Test:
+    `test_tui_app.py::test_dry_run_deletion_keeps_rows_and_says_nothing_changed`.
+
+- [x] **8. Every failure exits 0**
+  - `process_branches` catches everything; `cli/main.py:188` returns 0. Partial deletion
+    failures and `--cli --delete` without a TTY (swallowed `EOFError`) look like success.
+  - **Done:** `process_branches()` returns success; any failed deletion or run error exits 1
+    (declining the prompt still exits 0). No TTY at the prompt is now an explicit error
+    suggesting `--force` / `--dry-run`. Tests in `test_cli_modes.py`.
+
+- [x] **9. Stale-branch deletion has a window where new commits can be lost**
+  - Tip compared once at `core/branch_keeper.py:356`, then seconds of GitHub calls,
+    worktree refreshes, and a status probe before `-D`.
+  - If `tip_sha` is `None` (old cache rows, failed resolution) the guard is skipped.
+  - Fix: delete with `git update-ref -d refs/heads/<name> <expected-sha>`.
+  - **Done:** `-D` fallback is `_force_delete_local_branch()` (compare-and-delete against
+    the tip validated at the start of `delete_branch`, which also covers `tip_sha=None`
+    rows within the call); raises `BranchMovedError` with the real reason. Tests in
+    `test_delete_safety.py`. A `None` tip still means no check *between analysis and the
+    call* — unavoidable without a recorded SHA.
+
+- [x] **10. `protected_branches` is exact-match only**
+  - `services/branch_validation_service.py:51`, `:80`. `--protected 'release/*'`
+    protects nothing. Use fnmatch like `ignore_patterns`.
+  - **Done:** `utils/patterns.py::is_protected_name()` at all ~24 sites. Test:
+    `test_cli_modes.py::test_protected_glob_pattern_blocks_deletion`.
+
+## 🟡 Low
+
+- [x] **11.** Branch checked out from `origin/feat` has one `Created from refs/remotes/…`
+  reflog entry → reported `UNSTARTED` after its PR merges (`merge_detector.py:534`).
+  Safe direction, but hides a cleanup candidate.
+- [x] **12.** Space can mark ACTIVE branches (`_mark_with_hierarchy` has no status check);
+  they're silently dropped at confirm with no message.
+- [x] **13.** `--force --remote` on a stale local+remote branch fails the whole deletion
+  ("Git deletion failed") instead of deleting locally and keeping the remote
+  (`operations.py:420-423`).
+- [x] **14.** Cache validity ignores main (`cache_service.py:520`): switching `main_branch`
+  or force-pushing main leaves stale MERGED rows. Display-only; deletion re-verifies.
+- [x] **15.** Remote-only protected branches (e.g. `develop`) bypass `BranchRefResolver`
+  and are labeled `LOCAL_ONLY` (`branch_queries.py:113-136`).
+- [x] **16.** JSON `recommended_actions` emits bare `git branch -D` / `git push --delete`
+  with no lease (`formatters/json_output.py:509-516`).
+- [x] **17.** `get_merge_details` interpolates the branch name into a regex unescaped and
+  unanchored (`branch_queries.py:524`); `foo` matches `org/foo-bar`.
+
+### Low-item notes
+
+- #11: creation from a `refs/remotes/…` / `<remote>/…` source is not unstarted proof.
+- #12: worse than reported — the ACTIVE branch's *worktree* row was also marked and removed
+  at confirm (taking ignored files like `.env`). Marking now requires a cleanup candidate,
+  and confirm only removes removable worktrees.
+- #13: remote kept with "(not merged into main)"; local delete proceeds.
+- #14: cache records `main_tip_sha`; discarded on main-branch switch or non-fast-forward.
+- #15: one `_remote_sync_status()` helper checks location before ahead/behind.
+- #16: commands leased to `expected_sha` (`update-ref -d` / `--force-with-lease`).
+- #17: also fixed branch `x` matching a PR from `org/feature/x`.
+
+## Carried over from the previous risk list
+
+- [x] **Force mode skips the uncommitted-changes check** (`core/branch_keeper.py:415`).
+  Documented as intentional; revisit whether `--force` should skip confirmation only,
+  not safety checks.
+  - **Done:** it was real data loss — `--cli --delete --force` ran `git worktree remove
+    --force` on dirty worktrees of merged branches. `--force` now only skips the prompt;
+    the per-row TUI force-mark remains the explicit override. Test:
+    `test_cli_modes.py::test_cli_force_never_discards_uncommitted_worktree_files`.
+- [x] **Dead stash helpers** — `stash_changes` / `restore_stashed_changes`
+  (`services/git/operations.py:305-340`) have no callers. Remove.
+
+Resolved since the previous list: squash heuristic demoted to advisory; status probe uses
+a temp worktree instead of checkout; CLI read-only by default; remote auto-detection;
+worktree TOCTOU; cache tied to `tip_sha`.
+
+## Structural
+
+- `core/branch_keeper.py` (2,239 lines) and `ui/app.py` (1,677) have roughly doubled since
+  June. Most high-severity bugs sit on paths that accumulated flags
+  (`allow_unmerged_remote`, `owned_remote_only`, `force_mode`). Consider splitting the
+  deletion planner/executor out of `BranchKeeper`.

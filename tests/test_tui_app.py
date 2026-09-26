@@ -72,10 +72,10 @@ def isolated_home(temp_dir, monkeypatch):
 
 @pytest.fixture
 def make_app(git_repo):
-    def _make(branches, cleanup_mode=False, view="all"):
+    def _make(branches, cleanup_mode=False, view="all", dry_run=True):
         keeper = BranchKeeper(
             git_repo.working_dir,
-            Config(interactive=True, dry_run=True, main_branch="main"),
+            Config(interactive=True, dry_run=dry_run, main_branch="main"),
         )
         return BranchKeeperApp(keeper, branches=branches, cleanup_mode=cleanup_mode, view=view)
 
@@ -162,7 +162,7 @@ async def test_remote_cleanup_marks_candidates_before_single_deletion_confirmati
 
 
 async def test_delete_confirmation_summarizes_local_only_impact(make_app):
-    app = make_app([_branch("feature/a", has_remote=True)])
+    app = make_app([_branch("feature/a", has_remote=True)], dry_run=False)
 
     async with app.run_test() as pilot:
         app.marked_branches.add("feature/a")
@@ -753,7 +753,7 @@ async def test_confirm_screen_buttons_share_one_row_with_cancel_first(make_app):
 
 async def test_confirm_screen_renders_sections_as_literal_structured_content(make_app):
     """Raw branch names stay literal while scope and selection remain separate."""
-    app = make_app([_branch("feature/[wip]", has_remote=True)])
+    app = make_app([_branch("feature/[wip]", has_remote=True)], dry_run=False)
     async with app.run_test() as pilot:
         app.marked_branches.add("feature/[wip]")
         app.action_delete_marked()
@@ -853,7 +853,8 @@ async def test_restore_confirmation_reuses_structure_with_safe_action_variant(ma
 
 async def test_force_mark_unstarted_remote_branch_and_confirm(make_app, monkeypatch):
     app = make_app(
-        [_branch("feature/unused", BranchStatus.UNSTARTED, has_remote=True, has_local=False)]
+        [_branch("feature/unused", BranchStatus.UNSTARTED, has_remote=True, has_local=False)],
+        dry_run=False,
     )
     async with app.run_test() as pilot:
         await pilot.press("f")
@@ -1163,3 +1164,31 @@ async def test_startup_and_refresh_defer_remote_work_until_remote_view(git_repo,
         await app.workers.wait_for_complete()
         assert app.branches == [remote]
         assert len(analyzed_views) == count
+
+
+async def test_dry_run_deletion_keeps_rows_and_says_nothing_changed(make_app):
+    """--dry-run runs every guard but deletes nothing, so the TUI must not claim it did.
+
+    It used to drop the rows and offer "press u to undo" for deletions that never
+    happened.
+    """
+    app = make_app([_branch("feature/a"), _branch("feature/b")])
+    assert app.keeper.dry_run
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.marked_branches.add("feature/a")
+        app._perform_view_deletion = lambda *a, **k: (["feature/a"], [], [], [])
+
+        prompt = app._build_delete_confirmation_prompt([app.branches[0]])
+        assert "dry run" in prompt.title.lower()
+
+        app.delete_marked_items([], [], [app.branches[0]], [], "batch")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert [b.name for b in app.branches] == ["feature/a", "feature/b"]
+        assert "feature/a" in app.marked_branches
+        status = _status_text(app)
+        assert "Dry run: would remove 0 worktrees and delete 1 branches" in status
+        assert "undo" not in status

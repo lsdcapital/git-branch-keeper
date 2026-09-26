@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import git
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from git_branch_keeper.exceptions import GIT_ERRORS
@@ -68,7 +69,7 @@ def run_undo(
     try:
         repo = git.Repo(repo_path)
     except GIT_ERRORS as e:
-        console.print(f"[red]Could not open repository: {e}[/red]")
+        console.print(f"[red]Could not open repository: {escape(str(e))}[/red]")
         return 1
 
     if target:
@@ -125,7 +126,7 @@ def run_undo(
     if failed:
         console.print(f"[red]Failed to restore {len(failed)} branch(es):[/red]")
         for branch_name, error in failed:
-            console.print(f"[red]  • {branch_name}: {error}[/red]")
+            console.print(f"[red]  • {branch_name}: {escape(str(error))}[/red]")
         return 1
 
     if remote_deleted_entries and not include_remote:

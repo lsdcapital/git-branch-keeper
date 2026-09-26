@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from rich.style import Style
 from rich.text import Text
 
@@ -58,6 +60,11 @@ def format_pr_text(pr_status: str | None, github_base_url: str | None) -> Text:
     return Text(display, style=style)
 
 
+def _tree_url(github_base_url: str, branch_name: str) -> str:
+    """Branch URL, percent-encoded: a `]` in the name would close the link tag early."""
+    return f"{github_base_url}/tree/{quote(branch_name, safe='/')}"
+
+
 def format_branch_link(
     branch_name: str, github_base_url: str | None, is_current: bool = False
 ) -> str:
@@ -77,7 +84,7 @@ def format_branch_link(
     if not github_base_url:
         return display_name
 
-    return f"[link={github_base_url}/tree/{branch_name}]{display_name}[/link]"
+    return f"[link={_tree_url(github_base_url, branch_name)}]{display_name}[/link]"
 
 
 def format_branch_link_with_indent(
@@ -105,4 +112,4 @@ def format_branch_link_with_indent(
         return f"{indent}{display_name}"
 
     # Add indent before the link
-    return f"{indent}[link={github_base_url}/tree/{branch_name}]{display_name}[/link]"
+    return f"{indent}[link={_tree_url(github_base_url, branch_name)}]{display_name}[/link]"

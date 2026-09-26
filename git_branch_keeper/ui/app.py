@@ -43,6 +43,7 @@ from git_branch_keeper.models.branch import (
     BranchStatus,
 )
 from git_branch_keeper.services.branch_validation_service import BranchValidationService
+from git_branch_keeper.services.git.worktrees import WorktreeService
 from git_branch_keeper.services.undo_service import pick_latest_batch, restore_entries
 from git_branch_keeper.ui.screens import (
     ConfirmationPrompt,
@@ -628,10 +629,12 @@ class BranchKeeperApp(App):
             last_commit,
             age_display,
             changes,
-            branch.sync_status or "",
+            # Text, not str: DataTable parses plain strings as markup, and notes carry
+            # worktree paths and git error output.
+            Text(branch.sync_status or ""),
             location,
             pr_display,
-            branch.notes or "",
+            Text(branch.notes or ""),
         )
 
     def _populate_table(self) -> None:
@@ -737,6 +740,13 @@ class BranchKeeperApp(App):
                 logger.debug(f"[MARK_WITH_HIERARCHY] {branch.name} is protected")
                 return False, "Cannot mark protected branch"
 
+            # Only cleanup candidates can be marked. Confirm filters branches through
+            # is_deletable, but marking a branch also marks its worktree row, so an
+            # ACTIVE branch's clean worktree used to be removed (with any ignored
+            # files, like .env) while the branch itself was silently skipped.
+            if not is_force and not self._is_markable_status(branch):
+                return False, "Can only mark stale or merged branches"
+
             # Check uncommitted changes (unless force mode)
             if not is_force:
                 has_uncommitted = (
@@ -761,6 +771,16 @@ class BranchKeeperApp(App):
             mark_set.add(branch.name)
 
         return True, None
+
+    @staticmethod
+    def _is_markable_status(branch: BranchDetails) -> bool:
+        """Whether a row's status makes it a cleanup candidate for a normal mark."""
+        if branch.is_worktree:
+            return WorktreeService.is_worktree_removable(branch)
+        return branch.worktree_is_orphaned or branch.status in (
+            BranchStatus.STALE,
+            BranchStatus.MERGED,
+        )
 
     def _unmark_with_hierarchy(self, branch_name: str) -> None:
         """Unmark a branch and all related items from both sets.
@@ -1127,11 +1147,20 @@ class BranchKeeperApp(App):
             items.append(f"• {name} · {scope}{force}")
 
         count = len(branches_by_name)
+        sections = [ConfirmationSection("Branches", "\n".join(items))]
+        if self.keeper.dry_run:
+            sections.append(
+                ConfirmationSection(
+                    "Dry run",
+                    "Safety checks run, but nothing is deleted.",
+                    tone="scope",
+                )
+            )
         return ConfirmationPrompt(
-            title="Confirm deletion",
+            title="Confirm deletion (dry run)" if self.keeper.dry_run else "Confirm deletion",
             question=f"Delete {local_count} local and {remote_count} remote branches?",
             confirm_label=f"Delete {count}",
-            sections=(ConfirmationSection("Branches", "\n".join(items)),),
+            sections=tuple(sections),
             default_confirm=True,
         )
 
@@ -1151,7 +1180,8 @@ class BranchKeeperApp(App):
 
                 for branch in matching:
                     if branch.is_worktree:
-                        worktrees.append(branch)
+                        if is_force or WorktreeService.is_worktree_removable(branch):
+                            worktrees.append(branch)
                     elif (
                         branch.worktree_is_orphaned
                         or is_force
@@ -1251,6 +1281,23 @@ class BranchKeeperApp(App):
                 all_removed_worktrees.extend(removed)
                 all_failed_worktrees.extend(failed_w)
 
+            total_success = len(all_deleted_branches) + len(all_removed_worktrees)
+
+            if self.keeper.dry_run:
+                # Every guard ran, but nothing was touched: keep the rows and marks, and
+                # say so. Reporting "deleted N (press u to undo)" here offered an undo
+                # for deletions that never happened.
+                if total_success > 0:
+                    self._set_status_message(
+                        (
+                            f"Dry run: would remove {len(all_removed_worktrees)} worktrees "
+                            f"and delete {len(all_deleted_branches)} branches - nothing changed"
+                        ),
+                        severity="warning",
+                    )
+                self._show_deletion_failures(all_failed_branches, all_failed_worktrees)
+                return
+
             # Remove deleted/removed items from our list
             if all_deleted_branches or all_removed_worktrees:
                 self._loaded_views = {self.branch_view}
@@ -1272,9 +1319,6 @@ class BranchKeeperApp(App):
             self._update_status()
 
             # Show results
-            total_success = len(all_deleted_branches) + len(all_removed_worktrees)
-            total_failed = len(all_failed_branches) + len(all_failed_worktrees)
-
             if total_success > 0:
                 undo_hint = " (press u to undo)" if all_deleted_branches else ""
                 self._set_status_message(
@@ -1285,18 +1329,7 @@ class BranchKeeperApp(App):
                     severity="success",
                 )
 
-            if total_failed > 0:
-                failed_list = []
-                for branch_name, error in all_failed_branches:
-                    failed_list.append(f"  • {branch_name}: {error}")
-                for wt_path, error in all_failed_worktrees:
-                    failed_list.append(f"  • {wt_path}: {error}")
-
-                error_msg = (
-                    f"Failed to delete {total_failed} item{'s' if total_failed > 1 else ''}:\n\n"
-                    + "\n".join(failed_list)
-                )
-                self.push_screen(InfoScreen(error_msg))
+            self._show_deletion_failures(all_failed_branches, all_failed_worktrees)
 
         except Exception as e:  # noqa: BLE001 - background worker must fail closed
             # Deliberately broad: this is a @work-decorated worker; an unexpected
@@ -1305,6 +1338,19 @@ class BranchKeeperApp(App):
             self.push_screen(InfoScreen(error_msg))
         finally:
             self._set_refreshing(False)
+
+    def _show_deletion_failures(self, failed_branches: list, failed_worktrees: list) -> None:
+        """List every branch and worktree that could not be deleted, if any."""
+        total_failed = len(failed_branches) + len(failed_worktrees)
+        if not total_failed:
+            return
+        failed_list = [f"  • {name}: {error}" for name, error in failed_branches]
+        failed_list += [f"  • {path}: {error}" for path, error in failed_worktrees]
+        error_msg = (
+            f"Failed to delete {total_failed} item{'s' if total_failed > 1 else ''}:\n\n"
+            + "\n".join(failed_list)
+        )
+        self.push_screen(InfoScreen(error_msg))
 
     def _repo_path(self) -> str:
         """Return the working repository path for undo/restore operations."""

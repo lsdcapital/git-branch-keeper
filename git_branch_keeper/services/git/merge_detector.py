@@ -204,8 +204,6 @@ class MergeDetector:
             branch_diff = repo.git.diff(
                 f"{merge_bases[0].hexsha}..{rev}",
                 "--no-color",
-                "--ignore-space-change",
-                "--ignore-blank-lines",
             )
             branch_patch_id = self._patch_id_for_diff(branch_diff)
             matched_patch_id = self._patch_id_for_diff(self._commit_diff(repo, matched.hexsha))
@@ -242,13 +240,20 @@ class MergeDetector:
             return 500
 
     def _patch_id_for_diff(self, diff: str) -> str | None:
-        """Return git's stable patch-id for a diff, or None if no patch-id exists."""
+        """Return git's stable, whitespace-preserving patch-id for a diff, or None.
+
+        `--verbatim` (git >= 2.39, implies `--stable`) keeps whitespace. The default
+        strips it from every line, so re-indenting code inside a file the branch
+        adds hashes identically to the squash commit that predates the re-indent.
+        On older git the option is rejected and this returns None, which disables
+        squash detection rather than risking that false "merged".
+        """
         if not diff.strip():
             return None
 
         try:
             result = subprocess.run(
-                ["git", "patch-id", "--stable"],
+                ["git", "patch-id", "--verbatim"],
                 cwd=self.repo_path,
                 input=diff,
                 text=True,
@@ -269,13 +274,16 @@ class MergeDetector:
         return output.split()[0]
 
     def _commit_diff(self, repo, commit_sha: str) -> str:
-        """Return a commit's diff using the flags squash detection compares on."""
+        """Return a commit's diff using the flags squash detection compares on.
+
+        No `--ignore-space-change` / `--ignore-blank-lines`: they drop whitespace-only
+        hunks, so a later re-indent (a behavior change in Python or YAML) would vanish
+        and the branch would exact-match the squash commit. See `_patch_id_for_diff`.
+        """
         return repo.git.show(
             commit_sha,
             "--no-color",
             "--format=",
-            "--ignore-space-change",
-            "--ignore-blank-lines",
         )
 
     def _main_commit_signature(self, repo, commit_sha: str) -> tuple[str | None, int]:
@@ -532,12 +540,26 @@ class MergeDetector:
 
             # %gs is the reflog subject, newest first.
             reflog = repo.git.reflog("show", "--format=%gs", branch_name).strip()
+            remote_names = [remote.name for remote in repo.remotes]
         except (*GIT_ERRORS, ValueError) as e:
             logger.debug(f"[unstarted] Error for {branch_name}: {e}")
             return False
 
         entries = [line for line in reflog.splitlines() if line.strip()]
-        if len(entries) != 1 or not entries[0].startswith("branch: Created from"):
+        prefix = "branch: Created from "
+        if len(entries) != 1 or not entries[0].startswith(prefix):
+            return False
+
+        # A branch checked out from a remote-tracking ref (`git checkout feat` to
+        # review a PR records "Created from refs/remotes/origin/feat") carries someone
+        # else's history, so one creation entry proves nothing about whether work
+        # happened on it. After that PR merges it would otherwise read UNSTARTED and
+        # never be offered for cleanup. Fall back to ordinary merge detection.
+        source = entries[0][len(prefix) :].strip()
+        if source.startswith("refs/remotes/") or any(
+            source.startswith(f"{name}/") for name in remote_names
+        ):
+            logger.debug(f"[unstarted] {branch_name} was created from remote ref {source}")
             return False
 
         logger.debug(f"[unstarted] {branch_name} was created from main and never moved")
@@ -677,8 +699,6 @@ class MergeDetector:
             branch_diff = repo.git.diff(
                 f"{base_sha}..{rev}",
                 "--no-color",
-                "--ignore-space-change",
-                "--ignore-blank-lines",
             )
             if not branch_diff:
                 return False

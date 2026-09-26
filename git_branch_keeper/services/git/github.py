@@ -16,6 +16,7 @@ from rich.console import Console
 
 from git_branch_keeper.exceptions import GITHUB_ERRORS, GitHubAPIError
 from git_branch_keeper.utils.logging import get_logger
+from git_branch_keeper.utils.patterns import is_protected_name
 
 if TYPE_CHECKING:
     from github.Repository import Repository
@@ -250,7 +251,9 @@ class GitHubService:
 
             org_name = self.github_repo.split("/")[0]
 
-            if branch_name in self.config.get("protected_branches", ["main", "master"]):
+            if is_protected_name(
+                branch_name, self.config.get("protected_branches", ["main", "master"])
+            ):
                 # For protected branches, fetch PRs targeting this branch. Protected
                 # branches are merge targets, not source branches to be cleaned up.
                 branch_prs = list(self.gh_repo.get_pulls(state="all", base=branch_name))
