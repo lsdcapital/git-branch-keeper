@@ -953,6 +953,53 @@ async def test_view_buttons_filter_without_duplicating_paired_refs(make_app):
         assert remote not in app.branches
 
 
+async def test_table_keeps_focus_over_view_buttons(make_app):
+    app = make_app([_branch("feature/a")], view="local")
+    async with app.run_test() as pilot:
+        table = app.query_one(DataTable)
+        assert app.focused is table
+        await pilot.press("tab")
+        assert app.focused is table
+
+        # The cold-start loader drops focus; ending the load must restore it.
+        app._set_refreshing(True, show_initial_loader=True)
+        await pilot.pause()
+        app._set_refreshing(False)
+        await pilot.pause()
+        assert app.focused is table
+
+
+async def test_view_round_trip_restores_column_widths(make_app):
+    local = _branch("feature/short")
+    remote = _branch("feature/" + "long-remote-name-" * 3, has_local=False, has_remote=True)
+    app = make_app([local, remote], view="local")
+    async with app.run_test(size=(200, 24)) as pilot:
+        table = app.query_one(DataTable)
+        local_width = table.columns["branch"].get_render_width(table)
+        await pilot.click("#view-remote")
+        assert table.columns["branch"].get_render_width(table) > local_width
+        await pilot.click("#view-local")
+        assert table.columns["branch"].get_render_width(table) == local_width
+
+
+async def test_scoped_analysis_keeps_one_sort_order_across_views(make_app):
+    both = _branch("c-both", has_remote=True)
+    local = _branch("a-local")
+    remote = _branch("b-remote", has_local=False, has_remote=True)
+    app = make_app([both, local, remote], view="local")
+    async with app.run_test() as pilot:
+        # A remote-scoped result is appended after the retained local rows.
+        await pilot.click("#view-remote")
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=[both, remote], is_complete=False),
+            preserve_view=True,
+        )
+        await pilot.click("#view-local")
+        assert [b.name for b in app.branches] == ["a-local", "c-both"]
+        await pilot.click("#view-all")
+        assert [b.name for b in app.branches] == ["a-local", "b-remote", "c-both"]
+
+
 async def test_filtered_cursor_marks_visible_row_and_switch_clears_force_marks(make_app):
     local = _branch("a-local")
     remote = _branch("z-remote", has_local=False, has_remote=True)

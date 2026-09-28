@@ -1186,6 +1186,10 @@ class BranchKeeper:
                     0 if is_protected_name(b.name, self.protected_branches) else 1,
                     b.age_days if not reverse else -b.age_days,
                     -date_to_int(b.last_commit_date),  # Negative for newest-first
+                    # Dates are day-granular and rows arrive from concurrent
+                    # workers, so ties need a stable key or order varies per run.
+                    b.name.lower(),
+                    b.is_worktree,
                 )
             )
         elif sort_by == "date":
@@ -1216,6 +1220,8 @@ class BranchKeeper:
                     ),
                     b.age_days if not reverse else -b.age_days,
                     -date_to_int(b.last_commit_date),
+                    b.name.lower(),
+                    b.is_worktree,
                 )
             )
 

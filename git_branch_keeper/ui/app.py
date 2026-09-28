@@ -236,12 +236,17 @@ class BranchKeeperApp(App):
     def compose(self) -> ComposeResult:
         """Create child widgets."""
         yield NonExpandingHeader(show_clock=True, icon="")
-        yield Horizontal(
+        # The view buttons are mouse targets only (`v` cycles from the keyboard).
+        # Focusable, they sat ahead of the table in the focus chain and took focus
+        # whenever the table gave it up, e.g. under the cold-start loading overlay.
+        view_buttons = [
             Button("Local", id="view-local"),
             Button("Remote", id="view-remote"),
             Button("All", id="view-all"),
-            id="view-selector",
-        )
+        ]
+        for button in view_buttons:
+            button.can_focus = False
+        yield Horizontal(*view_buttons, id="view-selector")
         yield DataTable(id="branch-table", cursor_type="row", zebra_stripes=True)
         yield Container(
             Static(id="status-scope", classes="status-row"),
@@ -310,6 +315,10 @@ class BranchKeeperApp(App):
             ]
         else:
             self.branches = analysis.branches
+        if self.branch_view != "all":
+            # Retained rows from other views were prepended; restore one order so a
+            # view reads the same whichever path last populated it.
+            self.branches = self.keeper.sort_branches(self._all_branches)
         if analysis.is_complete:
             # A scoped refresh may change a paired ref's location. Re-read other
             # scopes when next opened rather than trusting their retained rows.
@@ -473,6 +482,10 @@ class BranchKeeperApp(App):
                 )
         else:
             table.loading = False
+            # The loading overlay takes focus off the table; hand it back unless
+            # something else (e.g. a modal) has claimed it meanwhile.
+            if self.focused is None:
+                table.focus()
             self.analysis_progress = None
             self.operation_label = "Refreshing"
         self._update_status()
@@ -641,6 +654,12 @@ class BranchKeeperApp(App):
         """Add branch data to table."""
         table = self.query_one(DataTable)
         table.clear()
+        # clear() keeps columns, and an auto-width column's content_width only
+        # ever grows, so a long name seen in one view would widen every other
+        # view for the rest of the session. Shrink back to the header first.
+        for column in table.columns.values():
+            if column.auto_width:
+                column.content_width = column.label.cell_len
         for view in ("local", "remote", "all"):
             button = self.query_one(f"#view-{view}", Button)
             button.variant = "primary" if view == self.branch_view else "default"
