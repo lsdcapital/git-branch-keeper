@@ -930,7 +930,7 @@ async def test_default_view_is_local_and_retains_hidden_remote_rows(git_repo):
         assert app.marked_branches == set()
         assert app.keeper.delete_remote is False
         assert app.query_one(DataTable).get_cell(remote.name, "cleanup").plain == (
-            "remote deletion is disabled"
+            "press d for remote cleanup"
         )
 
 
@@ -967,6 +967,45 @@ async def test_table_keeps_focus_over_view_buttons(make_app):
         app._set_refreshing(False)
         await pilot.pause()
         assert app.focused is table
+
+
+async def test_revisiting_a_loaded_view_does_not_reanalyze(make_app, monkeypatch):
+    local = _branch("a-local")
+    remote = _branch("b-remote", has_local=False, has_remote=True)
+    app = make_app([local, remote], view="local")
+    loads = []
+    monkeypatch.setattr(app, "load_initial_data", lambda: loads.append(app.branch_view))
+    app._loaded_views = set()
+    async with app.run_test() as pilot:
+        app._apply_analysis_result(BranchAnalysisResult(branches=[local]), preserve_view=True)
+        await pilot.press("v")
+        assert loads == ["remote"]
+        app._apply_analysis_result(BranchAnalysisResult(branches=[remote]), preserve_view=True)
+        await pilot.press("v", "v", "v", "v")
+        # All is Local + Remote, and neither is re-read on a revisit.
+        assert loads == ["remote"]
+
+        # `r` makes rows retained for other views older than this one.
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=[remote]),
+            preserve_view=True,
+            invalidate_other_views=True,
+        )
+        assert app._loaded_views == {"remote"}
+
+
+async def test_scoped_result_replaces_stale_row_retained_from_other_view(make_app):
+    remote_only = _branch("feature/x", has_local=False, has_remote=True)
+    app = make_app([_branch("a-local"), remote_only], view="local")
+    async with app.run_test():
+        # Since the Remote view was read, feature/x was checked out locally.
+        checked_out = _branch("feature/x", has_remote=True)
+        app._apply_analysis_result(
+            BranchAnalysisResult(branches=[_branch("a-local"), checked_out]),
+            preserve_view=True,
+        )
+        rows = [b for b in app._all_branches if b.name == "feature/x"]
+        assert rows == [checked_out]
 
 
 async def test_view_round_trip_restores_column_widths(make_app):
@@ -1078,7 +1117,7 @@ async def test_remote_status_explains_history_and_scope(make_app):
     async with app.run_test() as pilot:
         table = app.query_one(DataTable)
         assert table.get_cell(merged.name, "status").plain == "merged"
-        assert table.get_cell(merged.name, "cleanup").plain == "remote deletion is disabled"
+        assert table.get_cell(merged.name, "cleanup").plain == "press d for remote cleanup"
         assert table.get_cell(stale.name, "status").plain == "stale"
         assert table.get_cell(stale.name, "cleanup").plain == "merge not confirmed"
         assert table.get_cell(ambiguous.name, "status").plain == "already in main"

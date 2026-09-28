@@ -774,7 +774,7 @@ def test_blocked_summary_names_the_reason(repo_with_remote):
 
     output = "\n".join(printed)
     assert "No branches or worktrees to clean up!" in output
-    assert "2 remote deletion is disabled" in output
+    assert "2 remote-only: needs --remote" in output
 
     keeper.delete_remote = True
     printed.clear()

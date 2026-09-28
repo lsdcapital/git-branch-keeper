@@ -75,9 +75,9 @@ command-line `--refresh` retains its fetch/prune behavior before launching the T
 | `already in main` | Remote tip is reachable from main, but merge history is unclear | No automatic cleanup |
 
 The separate **Cleanup** column explains why a row cannot be cleaned up. For
-example, a merged remote branch can say “remote deletion is disabled”; a stale
-remote branch can say “merge not confirmed.” Neither restriction replaces its
-underlying status.
+example, a merged remote branch says “press d for remote cleanup” in the TUI
+(“remote-only: needs --remote” in the CLI); a stale remote branch can say
+“merge not confirmed.” Neither restriction replaces its underlying status.
 
 ### Understanding Sync Status
 

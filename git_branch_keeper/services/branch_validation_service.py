@@ -7,6 +7,11 @@ from collections import Counter
 from git_branch_keeper.models.branch import BranchDetails, BranchStatus
 from git_branch_keeper.utils.patterns import is_protected_name
 
+# Say how to opt in, not that something is "disabled": the rows this applies to
+# are the merged remote-only branches, i.e. exactly the ones remote cleanup would
+# delete, so a reason that read as broken hid the only actionable rows.
+REMOTE_CLEANUP_NOT_ENABLED = "remote-only: needs --remote"
+
 
 class BranchValidationService:
     """Service for validating branch operations."""
@@ -77,7 +82,7 @@ class BranchValidationService:
         ):
             return "remote-only and not confirmed merged"
         if not branch.has_local and not allow_remote_deletion:
-            return "remote deletion is disabled"
+            return REMOTE_CLEANUP_NOT_ENABLED
         if is_protected_name(branch.name, protected_branches):
             return "protected"
         if current_branch is not None and branch.name == current_branch:

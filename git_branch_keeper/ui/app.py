@@ -286,6 +286,7 @@ class BranchKeeperApp(App):
         preserve_marks: bool = False,
         preserve_view: bool = False,
         mark_newly_deletable: bool = False,
+        invalidate_other_views: bool = False,
     ) -> None:
         """Apply shared branch analysis output to the TUI widgets.
 
@@ -296,6 +297,11 @@ class BranchKeeperApp(App):
         that second pass was never offered to the user, so it still needs its
         auto-mark. Without it a branch merged since the previous run shows up as
         `merged` but stays unmarked until the next launch.
+
+        `invalidate_other_views` is for `r`: it bypasses the cache and syncs
+        remotes, so rows retained for other views are now older than this one and
+        are re-read when next opened. Ordinary loads leave loaded views alone, so
+        switching back to a view is a filter, not a fresh analysis.
         """
         table_view = self._capture_table_view() if preserve_view else None
         previously_deletable = (
@@ -303,13 +309,25 @@ class BranchKeeperApp(App):
         )
 
         self.analysis = analysis
+        # A retained row whose branch this result also covers is stale: e.g. a
+        # remote-only row kept while in Remote view, since checked out locally.
+        # Keeping it would list the branch twice.
+        fresh_names = {b.name for b in analysis.branches if not b.is_worktree}
         if self.branch_view == "local":
-            hidden_rows = [b for b in self._all_branches if not b.has_local and not b.is_worktree]
+            hidden_rows = [
+                b
+                for b in self._all_branches
+                if not b.has_local and not b.is_worktree and b.name not in fresh_names
+            ]
             self.branches = hidden_rows + [
                 b for b in analysis.branches if b.has_local or b.is_worktree
             ]
         elif self.branch_view == "remote":
-            hidden_rows = [b for b in self._all_branches if not b.has_remote or b.is_worktree]
+            hidden_rows = [
+                b
+                for b in self._all_branches
+                if (not b.has_remote and b.name not in fresh_names) or b.is_worktree
+            ]
             self.branches = hidden_rows + [
                 b for b in analysis.branches if b.has_remote and not b.is_worktree
             ]
@@ -320,11 +338,14 @@ class BranchKeeperApp(App):
             # view reads the same whichever path last populated it.
             self.branches = self.keeper.sort_branches(self._all_branches)
         if analysis.is_complete:
-            # A scoped refresh may change a paired ref's location. Re-read other
-            # scopes when next opened rather than trusting their retained rows.
-            self._loaded_views = {self.branch_view}
+            if invalidate_other_views:
+                self._loaded_views = set()
+            self._loaded_views.add(self.branch_view)
             if self.branch_view == "all":
                 self._loaded_views.update(("local", "remote"))
+            elif {"local", "remote"} <= self._loaded_views:
+                # All is exactly Local + Remote; both are current, so is it.
+                self._loaded_views.add("all")
 
         if preserve_marks:
             existing_names = {branch.name for branch in self.branches}
@@ -637,6 +658,7 @@ class BranchKeeperApp(App):
                     allow_remote_deletion=self._remote_deletion_allowed(branch),
                     remote_deletion_enabled=self.keeper.delete_remote
                     and self.branch_view != "local",
+                    remote_opt_in_hint="press d for remote cleanup",
                 )
             ),
             last_commit,
@@ -1700,6 +1722,7 @@ class BranchKeeperApp(App):
                     analysis,
                     preserve_marks=True,
                     preserve_view=True,
+                    invalidate_other_views=True,
                 )
 
                 if remote_sync_error:
@@ -1710,7 +1733,9 @@ class BranchKeeperApp(App):
                 else:
                     self._set_status_message("Branch data refreshed", severity="success")
             else:
-                self._apply_analysis_result(analysis, preserve_view=True)
+                self._apply_analysis_result(
+                    analysis, preserve_view=True, invalidate_other_views=True
+                )
                 self._set_status_message("No branches found", severity="warning")
 
         except Exception as e:

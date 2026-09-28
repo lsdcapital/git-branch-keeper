@@ -64,9 +64,17 @@ def format_cleanup_reason(
     current_branch: str | None = None,
     allow_remote_deletion: bool = False,
     remote_deletion_enabled: bool = False,
+    remote_opt_in_hint: str | None = None,
 ) -> str:
-    """Explain eligibility without hiding the branch's merge/stale status."""
-    from git_branch_keeper.services.branch_validation_service import BranchValidationService
+    """Explain eligibility without hiding the branch's merge/stale status.
+
+    `remote_opt_in_hint` replaces the CLI flag in the "needs --remote" reason for
+    surfaces that opt in differently (the TUI's `d` key).
+    """
+    from git_branch_keeper.services.branch_validation_service import (
+        REMOTE_CLEANUP_NOT_ENABLED,
+        BranchValidationService,
+    )
 
     if is_protected_name(branch.name, protected_branches):
         return "protected"
@@ -86,8 +94,11 @@ def format_cleanup_reason(
         current_branch,
         allow_remote_deletion=allow_remote_deletion,
     )
-    if reason == "remote deletion is disabled" and remote_deletion_enabled:
-        return "outside selected remote scope"
+    if reason == REMOTE_CLEANUP_NOT_ENABLED:
+        if remote_deletion_enabled:
+            return "outside selected remote scope"
+        if remote_opt_in_hint:
+            return remote_opt_in_hint
     if reason == "remote-only and not confirmed merged":
         return "merge not confirmed"
     return reason or ""

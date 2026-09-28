@@ -44,7 +44,7 @@ first open Remote or All. Pressing `r` refreshes the current view; Local refresh
 does not fetch the remote. Local branches still receive their normal PR checks.
 
 **Status** describes branch history; **Cleanup** explains restrictions such as
-“remote deletion is disabled” or “merge not confirmed.” Remote tips already
+“press d for remote cleanup” (CLI: “needs --remote”) or “merge not confirmed.” Remote tips already
 reachable from main with uncertain merge history display **already in main**
 instead of **unstarted**; this label alone does not authorize cleanup.
 
