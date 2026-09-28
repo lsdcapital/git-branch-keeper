@@ -112,3 +112,26 @@ def test_batch_deletion_does_not_prune_after_declining_broken_worktree(linked_wo
     assert "Broken worktree" in failed_worktrees[0][1]
     assert str(path) in repo.git.worktree("list", "--porcelain")
     assert (path / "README.md").exists()
+
+
+def test_worktree_removed_and_pruned_outside_gbk_counts_as_removed(linked_worktree):
+    """The TUI can hold a worktree row while the worktree is removed elsewhere."""
+    repo, path, service = linked_worktree
+    service.get_worktree_info()
+    repo.git.worktree("remove", str(path))
+
+    assert service.remove_worktree(str(path)) == (True, None)
+    assert all(Path(wt.path) != path for wt in service.get_worktree_info())
+
+
+def test_unregistered_directory_is_left_untouched(linked_worktree):
+    repo, path, service = linked_worktree
+    repo.git.worktree("remove", str(path))
+    path.mkdir()
+    (path / "valuable.txt").write_text("keep me")
+
+    success, error = service.remove_worktree(str(path), force=True)
+
+    assert not success
+    assert "No longer a registered worktree" in error
+    assert (path / "valuable.txt").read_text() == "keep me"

@@ -315,7 +315,18 @@ class WorktreeService:
                     (wt for wt in entries if os.path.realpath(wt.path) == os.path.realpath(path)),
                     None,
                 )
-                if entry is not None and not entry.is_main:
+                if entry is None:
+                    # Removed and pruned outside GBK after analysis (the TUI can sit
+                    # on a worktree row indefinitely). Git would only answer "is not
+                    # a working tree", reporting a failure for a worktree that is gone.
+                    self.clear_cache()
+                    if not os.path.lexists(path):
+                        logger.info(f"Worktree at {path} was already removed")
+                        return True, None
+                    return False, (
+                        "No longer a registered worktree; its directory was left untouched"
+                    )
+                if not entry.is_main:
                     if os.path.lexists(path) and not force:
                         return False, (
                             "Broken worktree: its .git file is missing. Remaining files were "

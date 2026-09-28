@@ -11,7 +11,7 @@ import git
 from rich.console import Console
 from rich.markup import escape
 
-from git_branch_keeper.exceptions import GIT_ERRORS, BranchMovedError
+from git_branch_keeper.exceptions import GIT_ERRORS, BranchMovedError, LocalDeletionRefusedError
 from git_branch_keeper.services.deletion_journal import DeletionJournal
 from git_branch_keeper.services.git.branch_queries import BranchQueries
 from git_branch_keeper.services.git.merge_detector import MergeDetector
@@ -306,21 +306,42 @@ class GitOperations:
     def _git_can_verify_deletion(self, repo, branch_name: str) -> bool:
         """Whether `git branch -d` would accept this branch on its own.
 
-        `-d` refuses anything not reachable from HEAD (or the branch's upstream), so
-        it can only vouch for ordinary merges and fast-forwards. Rebase- and
-        squash-merged branches are genuinely unreachable and always need `-D`; using
-        `-d` where it *can* answer keeps git as an independent check on GBK's own
-        merge detection, without turning legitimate cleanups into failures.
+        `-d` refuses anything not reachable from its reference, so it can only vouch
+        for ordinary merges and fast-forwards. Rebase- and squash-merged branches are
+        genuinely unreachable and always need `-D`; using `-d` where it *can* answer
+        keeps git as an independent check on GBK's own merge detection, without
+        turning legitimate cleanups into failures.
+
+        The reference is the branch's upstream when one is set and resolves, and HEAD
+        only otherwise - not both. A branch fast-forwarded into main but with a commit
+        never pushed is reachable from HEAD yet `-d` refuses it ("not yet merged to
+        refs/remotes/origin/x, even though it is merged to HEAD"). Predicting `-d`
+        from HEAD alone sent those to a `-d` that could never succeed.
         """
         try:
-            head_commit = repo.head.commit
-            branch_commit = repo.heads[branch_name].commit
+            branch = repo.heads[branch_name]
+            branch_commit = branch.commit
+        except (*GIT_ERRORS, ValueError, IndexError) as e:
+            logger.debug(f"Could not resolve {branch_name}: {e}")
+            return False
+
+        try:
+            upstream = branch.tracking_branch()
+            reference_commit = upstream.commit if upstream is not None else None
+        except (*GIT_ERRORS, ValueError, IndexError) as e:
+            # Configured upstream whose ref is gone: git falls back to HEAD too.
+            logger.debug(f"Upstream of {branch_name} does not resolve: {e}")
+            reference_commit = None
+
+        try:
+            if reference_commit is None:
+                reference_commit = repo.head.commit
         except (*GIT_ERRORS, ValueError, IndexError) as e:
             logger.debug(f"Could not compare {branch_name} against HEAD: {e}")
             return False
 
         try:
-            return repo.is_ancestor(branch_commit, head_commit)
+            return repo.is_ancestor(branch_commit, reference_commit)
         except GIT_ERRORS as e:
             logger.debug(f"Ancestry check failed for {branch_name}: {e}")
             return False
@@ -406,7 +427,12 @@ class GitOperations:
                 if not dry_run:
                     console.print(f"Deleting local branch {branch_name}...")
                     if self._git_can_verify_deletion(repo, branch_name):
-                        repo.delete_head(branch_name)
+                        try:
+                            repo.delete_head(branch_name)
+                        except git.exc.GitCommandError as e:
+                            raise LocalDeletionRefusedError(
+                                f"git branch -d refused: {self._git_error_detail(e)}"
+                            ) from e
                     else:
                         self._force_delete_local_branch(repo, branch_name, deleted_sha)
                     local_deleted = True
@@ -488,7 +514,7 @@ class GitOperations:
 
                 return True
 
-            except BranchMovedError:
+            except (BranchMovedError, LocalDeletionRefusedError):
                 # Nothing was deleted; let the caller report the real reason.
                 raise
             except Exception as e:  # noqa: BLE001 - deletion must fail closed

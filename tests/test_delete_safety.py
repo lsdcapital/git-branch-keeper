@@ -7,6 +7,7 @@ strength of the older answer.
 
 from pathlib import Path
 
+import git
 import pytest
 
 from git_branch_keeper.config import Config
@@ -169,6 +170,61 @@ def test_reachable_branch_is_deleted_with_the_safe_flag(merged_repo):
     success, error = keeper.delete_branch("feature/done", "merged")
     assert success is True, error
     assert "feature/done" not in [h.name for h in repo.heads]
+
+
+def test_fast_forwarded_branch_ahead_of_its_upstream_still_deletes(git_repo):
+    """`-d` checks the upstream, not HEAD, when one is set.
+
+    Commit, push, commit again, fast-forward main: the branch is merged into HEAD
+    but `-d` refuses it as "not yet merged to refs/remotes/origin/...". GBK used to
+    predict `-d` from HEAD and report the refusal as a generic failure.
+    """
+    repo = git_repo
+    origin = repo.remote("origin").url
+    repo.git.push("origin", "main")
+
+    repo.git.checkout("-b", "feature/ff")
+    _commit_onto(repo, "feature/ff", "pushed.txt")
+    repo.git.push("-u", "origin", "feature/ff")
+    tip = _commit_onto(repo, "feature/ff", "unpushed.txt")
+    repo.git.merge("--ff-only", "feature/ff")
+
+    keeper = _keeper(repo)
+    assert keeper.git_service._git_can_verify_deletion(repo, "feature/ff") is False
+
+    success, error = keeper.delete_branch("feature/ff", "merged")
+
+    assert success is True, error
+    assert "feature/ff" not in [h.name for h in repo.heads]
+    assert repo.commit("main").hexsha == tip
+    # Local-only by default: the pushed ref is kept.
+    assert "refs/heads/feature/ff" in git.Repo(origin).git.for_each_ref()
+
+
+def test_branch_merged_into_its_upstream_uses_the_safe_flag(merged_repo):
+    repo = merged_repo
+    repo.git.push("-u", "origin", "feature/done")
+
+    assert _keeper(repo).git_service._git_can_verify_deletion(repo, "feature/done") is True
+
+
+def test_refused_safe_delete_reports_gits_reason(merged_repo, monkeypatch):
+    repo = merged_repo
+    keeper = _keeper(repo)
+
+    def refuse(*_args, **_kwargs):
+        raise git.exc.GitCommandError(
+            ["git", "branch", "-d"], 1, stderr="error: the branch is not fully merged"
+        )
+
+    monkeypatch.setattr(git.Repo, "delete_head", refuse)
+
+    success, error = keeper.delete_branch("feature/done", "merged")
+
+    assert success is False
+    assert "not fully merged" in error
+    assert "protected remotely" not in error
+    assert "feature/done" in [h.name for h in repo.heads]
 
 
 def test_squash_merged_branch_still_deletes(git_repo):

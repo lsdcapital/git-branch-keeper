@@ -90,3 +90,11 @@ class BranchMovedError(GitBranchKeeperError):
     Raised through `GitOperations.delete_branch`'s fail-closed handler so the caller
     can report *why* the branch was kept, rather than a generic failure.
     """
+
+
+class LocalDeletionRefusedError(GitBranchKeeperError):
+    """`git branch -d` refused a branch GBK expected it to accept.
+
+    Nothing was deleted. Raised through `GitOperations.delete_branch`'s fail-closed
+    handler so the caller reports git's own reason rather than a generic failure.
+    """
