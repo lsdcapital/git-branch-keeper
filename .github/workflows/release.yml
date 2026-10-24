@@ -45,7 +45,10 @@ jobs:
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v3
       with:
-        files: dist/*
+        # Explicit globs: uv build also writes dist/.gitignore, which dist/* would upload.
+        files: |
+          dist/*.whl
+          dist/*.tar.gz
         generate_release_notes: true
         draft: false
         prerelease: false
