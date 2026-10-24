@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-24
+
 ### Added
 - Added installed command aliases: `gbk` and `git gbk` (via `git-gbk`).
 - **Deletion journal & `undo`**: every deleted branch is recorded with its tip SHA in
