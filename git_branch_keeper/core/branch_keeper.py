@@ -2309,10 +2309,6 @@ class BranchKeeper:
         """Clean up branches."""
         return self.process_branches(cleanup_enabled=True)
 
-    def update_main(self):
-        """Update the main branch from remote."""
-        return self.git_service.update_main_branch(self.main_branch)
-
     def close(self) -> None:
         """Clean up resources and close connections."""
         logger.debug("Closing BranchKeeper resources")
